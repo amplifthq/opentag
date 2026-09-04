@@ -251,6 +251,16 @@ function checkInstalledSqliteRuntime(installDir) {
       ) {
         throw new Error("Packed SQLite runtime is missing the bounded readiness-retention guard.");
       }
+      const lifecycleRetentionGuard = sqlite.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'hosted_lifecycle_operations_delete_guard'"
+      ).get();
+      if (
+        !lifecycleRetentionGuard?.sql?.includes("OLD.action IN ('heartbeat', 'progress')")
+        || !lifecycleRetentionGuard.sql.includes("successor.state = 'acknowledged'")
+        || !lifecycleRetentionGuard.sql.includes("successor.sequence > OLD.sequence")
+      ) {
+        throw new Error("Packed SQLite runtime is missing the bounded lifecycle-retention guard.");
+      }
     } finally {
       sqlite.close();
     }

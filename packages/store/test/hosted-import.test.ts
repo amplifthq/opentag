@@ -487,8 +487,11 @@ async function runningRequest(claim: HostedClaimV1): Promise<HostedRunningReques
         executorCapabilityDigest: claim.authority.executorCapabilityDigest
     }) as HostedRunningRequestV1;
 }
-async function progressRequest(claim: HostedClaimV1): Promise<HostedProgressRequestV1> {
-    const progressDigest = await computeControlPayloadDigestV1({ type: "status", occurredAt: observedAt });
+async function progressRequest(
+    claim: HostedClaimV1,
+    occurredAt = observedAt,
+): Promise<HostedProgressRequestV1> {
+    const progressDigest = await computeControlPayloadDigestV1({ type: "status", occurredAt });
     return await buildHostedLifecycleRequestV1({
         action: "progress",
         organizationId: claim.organizationId,
@@ -501,10 +504,114 @@ async function progressRequest(claim: HostedClaimV1): Promise<HostedProgressRequ
             fencingToken: claim.attempt.fencingToken,
             fencingTokenDigest: claim.attempt.fencingTokenDigest
         },
-        occurredAt: observedAt,
+        occurredAt,
         progressId: `progress_${progressDigest.slice("sha256:".length)}`,
         progressDigest
     }) as HostedProgressRequestV1;
+}
+async function progressReceipt(input: {
+    claim: HostedClaimV1;
+    request: HostedProgressRequestV1;
+}): Promise<HostedLifecycleReceiptEnvelopeV1> {
+    const payload = {
+        operation: "progress" as const,
+        occurredAt: input.request.occurredAt,
+        progressId: input.request.progressId,
+        progressDigest: input.request.progressDigest,
+    };
+    const base = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        receiptKind: "attempt_lifecycle" as const,
+        receiptId: await computeHostedLifecycleReceiptIdV1({
+            organizationId: input.claim.organizationId,
+            operationId: input.request.operationId,
+        }),
+        organizationId: input.claim.organizationId,
+        requestId: input.request.requestId,
+        operationId: input.request.operationId,
+        requestDigest: input.request.requestDigest,
+        requiredCapabilities: ["relay.lifecycle.v1"] as const,
+        producer: {
+            kind: "runner" as const,
+            id: input.claim.runnerId,
+            credentialId: input.claim.authority.credentialId,
+        },
+        identity: {
+            namespace: "opentag.control.receipt/attempt-lifecycle/v1" as const,
+            parts: [
+                input.claim.organizationId,
+                input.claim.runId,
+                input.claim.attempt.id,
+                "progress" as const,
+                input.request.operationId,
+            ] as const,
+        },
+        observedAt: input.request.occurredAt,
+        payloadDigest: await computeControlPayloadDigestV1(payload),
+        runId: input.claim.runId,
+        attempt: {
+            attemptId: input.claim.attempt.id,
+            attemptNumber: input.claim.attempt.number,
+            epoch: input.claim.attempt.epoch,
+            fencingTokenDigest: input.claim.attempt.fencingTokenDigest,
+        },
+        payload,
+    };
+    return { ...base, receiptDigest: await computeControlReceiptDigestV1(base) };
+}
+async function claimLifecycleOperation(
+    repo: ReturnType<typeof createPairedRunnerRepository>,
+    operationId: string,
+    now: Date,
+) {
+    const claimed = await repo.claimDueHostedLifecycleOperations({
+        destinationId: "cloud-1",
+        organizationId: "org-1",
+        leaseOwner: "lifecycle-retention-pump",
+        leaseSeconds: 30,
+        now,
+    });
+    const operation = claimed.find((candidate) => candidate.operationId === operationId);
+    if (!operation?.leaseToken) throw new Error("lifecycle operation was not claimable");
+    return operation;
+}
+async function acknowledgeHeartbeat(input: {
+    repo: ReturnType<typeof createPairedRunnerRepository>;
+    claim: HostedClaimV1;
+    expectedLeaseExpiresAt: string;
+    acceptedLeaseExpiresAt: string;
+    now: Date;
+}) {
+    vi.setSystemTime(input.now);
+    const request = await heartbeatRequest({
+        claim: input.claim,
+        expectedLeaseExpiresAt: input.expectedLeaseExpiresAt,
+        occurredAt: input.now.toISOString(),
+    });
+    await input.repo.beginHostedHeartbeatOperation({
+        ...heartbeatAuthority,
+        runId: input.claim.runId,
+        attemptId: input.claim.attempt.id,
+        fencingToken: input.claim.attempt.fencingToken,
+        request,
+    });
+    const operation = await claimLifecycleOperation(input.repo, request.operationId, input.now);
+    const receipt = await heartbeatReceipt({
+        claim: input.claim,
+        request,
+        leaseExpiresAt: input.acceptedLeaseExpiresAt,
+    });
+    const outcome = await input.repo.acknowledgeHostedLifecycleOperation({
+        destinationId: "cloud-1",
+        organizationId: input.claim.organizationId,
+        operationId: request.operationId,
+        leaseToken: operation.leaseToken!,
+        receipt,
+        now: input.now,
+    });
+    if (outcome !== "acknowledged") throw new Error("heartbeat acknowledgement failed");
+    return { operation, receipt, request };
 }
 async function completeHostedExecution(
     repo: ReturnType<typeof createPairedRunnerRepository>,
@@ -2069,5 +2176,290 @@ describe("hosted heartbeat lease authority", () => {
             .get(value.claim.attempt.id)).toEqual({ lease_expires_at: "2026-08-10T00:04:00.000Z" });
         expect(sqlite.prepare("SELECT state FROM hosted_lifecycle_operations WHERE operation_id = ?")
             .get(nextRequest.operationId)).toEqual({ state: "leased" });
+    });
+    it("bounds acknowledged heartbeat and progress history while preserving sequence across restart", async () => {
+        vi.useFakeTimers();
+        const directory = await mkdtemp(join(tmpdir(), "opentag-lifecycle-retention-"));
+        tempDirs.push(directory);
+        const path = join(directory, "store.sqlite");
+        const initialNow = new Date("2026-08-10T00:01:00.000Z");
+        const initialLease = "2026-08-10T00:10:00.000Z";
+        vi.setSystemTime(initialNow);
+        const value = await fixture({ leaseExpiresAt: initialLease });
+        const firstSqlite = new Database(path);
+        migratePairedRunnerSchema(firstSqlite);
+        const first = createPairedRunnerRepository(drizzle(firstSqlite));
+        await begin(first, value);
+        await first.importHostedAssignedRun(value);
+        await startHostedExecution(first, value.claim);
+
+        let acceptedLease = initialLease;
+        let maximumHeartbeats = 0;
+        for (let index = 0; index < 128; index += 1) {
+            const now = new Date(initialNow.getTime() + (index + 1) * 1000);
+            const nextLease = new Date(Date.parse(initialLease) + (index + 1) * 60_000).toISOString();
+            await acknowledgeHeartbeat({
+                repo: first,
+                claim: value.claim,
+                expectedLeaseExpiresAt: acceptedLease,
+                acceptedLeaseExpiresAt: nextLease,
+                now,
+            });
+            acceptedLease = nextLease;
+            const { count } = firstSqlite.prepare(`
+        SELECT COUNT(*) AS count FROM hosted_lifecycle_operations
+        WHERE action = 'heartbeat'
+      `).get() as { count: number };
+            maximumHeartbeats = Math.max(maximumHeartbeats, count);
+        }
+        expect(maximumHeartbeats).toBe(1);
+        expect(firstSqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "heartbeat", state: "acknowledged", sequence: 129 },
+        ]);
+        firstSqlite.close();
+
+        const progressAt = new Date(initialNow.getTime() + 129_000);
+        vi.setSystemTime(progressAt);
+        const secondSqlite = new Database(path);
+        migratePairedRunnerSchema(secondSqlite);
+        const second = createPairedRunnerRepository(drizzle(secondSqlite));
+        await expect(second.getHostedExecutionLease({
+            ...heartbeatAuthority,
+            runId: value.claim.runId,
+            attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken,
+        })).resolves.toEqual({ leaseExpiresAt: acceptedLease });
+        const request = await progressRequest(value.claim, progressAt.toISOString());
+        await second.recordHostedProgressLocally({
+            ...heartbeatAuthority,
+            runId: value.claim.runId,
+            attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken,
+            message: "bounded progress",
+            at: progressAt.toISOString(),
+            idempotencyKey: "bounded-progress-after-restart",
+            request,
+        });
+        const operation = await claimLifecycleOperation(second, request.operationId, progressAt);
+        await expect(second.acknowledgeHostedLifecycleOperation({
+            destinationId: "cloud-1",
+            organizationId: value.claim.organizationId,
+            operationId: request.operationId,
+            leaseToken: operation.leaseToken!,
+            receipt: await progressReceipt({ claim: value.claim, request }),
+            now: progressAt,
+        })).resolves.toBe("acknowledged");
+        expect(secondSqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "progress", state: "acknowledged", sequence: 130 },
+        ]);
+        const heartbeatAfterProgressAt = new Date(initialNow.getTime() + 130_000);
+        const latestHeartbeat = await acknowledgeHeartbeat({
+            repo: second,
+            claim: value.claim,
+            expectedLeaseExpiresAt: acceptedLease,
+            acceptedLeaseExpiresAt: new Date(Date.parse(acceptedLease) + 60_000).toISOString(),
+            now: heartbeatAfterProgressAt,
+        });
+        await expect(second.recordHostedProgressLocally({
+            ...heartbeatAuthority,
+            runId: value.claim.runId,
+            attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken,
+            message: "replayed pruned progress",
+            at: request.occurredAt,
+            idempotencyKey: "different-key-cannot-revive-pruned-progress",
+            request,
+        })).rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_OPERATION_CONFLICT" });
+        expect(secondSqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "heartbeat", state: "acknowledged", sequence: 131 },
+        ]);
+        expect(secondSqlite.prepare(`
+      SELECT COUNT(*) AS count FROM run_events
+      WHERE type = 'run.progress'
+    `).get()).toEqual({ count: 1 });
+        expect(() => secondSqlite.prepare(`
+      DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
+    `).run(latestHeartbeat.request.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
+        secondSqlite.close();
+    });
+    it("rolls successor acknowledgement and retention back together, then replays after restart", async () => {
+        vi.useFakeTimers();
+        const directory = await mkdtemp(join(tmpdir(), "opentag-lifecycle-retention-crash-"));
+        tempDirs.push(directory);
+        const path = join(directory, "store.sqlite");
+        const initialNow = new Date("2026-08-10T00:01:00.000Z");
+        const initialLease = "2026-08-10T00:10:00.000Z";
+        vi.setSystemTime(initialNow);
+        const value = await fixture({ leaseExpiresAt: initialLease });
+        const firstSqlite = new Database(path);
+        migratePairedRunnerSchema(firstSqlite);
+        const first = createPairedRunnerRepository(drizzle(firstSqlite));
+        await begin(first, value);
+        await first.importHostedAssignedRun(value);
+        await startHostedExecution(first, value.claim);
+        const firstHeartbeat = await acknowledgeHeartbeat({
+            repo: first,
+            claim: value.claim,
+            expectedLeaseExpiresAt: initialLease,
+            acceptedLeaseExpiresAt: "2026-08-10T00:11:00.000Z",
+            now: new Date("2026-08-10T00:01:10.000Z"),
+        });
+
+        const secondHeartbeatAt = new Date("2026-08-10T00:01:20.000Z");
+        vi.setSystemTime(secondHeartbeatAt);
+        const secondRequest = await heartbeatRequest({
+            claim: value.claim,
+            expectedLeaseExpiresAt: "2026-08-10T00:11:00.000Z",
+            occurredAt: secondHeartbeatAt.toISOString(),
+        });
+        await first.beginHostedHeartbeatOperation({
+            ...heartbeatAuthority,
+            runId: value.claim.runId,
+            attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken,
+            request: secondRequest,
+        });
+        const lostResponseLease = await claimLifecycleOperation(
+            first,
+            secondRequest.operationId,
+            secondHeartbeatAt,
+        );
+        const secondReceipt = await heartbeatReceipt({
+            claim: value.claim,
+            request: secondRequest,
+            leaseExpiresAt: "2026-08-10T00:12:00.000Z",
+        });
+        expect(() => firstSqlite.prepare(`
+      DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
+    `).run(firstHeartbeat.request.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
+        firstSqlite.exec(`CREATE TRIGGER abort_lifecycle_retention
+      BEFORE DELETE ON hosted_lifecycle_operations
+      BEGIN SELECT RAISE(ABORT, 'injected lifecycle retention failure'); END;`);
+        await expect(first.acknowledgeHostedLifecycleOperation({
+            destinationId: "cloud-1",
+            organizationId: value.claim.organizationId,
+            operationId: secondRequest.operationId,
+            leaseToken: lostResponseLease.leaseToken!,
+            receipt: secondReceipt,
+            now: secondHeartbeatAt,
+        })).rejects.toThrow("injected lifecycle retention failure");
+        expect(firstSqlite.prepare(`
+      SELECT lease_expires_at AS leaseExpiresAt FROM attempts WHERE id = ?
+    `).get(value.claim.attempt.id)).toEqual({ leaseExpiresAt: "2026-08-10T00:11:00.000Z" });
+        expect(firstSqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "heartbeat", state: "acknowledged", sequence: 2 },
+            { action: "heartbeat", state: "leased", sequence: 3 },
+        ]);
+        firstSqlite.exec("DROP TRIGGER abort_lifecycle_retention");
+        firstSqlite.close();
+
+        const restartedAt = new Date("2026-08-10T00:01:50.000Z");
+        vi.setSystemTime(restartedAt);
+        const secondSqlite = new Database(path);
+        migratePairedRunnerSchema(secondSqlite);
+        const second = createPairedRunnerRepository(drizzle(secondSqlite));
+        await expect(second.recoverExpiredHostedLifecycleOperations({
+            destinationId: "cloud-1",
+            organizationId: "org-1",
+            now: restartedAt,
+        })).resolves.toBe(1);
+        const replay = await claimLifecycleOperation(second, secondRequest.operationId, restartedAt);
+        await expect(second.acknowledgeHostedLifecycleOperation({
+            destinationId: "cloud-1",
+            organizationId: value.claim.organizationId,
+            operationId: secondRequest.operationId,
+            leaseToken: replay.leaseToken!,
+            receipt: secondReceipt,
+            now: restartedAt,
+        })).resolves.toBe("acknowledged");
+        expect(secondSqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "heartbeat", state: "acknowledged", sequence: 3 },
+        ]);
+        expect(secondSqlite.prepare(`
+      SELECT lease_expires_at AS leaseExpiresAt FROM attempts WHERE id = ?
+    `).get(value.claim.attempt.id)).toEqual({ leaseExpiresAt: "2026-08-10T00:12:00.000Z" });
+        secondSqlite.close();
+    });
+    it("retains acknowledged predecessors while their successor needs attention", async () => {
+        vi.useFakeTimers();
+        const now = new Date("2026-08-10T00:01:00.000Z");
+        vi.setSystemTime(now);
+        const sqlite = new Database(":memory:");
+        migratePairedRunnerSchema(sqlite);
+        const repo = createPairedRunnerRepository(drizzle(sqlite));
+        const value = await fixture({ leaseExpiresAt: "2026-08-10T00:10:00.000Z" });
+        await begin(repo, value);
+        await repo.importHostedAssignedRun(value);
+        await startHostedExecution(repo, value.claim);
+        const heartbeat = await acknowledgeHeartbeat({
+            repo,
+            claim: value.claim,
+            expectedLeaseExpiresAt: "2026-08-10T00:10:00.000Z",
+            acceptedLeaseExpiresAt: "2026-08-10T00:11:00.000Z",
+            now: new Date("2026-08-10T00:01:10.000Z"),
+        });
+        const progressAt = new Date("2026-08-10T00:01:20.000Z");
+        vi.setSystemTime(progressAt);
+        const request = await progressRequest(value.claim, progressAt.toISOString());
+        await repo.recordHostedProgressLocally({
+            ...heartbeatAuthority,
+            runId: value.claim.runId,
+            attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken,
+            message: "attention progress",
+            at: progressAt.toISOString(),
+            idempotencyKey: "attention-progress",
+            request,
+        });
+        const progress = await claimLifecycleOperation(repo, request.operationId, progressAt);
+        await expect(repo.markHostedLifecycleOperationAttention({
+            destinationId: "cloud-1",
+            organizationId: "org-1",
+            operationId: progress.operationId,
+            leaseToken: progress.leaseToken!,
+            reasonCode: "outcome_unknown",
+            now: progressAt,
+        })).resolves.toBe("attention");
+        expect(sqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "heartbeat", state: "acknowledged", sequence: 2 },
+            { action: "progress", state: "attention", sequence: 3 },
+        ]);
+        expect(() => sqlite.prepare(`
+      DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
+    `).run(heartbeat.request.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
+        expect(() => sqlite.prepare(`
+      DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
+    `).run(progress.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
+        sqlite.close();
     });
 });

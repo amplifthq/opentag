@@ -1098,6 +1098,26 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
             return { outcome: "replayed", operation: hostedLifecycleOperationFromRow(existing) };
         }
+        if (input.action === "heartbeat" || input.action === "progress") {
+            const highWater = tx.select().from(hostedLifecycleOperations).where(and(
+                ...scope,
+                eq(hostedLifecycleOperations.runId, input.runId),
+                eq(hostedLifecycleOperations.attemptId, input.request.attempt.attemptId),
+                eq(hostedLifecycleOperations.attemptNumber, input.request.attempt.attemptNumber),
+                eq(hostedLifecycleOperations.fencingTokenDigest, input.request.attempt.fencingTokenDigest),
+                eq(hostedLifecycleOperations.state, "acknowledged"),
+                inArray(hostedLifecycleOperations.action, ["heartbeat", "progress"])
+            )).orderBy(desc(hostedLifecycleOperations.sequence)).limit(1).get();
+            if (highWater) {
+                const highWaterRequest = HostedLifecycleRequestV1Schema.parse(
+                    JSON.parse(highWater.requestJson)
+                );
+                if (!validAcknowledgedLifecycleDependency(highWater)
+                    || input.request.occurredAt <= highWaterRequest.occurredAt) {
+                    throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+                }
+            }
+        }
         const terminal = tx.select({ operationId: hostedLifecycleOperations.operationId })
             .from(hostedLifecycleOperations).where(and(eq(hostedLifecycleOperations.destinationId, input.destinationId), eq(hostedLifecycleOperations.organizationId, input.organizationId), eq(hostedLifecycleOperations.runId, input.runId), eq(hostedLifecycleOperations.attemptId, input.request.attempt.attemptId), inArray(hostedLifecycleOperations.action, ["complete", "reject-start"]))).limit(1).get();
         if (terminal) {
@@ -1235,6 +1255,31 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
         }
         return value;
     }
+    function pruneSupersededAcknowledgedLifecycleSignals(input: {
+        tx: ProjectionTransaction;
+        successor: typeof hostedLifecycleOperations.$inferSelect;
+    }): void {
+        const { tx, successor } = input;
+        const superseded = and(
+            eq(hostedLifecycleOperations.destinationId, successor.destinationId),
+            eq(hostedLifecycleOperations.organizationId, successor.organizationId),
+            eq(hostedLifecycleOperations.runnerId, successor.runnerId),
+            eq(hostedLifecycleOperations.credentialId, successor.credentialId),
+            eq(hostedLifecycleOperations.runId, successor.runId),
+            eq(hostedLifecycleOperations.attemptId, successor.attemptId),
+            eq(hostedLifecycleOperations.attemptNumber, successor.attemptNumber),
+            eq(hostedLifecycleOperations.fencingTokenDigest, successor.fencingTokenDigest),
+            eq(hostedLifecycleOperations.state, "acknowledged"),
+            inArray(hostedLifecycleOperations.action, ["heartbeat", "progress"]),
+            lt(hostedLifecycleOperations.sequence, successor.sequence)
+        );
+        tx.delete(hostedLifecycleOperations).where(superseded).run();
+        const retained = tx.select({
+            operationId: hostedLifecycleOperations.operationId
+        }).from(hostedLifecycleOperations).where(superseded).limit(1).get();
+        if (retained)
+            throw new Error("hosted_lifecycle_operation_retention_failed");
+    }
     function acknowledgeHostedLifecycleOperationTx(input: {
         tx: ProjectionTransaction;
         row: typeof hostedLifecycleOperations.$inferSelect;
@@ -1333,6 +1378,12 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
             if (claimUpdated.changes !== 1) {
                 throw new Error("hosted_reject_start_claim_update_lost");
             }
+        }
+        if (acknowledged) {
+            pruneSupersededAcknowledgedLifecycleSignals({
+                tx,
+                successor: row
+            });
         }
         return acknowledged;
     }

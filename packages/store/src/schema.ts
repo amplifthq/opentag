@@ -869,6 +869,24 @@ CREATE TRIGGER hosted_claim_authority_shell_immutable_guard
 
 CREATE TRIGGER hosted_lifecycle_operations_delete_guard
       BEFORE DELETE ON hosted_lifecycle_operations
+      WHEN (
+        OLD.state = 'acknowledged'
+        AND OLD.action IN ('heartbeat', 'progress')
+        AND EXISTS (
+          SELECT 1
+          FROM hosted_lifecycle_operations successor
+          WHERE successor.destination_id = OLD.destination_id
+            AND successor.organization_id = OLD.organization_id
+            AND successor.runner_id = OLD.runner_id
+            AND successor.credential_id = OLD.credential_id
+            AND successor.run_id = OLD.run_id
+            AND successor.attempt_id = OLD.attempt_id
+            AND successor.attempt_number = OLD.attempt_number
+            AND successor.fencing_token_digest = OLD.fencing_token_digest
+            AND successor.state = 'acknowledged'
+            AND successor.sequence > OLD.sequence
+        )
+      ) IS NOT TRUE
       BEGIN
         SELECT RAISE(ABORT, 'hosted_lifecycle_operations_delete_forbidden');
       END;
