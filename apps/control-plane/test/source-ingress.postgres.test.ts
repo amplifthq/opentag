@@ -252,11 +252,10 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
     const closed = await fixture.pool.query(
       `SELECT reservation.state, resolution.resolution,
               resolution.operator_attention, job.state AS job_state,
-              settlement.outcome
+              job.settlement_outcome AS outcome
        FROM cp_ingress_reservation reservation
        JOIN cp_source_resolution resolution USING (organization_id, reservation_id)
-       JOIN cp_job job ON job.organization_id = reservation.organization_id
-       JOIN cp_job_settlement settlement USING (job_id)`,
+       JOIN cp_job job ON job.organization_id = reservation.organization_id`,
     );
     expect(closed.rows).toEqual([{
       state: "resolved", resolution: { kind: "temporarily_unavailable",
@@ -296,11 +295,10 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
     await expect(staleResult).resolves.toEqual(expect.objectContaining({ kind: "stale_lease" }));
     const rows = await fixture.pool.query(
       `SELECT reservation.state, resolution.resolution,
-              resolution.operator_attention, count(settlement.job_id)::int AS settlements
+              resolution.operator_attention, count(job.settled_at)::int AS settlements
        FROM cp_ingress_reservation reservation
        JOIN cp_source_resolution resolution USING (organization_id, reservation_id)
        JOIN cp_job job ON job.organization_id = reservation.organization_id
-       JOIN cp_job_settlement settlement USING (job_id)
        GROUP BY reservation.state, resolution.resolution, resolution.operator_attention`,
     );
     expect(rows.rows).toEqual([{
@@ -451,11 +449,10 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
       await worker.processNext();
     }
     const persisted = await fixture.pool.query(
-      `SELECT resolution.resolution, settlement.outcome
+      `SELECT resolution.resolution, job.settlement_outcome AS outcome
        FROM cp_source_resolution resolution
        JOIN cp_job job ON job.organization_id = resolution.organization_id
          AND job.payload->>'reservationId' = resolution.reservation_id
-       JOIN cp_job_settlement settlement USING (job_id)
        ORDER BY resolution.reservation_id`,
     );
     expect(persisted.rows).toHaveLength(3);

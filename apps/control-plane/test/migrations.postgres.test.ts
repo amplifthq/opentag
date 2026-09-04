@@ -202,6 +202,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0019_projection_event_sequence.sql",
       "0020_projection_lineage_serialization.sql",
       "0021_projection_job_v2_fence.sql",
+      "0022_job_terminal_state.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();
@@ -228,7 +229,6 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "cp_hosted_run",
       "cp_ingress_reservation",
       "cp_job",
-      "cp_job_settlement",
       "cp_login_throttle",
       "cp_management_audit_event",
       "cp_material_action_begin_intent",
@@ -316,17 +316,19 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       // that bounded work so a slow machine cannot make a valid migrated job
       // look not-yet-due.
       const queueNow=new Date(Date.now()+60_000);
-      const oldQueue=createDurableJobQueue({pool:upgrade.pool,clock:{now:()=>queueNow},
-        leaseDurationMs:30_000,tokenFactory:()=>"old-worker-lease"});
-      const claimed=await oldQueue.claim("old-worker",["team-relay.project"]);
-      expect(claimed).toMatchObject({kind:"claimed",job:{jobId:"team-relay:org_upgrade:run_claimed:1"}});
+      const claimedJobId="team-relay:org_upgrade:run_claimed:1";
+      const claimedResult=await upgrade.pool.query<{job_id:string}>(`UPDATE cp_job
+        SET state='claimed',attempt_count=attempt_count+1,lease_owner='old-worker',
+          lease_token='old-worker-lease',lease_expires_at=$2,updated_at=$1
+        WHERE job_id=$3 RETURNING job_id`,
+      [queueNow,new Date(queueNow.getTime()+30_000),claimedJobId]);
+      expect(claimedResult.rows).toEqual([{job_id:claimedJobId}]);
       await expect(runMigrations(upgrade.pool,upgrade.migrations)).rejects.toThrow(
         "projection_v2_legacy_job_claimed");
       expect((await upgrade.pool.query(`SELECT to_regclass('cp_projection_job_v2_authority') relation`)).rows)
         .toEqual([{relation:null}]);
-      if(claimed.kind!=="claimed")throw new Error("legacy claim missing");
       await upgrade.pool.query("UPDATE cp_job SET lease_expires_at=$2 WHERE job_id=$1",
-        [claimed.job.jobId,new Date(Date.now()-60_000)]);
+        [claimedJobId,new Date(Date.now()-60_000)]);
       const pendingJobId="team-relay:org_upgrade:run_pending:1";
       await upgrade.pool.query("UPDATE cp_job SET attempt_count=max_attempts WHERE job_id=$1",[pendingJobId]);
       await expect(runMigrations(upgrade.pool,upgrade.migrations)).rejects.toThrow(
@@ -351,9 +353,9 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       await upgrade.pool.query("UPDATE cp_job SET request_digest=md5($2) WHERE job_id=$1",
         [pendingJobId,"org_upgrade:run_pending:1"]);
       await expect(runMigrations(upgrade.pool,upgrade.migrations)).resolves.toBeUndefined();
-      await expect(oldQueue.claim("old-worker",["team-relay.project"])).resolves.toEqual({kind:"empty"});
       const newQueue=createDurableJobQueue({pool:upgrade.pool,clock:{now:()=>queueNow},
         leaseDurationMs:30_000,tokenFactory:()=>"new-worker-lease"});
+      await expect(newQueue.claim("old-worker",["team-relay.project"])).resolves.toEqual({kind:"empty"});
       let executions=0;
       await expect(runOneJob({queue:newQueue,workerId:"new-worker",handlers:{
         "team-relay.project.v2":async()=>{executions+=1;return {kind:"projected_once"};}},
@@ -404,7 +406,15 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
         "projection_v2_legacy_event_ambiguous");
       await upgrade.pool.query(`DELETE FROM cp_projection_delivery_watermark
         WHERE intent_id='intent_missing' AND delivery_state='rejected'`);
-      await upgrade.pool.query("UPDATE cp_job SET state='failed' WHERE job_id=$1",[missingJobId]);
+      await upgrade.pool.query(
+        "UPDATE cp_job SET state='failed',last_error_code='legacy_lineage_invalid' WHERE job_id=$1",
+        [missingJobId],
+      );
+      await upgrade.pool.query(
+        `INSERT INTO cp_job_settlement(job_id,lease_token,outcome,settled_at)
+         VALUES($1,'legacy-lineage-terminal',$2,$3)`,
+        [missingJobId, { errorCode: "legacy_lineage_invalid" }, at],
+      );
       await runMigrations(upgrade.pool,upgrade.migrations);
       const payload={organizationId:"org_lineage",runId:"run_exact",projectionRevision:1};
       await expect(upgrade.pool.query(`SELECT cp_insert_team_relay_v2_job($1,$2,$3)`,
@@ -437,9 +447,11 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
         ["team-relay-occupied-v2","org_collision",payload]))
         .rejects.toThrow("projection_v2_job_identity_conflict");
       await collision.pool.query(`INSERT INTO cp_job(job_id,organization_id,job_kind,payload,request_digest,
-        state,available_at,attempt_count,max_attempts,created_at,updated_at)
+        state,available_at,attempt_count,max_attempts,last_error_code,settlement_lease_token,
+        settlement_outcome,settled_at,created_at,updated_at)
         VALUES('team-relay-state-conflict','org_collision','team-relay.project.v2',$1,
-          md5('team-relay-state-conflict'||':'||$1::jsonb::text),'succeeded',$2,0,20,$2,$2)`,[payload,at]);
+          md5('team-relay-state-conflict'||':'||$1::jsonb::text),'succeeded',$2,1,20,
+          'unexpected','settled-token','{}'::jsonb,$2,$2,$2)`,[payload,at]);
       await expect(collision.pool.query(`SELECT cp_insert_team_relay_v2_job($1,$2,$3)`,
         ["team-relay-state-conflict","org_collision",payload]))
         .rejects.toThrow("projection_v2_job_state_conflict");
@@ -467,17 +479,15 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       await expect(corrupted.pool.query("SELECT cp_insert_team_relay_v2_job($1,$2,$3)",
         [claimed.jobId,"org_replay",claimed.payload])).rejects.toThrow("projection_v2_job_state_conflict");
       const succeeded=await create("succeeded_with_error");
-      await corrupted.pool.query("UPDATE cp_job SET state='succeeded',last_error_code='unexpected' WHERE job_id=$1",
-        [succeeded.jobId]);
-      await corrupted.pool.query(`INSERT INTO cp_job_settlement(job_id,lease_token,outcome,settled_at)
-        VALUES($1,'settled-token',$2,$3)`,[succeeded.jobId,{errorCode:"unexpected"},at]);
+      await corrupted.pool.query(`UPDATE cp_job SET state='succeeded',last_error_code='unexpected',
+        settlement_lease_token='settled-token',settlement_outcome=$2,settled_at=$3 WHERE job_id=$1`,
+      [succeeded.jobId,{errorCode:"unexpected"},at]);
       await expect(corrupted.pool.query("SELECT cp_insert_team_relay_v2_job($1,$2,$3)",
         [succeeded.jobId,"org_replay",succeeded.payload])).rejects.toThrow("projection_v2_job_state_conflict");
       const failed=await create("failed_mismatch");
-      await corrupted.pool.query("UPDATE cp_job SET state='failed',last_error_code='expected' WHERE job_id=$1",
-        [failed.jobId]);
-      await corrupted.pool.query(`INSERT INTO cp_job_settlement(job_id,lease_token,outcome,settled_at)
-        VALUES($1,'settled-token',$2,$3)`,[failed.jobId,{errorCode:"different"},at]);
+      await corrupted.pool.query(`UPDATE cp_job SET state='failed',last_error_code='expected',
+        settlement_lease_token='settled-token',settlement_outcome=$2,settled_at=$3 WHERE job_id=$1`,
+      [failed.jobId,{errorCode:"different"},at]);
       await expect(corrupted.pool.query("SELECT cp_insert_team_relay_v2_job($1,$2,$3)",
         [failed.jobId,"org_replay",failed.payload])).rejects.toThrow("projection_v2_job_state_conflict");
     }finally{await corrupted.close();}

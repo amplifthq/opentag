@@ -20,6 +20,9 @@ type JobRow = {
   lease_token: string | null;
   lease_expires_at: Date | null;
   last_error_code: string | null;
+  settlement_lease_token: string | null;
+  settlement_outcome: unknown | null;
+  settled_at: Date | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -107,7 +110,7 @@ export function createDurableJobQueue(input: {
       return withPostgresTransaction(input.pool, async (client) => {
         await client.query(
           `WITH exhausted AS (
-             SELECT job_id FROM cp_job
+             SELECT job_id, lease_token FROM cp_job
              WHERE state = 'claimed' AND lease_expires_at <= $1
                AND attempt_count >= max_attempts
                AND NOT (job_kind = ANY($2::text[]))
@@ -117,7 +120,9 @@ export function createDurableJobQueue(input: {
            UPDATE cp_job job
            SET state = 'failed', lease_owner = NULL, lease_token = NULL,
                lease_expires_at = NULL, last_error_code = 'lease_expired',
-               updated_at = $1
+               settlement_lease_token = exhausted.lease_token,
+               settlement_outcome = jsonb_build_object('errorCode', 'lease_expired'),
+               settled_at = $1, updated_at = $1
            FROM exhausted WHERE job.job_id = exhausted.job_id`,
           [now, DOMAIN_FINALIZED_JOB_KINDS, jobKinds ?? null],
         );
@@ -157,26 +162,21 @@ export function createDurableJobQueue(input: {
     }) {
       const now = input.clock.now();
       return withPostgresTransaction(input.pool, async (client) => {
-        const settlement = await client.query(
-          "SELECT lease_token, outcome FROM cp_job_settlement WHERE job_id = $1",
-          [command.jobId],
-        ) as { rows: Array<{ lease_token: string; outcome: unknown }> };
-        const settled = settlement.rows[0];
-        if (settled) {
-          const [existingDigest, requestedDigest] = await Promise.all([
-            computeControlPayloadDigestV1(settled.outcome),
-            computeControlPayloadDigestV1(command.outcome),
-          ]);
-          return settled.lease_token === command.leaseToken
-            && existingDigest === requestedDigest
-            ? { kind: "replayed" } as const
-            : { kind: "stale_lease" } as const;
-        }
         const job = await client.query(
           "SELECT * FROM cp_job WHERE job_id = $1 FOR UPDATE",
           [command.jobId],
         ) as { rows: JobRow[] };
         const row = job.rows[0];
+        if (row?.state === "succeeded" || row?.state === "failed") {
+          const [existingDigest, requestedDigest] = await Promise.all([
+            computeControlPayloadDigestV1(row.settlement_outcome),
+            computeControlPayloadDigestV1(command.outcome),
+          ]);
+          return row.settlement_lease_token === command.leaseToken
+            && existingDigest === requestedDigest
+            ? { kind: "replayed" } as const
+            : { kind: "stale_lease" } as const;
+        }
         if (
           !row
           || row.state !== "claimed"
@@ -189,13 +189,10 @@ export function createDurableJobQueue(input: {
         await client.query(
           `UPDATE cp_job
            SET state = 'succeeded', lease_owner = NULL, lease_token = NULL,
-               lease_expires_at = NULL, last_error_code = NULL, updated_at = $2
+               lease_expires_at = NULL, last_error_code = NULL,
+               settlement_lease_token = $2, settlement_outcome = $3,
+               settled_at = $4, updated_at = $4
            WHERE job_id = $1`,
-          [command.jobId, now],
-        );
-        await client.query(
-          `INSERT INTO cp_job_settlement(job_id, lease_token, outcome, settled_at)
-           VALUES($1, $2, $3, $4)`,
           [command.jobId, command.leaseToken, command.outcome, now],
         );
         return { kind: "settled" } as const;
@@ -229,6 +226,8 @@ export function createDurableJobQueue(input: {
             `UPDATE cp_job
              SET state = 'pending', available_at = $2, lease_owner = NULL,
                  lease_token = NULL, lease_expires_at = NULL,
+                 settlement_lease_token = NULL, settlement_outcome = NULL,
+                 settled_at = NULL,
                  last_error_code = $3, updated_at = $4
              WHERE job_id = $1`,
             [command.jobId, command.retryAt, command.errorCode, now],
@@ -238,19 +237,12 @@ export function createDurableJobQueue(input: {
         await client.query(
           `UPDATE cp_job
            SET state = 'failed', lease_owner = NULL, lease_token = NULL,
-               lease_expires_at = NULL, last_error_code = $2, updated_at = $3
+               lease_expires_at = NULL, last_error_code = $2,
+               settlement_lease_token = $3,
+               settlement_outcome = jsonb_build_object('errorCode', $2::text),
+               settled_at = $4, updated_at = $4
            WHERE job_id = $1`,
-          [command.jobId, command.errorCode, now],
-        );
-        await client.query(
-          `INSERT INTO cp_job_settlement(job_id, lease_token, outcome, settled_at)
-           VALUES($1, $2, $3, $4)`,
-          [
-            command.jobId,
-            command.leaseToken,
-            { errorCode: command.errorCode },
-            now,
-          ],
+          [command.jobId, command.errorCode, command.leaseToken, now],
         );
         return { kind: "failed" } as const;
       });

@@ -18,7 +18,7 @@ describe.skipIf(!TEST_DATABASE_URL)("durable PostgreSQL jobs", () => {
   beforeEach(async () => {
     now = new Date("2026-08-15T12:00:00.000Z");
     leaseNumber = 0;
-    await fixture.pool.query("TRUNCATE cp_job_settlement, cp_job");
+    await fixture.pool.query("TRUNCATE cp_job");
   });
 
   afterAll(async () => {
@@ -122,5 +122,83 @@ describe.skipIf(!TEST_DATABASE_URL)("durable PostgreSQL jobs", () => {
       leaseToken: second.job.leaseToken,
       outcome: { delivered: true },
     })).resolves.toEqual({ kind: "replayed" });
+    await expect(jobs.succeed({
+      jobId: second.job.jobId,
+      leaseToken: second.job.leaseToken,
+      outcome: { delivered: false },
+    })).resolves.toEqual({ kind: "stale_lease" });
+    const terminal = await fixture.pool.query(
+      `SELECT state, lease_owner, lease_token, lease_expires_at,
+              settlement_lease_token, settlement_outcome, settled_at
+       FROM cp_job WHERE job_id = $1`,
+      [second.job.jobId],
+    );
+    expect(terminal.rows[0]).toMatchObject({
+      state: "succeeded",
+      lease_owner: null,
+      lease_token: null,
+      lease_expires_at: null,
+      settlement_lease_token: second.job.leaseToken,
+      settlement_outcome: { delivered: true },
+      settled_at: now,
+    });
+    await expect(fixture.pool.query(
+      "UPDATE cp_job SET payload='{}'::jsonb WHERE job_id=$1",
+      [second.job.jobId],
+    )).rejects.toThrow(/terminal_job_immutable/iu);
+  });
+
+  it("stores terminal failure and exhausted-lease evidence on the job", async () => {
+    const jobs = queue();
+    await jobs.enqueue({
+      jobId: "job_failed",
+      organizationId: null,
+      kind: "reconcile",
+      payload: {},
+      maxAttempts: 1,
+    });
+    const failedClaim = await jobs.claim("worker_failed");
+    if (failedClaim.kind !== "claimed") throw new Error("failure claim missing");
+    await expect(jobs.fail({
+      jobId: failedClaim.job.jobId,
+      leaseToken: failedClaim.job.leaseToken,
+      errorCode: "provider_rejected",
+    })).resolves.toEqual({ kind: "failed" });
+    expect((await fixture.pool.query(
+      `SELECT state, last_error_code, settlement_lease_token,
+              settlement_outcome, settled_at
+       FROM cp_job WHERE job_id=$1`,
+      [failedClaim.job.jobId],
+    )).rows[0]).toMatchObject({
+      state: "failed",
+      last_error_code: "provider_rejected",
+      settlement_lease_token: failedClaim.job.leaseToken,
+      settlement_outcome: { errorCode: "provider_rejected" },
+      settled_at: now,
+    });
+
+    await jobs.enqueue({
+      jobId: "job_exhausted",
+      organizationId: null,
+      kind: "reconcile",
+      payload: {},
+      maxAttempts: 1,
+    });
+    const exhaustedClaim = await jobs.claim("worker_exhausted");
+    if (exhaustedClaim.kind !== "claimed") throw new Error("exhausted claim missing");
+    now = new Date(now.getTime() + 30_001);
+    await expect(jobs.claim("worker_recovery")).resolves.toEqual({ kind: "empty" });
+    expect((await fixture.pool.query(
+      `SELECT state, last_error_code, settlement_lease_token,
+              settlement_outcome, settled_at
+       FROM cp_job WHERE job_id=$1`,
+      [exhaustedClaim.job.jobId],
+    )).rows[0]).toMatchObject({
+      state: "failed",
+      last_error_code: "lease_expired",
+      settlement_lease_token: exhaustedClaim.job.leaseToken,
+      settlement_outcome: { errorCode: "lease_expired" },
+      settled_at: now,
+    });
   });
 });

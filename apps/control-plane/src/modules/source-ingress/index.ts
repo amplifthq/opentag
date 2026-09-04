@@ -346,14 +346,11 @@ export function createSourceIngressService(input: {
         await client.query(
           `UPDATE cp_job SET state = 'succeeded', lease_owner = NULL,
              lease_token = NULL, lease_expires_at = NULL,
-             last_error_code = 'lease_expired', updated_at = $2
+             last_error_code = 'lease_expired',
+             settlement_lease_token = $3, settlement_outcome = $4,
+             settled_at = $2, updated_at = $2
            WHERE job_id = $1`,
-          [row.job_id, input.clock.now()],
-        );
-        await client.query(
-          `INSERT INTO cp_job_settlement(job_id, lease_token, outcome, settled_at)
-           VALUES($1,$2,$3,$4)`,
-          [row.job_id, row.lease_token, resolution, input.clock.now()],
+          [row.job_id, input.clock.now(), row.lease_token, resolution],
         );
         return { jobId: row.job_id, resolution } as const;
       });

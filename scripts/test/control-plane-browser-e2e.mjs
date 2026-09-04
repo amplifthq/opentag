@@ -104,8 +104,7 @@ const waitForRestartedJob = async (compose, jobId, timeoutMs = 30_000) => {
       "ON_ERROR_STOP=1",
       "-c",
       `SELECT job.state || '|' ||
-         (SELECT count(*) FROM cp_job_settlement settlement
-          WHERE settlement.job_id = job.job_id)
+         CASE WHEN job.settled_at IS NULL THEN 0 ELSE 1 END
        FROM cp_job job WHERE job.job_id = '${jobId}';`,
     ], { capture: true });
     lastState = result.stdout.trim() || "missing";
