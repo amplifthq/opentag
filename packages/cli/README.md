@@ -1,6 +1,6 @@
 # @opentag/cli
 
-The OpenTag CLI sets up and operates a persistent Slack coding-agent presence backed by a user-controlled Runner.
+The OpenTag CLI pairs the user-controlled Runner behind a persistent Slack AI teammate.
 
 ## Install
 

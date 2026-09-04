@@ -180,7 +180,7 @@ them.
 Startup is ordered by health and completion: PostgreSQL, migration, owner
 bootstrap, Slack installation bootstrap, HTTP readiness, then jobs.
 
-The Agent Presence reset intentionally establishes a new database baseline.
+The Teammate reset intentionally establishes a new database baseline.
 It supports a new empty PostgreSQL database only and does not provide an
 in-place upgrade from a pre-reset migration ledger. The migration runner checks
 the recorded checksum and fails closed rather than interpreting or deleting

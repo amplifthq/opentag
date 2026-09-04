@@ -5,6 +5,47 @@ import type { ReadinessResult } from "../application.js";
 
 const MIGRATION_LOCK_KEY = 7_118_403_982;
 const MIGRATION_NAME = /^[0-9]{4}_[a-z0-9_]+\.sql$/u;
+const CONTROL_PLANE_TABLES = [
+  "control_plane_migrations",
+  "cp_api_key",
+  "cp_effect",
+  "cp_effect_attempt",
+  "cp_effect_evidence",
+  "cp_hosted_attempt",
+  "cp_hosted_audit_event",
+  "cp_hosted_lifecycle_receipt",
+  "cp_hosted_run",
+  "cp_ingress_reservation",
+  "cp_job",
+  "cp_login_throttle",
+  "cp_management_audit_event",
+  "cp_material_action_begin_intent",
+  "cp_material_action_current",
+  "cp_material_action_receipt",
+  "cp_membership",
+  "cp_operator",
+  "cp_organization",
+  "cp_permission_operation",
+  "cp_permission_request",
+  "cp_project_target",
+  "cp_projection_deferred_revision",
+  "cp_projection_delivery_watermark",
+  "cp_projection_event_cursor",
+  "cp_provider_delivery_intent",
+  "cp_provider_delivery_truth_lock",
+  "cp_publication_candidate",
+  "cp_runner",
+  "cp_runner_credential",
+  "cp_runner_operation",
+  "cp_runner_readiness",
+  "cp_session",
+  "cp_slack_action_authority",
+  "cp_slack_binding",
+  "cp_source_content",
+  "cp_source_content_invalidation_receipt",
+  "cp_source_content_read_grant",
+  "cp_source_replay_tombstone",
+] as const;
 
 export type SqlMigration = {
   name: string;
@@ -147,7 +188,35 @@ export async function checkMigrationReadiness(
         ('cp_publication_candidate_content_free_check',
           'CHECK(((jsonb_typeof(candidate)=''object''::text)AND(NOT(candidate?|ARRAY[''baseToFinalBinaryDiff''::text,''limitations''::text,''workspacePath''::text,''logs''::text,''output''::text,''secret''::text]))))')
       ) SELECT (
-        to_regclass('cp_publication_candidate') IS NOT NULL
+        (SELECT array_agg(table_name::text ORDER BY table_name)
+          FROM information_schema.tables
+          WHERE table_schema=current_schema() AND table_type='BASE TABLE')=$1::text[]
+        AND EXISTS (SELECT 1 FROM pg_class table_row
+          WHERE table_row.relnamespace=current_schema()::regnamespace
+            AND table_row.relname='control_plane_migrations'
+            AND table_row.relkind='r' AND table_row.relpersistence='p'
+            AND NOT table_row.relrowsecurity AND NOT table_row.relforcerowsecurity)
+        AND (SELECT count(*)=3 FROM information_schema.columns
+          WHERE table_schema=current_schema() AND table_name='control_plane_migrations'
+            AND ((ordinal_position=1 AND column_name='name' AND data_type='text'
+                AND is_nullable='NO' AND column_default IS NULL)
+              OR (ordinal_position=2 AND column_name='checksum' AND data_type='text'
+                AND is_nullable='NO' AND column_default IS NULL)
+              OR (ordinal_position=3 AND column_name='applied_at'
+                AND data_type='timestamp with time zone' AND is_nullable='NO'
+                AND column_default='clock_timestamp()')))
+        AND (SELECT count(*)=1 FROM pg_constraint
+          WHERE conrelid='control_plane_migrations'::regclass)
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid='control_plane_migrations'::regclass
+            AND constraint_row.conname='control_plane_migrations_pkey'
+            AND constraint_row.contype='p' AND constraint_row.convalidated
+            AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred
+            AND ARRAY(SELECT attribute.attname::text
+              FROM unnest(constraint_row.conkey) WITH ORDINALITY key(attnum,ordinal)
+              JOIN pg_attribute attribute ON attribute.attrelid=constraint_row.conrelid
+                AND attribute.attnum=key.attnum ORDER BY key.ordinal)=ARRAY['name'])
+        AND to_regclass('cp_publication_candidate') IS NOT NULL
         AND (SELECT count(*) = 15 FROM pg_attribute
           WHERE attrelid = 'cp_publication_candidate'::regclass
             AND attnum > 0 AND NOT attisdropped)
@@ -268,6 +337,7 @@ export async function checkMigrationReadiness(
               '[[:space:]]+', '', 'g') LIKE
               'CREATETRIGGERcp_publication_candidate_immutableBEFOREDELETEORUPDATEON%FOREACHROWEXECUTEFUNCTION%cp_reject_publication_candidate_mutation()')
       ) AS schema_ready`,
+      [CONTROL_PLANE_TABLES],
     );
     // EffectAuthority replaces the seven-table publication operation ledger.
     // Startup checks both the positive shape and the absence of the superseded
@@ -652,11 +722,11 @@ export async function checkProjectionSchemaReadiness(
         AND attname='projection_event_sequence' AND attnotnull AND NOT attisdropped)
       AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_provider_delivery_intent' AND (
-          (ordinal_position=45 AND column_name='projection_revision' AND data_type='integer'
+          (ordinal_position=44 AND column_name='projection_revision' AND data_type='integer'
             AND is_nullable='NO' AND column_default='1') OR
-          (ordinal_position=46 AND column_name='projection_purpose' AND data_type='text'
+          (ordinal_position=45 AND column_name='projection_purpose' AND data_type='text'
             AND is_nullable='NO' AND column_default='''external''::text') OR
-          (ordinal_position=47 AND column_name='projection_event_sequence' AND data_type='integer'
+          (ordinal_position=46 AND column_name='projection_event_sequence' AND data_type='integer'
             AND is_nullable='NO' AND column_default='0')))
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_intent'::regclass
         AND conname='cp_provider_delivery_projection_purpose_check' AND contype='c' AND convalidated
@@ -674,17 +744,14 @@ export async function checkProjectionSchemaReadiness(
       AND to_regclass('cp_projection_deferred_revision') IS NOT NULL
       AND to_regclass('cp_projection_event_cursor') IS NOT NULL
       AND to_regclass('cp_provider_delivery_truth_lock') IS NOT NULL
-      AND to_regclass('cp_projection_job_v2_authority') IS NOT NULL
       AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_event_cursor')
       AND (SELECT count(*)=8 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_delivery_watermark')
       AND (SELECT count(*)=7 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_deferred_revision')
-      AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema=current_schema()
+      AND (SELECT count(*)=1 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_provider_delivery_truth_lock')
-      AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema=current_schema()
-        AND table_name='cp_projection_job_v2_authority')
       AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_event_cursor'
         AND ((ordinal_position=1 AND column_name='organization_id' AND data_type='text'
@@ -759,30 +826,13 @@ export async function checkProjectionSchemaReadiness(
         AND conname='cp_projection_deferred_revision_check' AND contype='c' AND convalidated
         AND NOT connoinherit AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
           'CHECK((((state=''pending''::text)AND(woken_atISNULL))OR((state=''woken''::text)AND(woken_atISNOTNULL))))')
-      AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema=current_schema()
+      AND (SELECT count(*)=1 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_provider_delivery_truth_lock'
-        AND ((ordinal_position=1 AND column_name='current_truth_key' AND data_type='text'
-            AND is_nullable='NO' AND column_default IS NULL)
-          OR (ordinal_position=2 AND column_name='created_at' AND data_type='timestamp with time zone' AND is_nullable='NO'
-            AND column_default='clock_timestamp()')))
+        AND ordinal_position=1 AND column_name='current_truth_key' AND data_type='text'
+        AND is_nullable='NO' AND column_default IS NULL)
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_truth_lock'::regclass
         AND conname='cp_provider_delivery_truth_lock_pkey' AND contype='p' AND convalidated
         AND pg_get_constraintdef(oid)='PRIMARY KEY (current_truth_key)')
-      AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema=current_schema()
-        AND table_name='cp_projection_job_v2_authority' AND (
-          (ordinal_position=1 AND column_name='authority_version' AND data_type='integer'
-            AND is_nullable='NO' AND column_default IS NULL) OR
-          (ordinal_position=2 AND column_name='activated_at' AND data_type='timestamp with time zone'
-            AND is_nullable='NO' AND column_default IS NULL)))
-      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_job_v2_authority'::regclass
-        AND conname='cp_projection_job_v2_authority_pkey' AND contype='p' AND convalidated
-        AND pg_get_constraintdef(oid)='PRIMARY KEY (authority_version)')
-      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_job_v2_authority'::regclass
-        AND conname='cp_projection_job_v2_authority_authority_version_check' AND contype='c'
-        AND convalidated AND NOT connoinherit
-        AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')='CHECK((authority_version=2))')
-      AND (SELECT count(*)=1 AND min(authority_version)=2 AND max(authority_version)=2
-        FROM cp_projection_job_v2_authority)
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
         AND conname='cp_slack_action_authority_decisions_check' AND convalidated
         AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
@@ -843,8 +893,7 @@ export async function checkProjectionSchemaReadiness(
         ('cp_insert_team_relay_v2_job',3,'25 25 3802','void'),
         ('cp_project_effect_change',0,'','trigger'),
         ('cp_provider_delivery_guard',0,'','trigger'),
-        ('cp_provider_delivery_delete_guard',0,'','trigger'),
-        ('cp_reject_projection_job_v2_authority_mutation',0,'','trigger')
+        ('cp_provider_delivery_delete_guard',0,'','trigger')
       ) expected(name,nargs,argtypes,result_type)
       LEFT JOIN pg_proc function_row ON function_row.pronamespace=current_schema()::regnamespace
         AND function_row.proname=expected.name
@@ -897,7 +946,7 @@ export async function checkProjectionSchemaReadiness(
           AND trigger_row.tgname NOT IN ('cp_hosted_run_projection_before_trigger',
             'cp_hosted_run_projection_after_trigger','cp_permission_projection_trigger',
             'cp_candidate_projection_trigger','cp_effect_projection',
-            'cp_delivery_projection_trigger','cp_projection_job_v2_authority_immutable'))
+            'cp_delivery_projection_trigger'))
       AND NOT EXISTS(SELECT 1 FROM pg_trigger trigger_row
         JOIN pg_class relation ON relation.oid=trigger_row.tgrelid
         JOIN pg_namespace relation_namespace ON relation_namespace.oid=relation.relnamespace
@@ -907,8 +956,7 @@ export async function checkProjectionSchemaReadiness(
           AND relation.relname=ANY(ARRAY['cp_hosted_run','cp_permission_request',
             'cp_publication_candidate','cp_effect','cp_provider_delivery_intent',
             'cp_projection_event_cursor','cp_projection_delivery_watermark',
-            'cp_projection_deferred_revision','cp_provider_delivery_truth_lock',
-            'cp_projection_job_v2_authority'])
+            'cp_projection_deferred_revision','cp_provider_delivery_truth_lock'])
           AND (NOT ((relation.relname,trigger_row.tgname,trigger_row.tgtype,function_row.proname) IN (
             ('cp_hosted_run','cp_hosted_run_frozen_admission_guard',19,'cp_hosted_run_frozen_admission_guard'),
             ('cp_hosted_run','cp_hosted_run_projection_after_trigger',21,'cp_hosted_run_projection_after'),
@@ -927,12 +975,10 @@ export async function checkProjectionSchemaReadiness(
             ('cp_effect','cp_effect_delete_immutable',11,'cp_reject_effect_authority_mutation'),
             ('cp_effect','cp_effect_projection',21,'cp_project_effect_change'),
             ('cp_effect','cp_effect_request_immutable',19,'cp_reject_effect_request_mutation'),
-            ('cp_effect','cp_effect_state_transition',19,'cp_guard_effect_state_transition'),
-            ('cp_projection_job_v2_authority','cp_projection_job_v2_authority_immutable',27,
-              'cp_reject_projection_job_v2_authority_mutation')))
+            ('cp_effect','cp_effect_state_transition',19,'cp_guard_effect_state_transition')))
           OR trigger_row.tgnargs<>0 OR trigger_row.tgqual IS NOT NULL
           OR function_row.pronamespace<>current_schema()::regnamespace))
-      AND (SELECT count(*)=17 FROM pg_trigger trigger_row
+      AND (SELECT count(*)=16 FROM pg_trigger trigger_row
         JOIN pg_class relation ON relation.oid=trigger_row.tgrelid
         JOIN pg_namespace relation_namespace ON relation_namespace.oid=relation.relnamespace
         WHERE NOT trigger_row.tgisinternal AND trigger_row.tgenabled='O'
@@ -940,15 +986,13 @@ export async function checkProjectionSchemaReadiness(
           AND relation.relname=ANY(ARRAY['cp_hosted_run','cp_permission_request',
             'cp_publication_candidate','cp_effect','cp_provider_delivery_intent',
             'cp_projection_event_cursor','cp_projection_delivery_watermark',
-            'cp_projection_deferred_revision','cp_provider_delivery_truth_lock',
-            'cp_projection_job_v2_authority'])) AS ready,
+            'cp_projection_deferred_revision','cp_provider_delivery_truth_lock'])) AS ready,
       (SELECT jsonb_object_agg(proname,prosrc) FROM pg_proc
         WHERE pronamespace=current_schema()::regnamespace AND proname=ANY(ARRAY[
           'cp_hosted_run_projection_before','cp_hosted_run_projection_after',
           'cp_related_projection_after','cp_enqueue_team_relay_projection',
           'cp_delivery_projection_after','cp_insert_team_relay_v2_job','cp_project_effect_change',
-          'cp_provider_delivery_guard','cp_provider_delivery_delete_guard',
-          'cp_reject_projection_job_v2_authority_mutation'])) AS function_bodies`);
+          'cp_provider_delivery_guard','cp_provider_delivery_delete_guard'])) AS function_bodies`);
     const row=result.rows[0];
     const expectedBodies:Record<string,string>={
       cp_hosted_run_projection_before:"ce182dbbbc5b7e647d44cfc21743d251c9403617fffb4995add1f262ef3f0201",
@@ -958,9 +1002,8 @@ export async function checkProjectionSchemaReadiness(
       cp_delivery_projection_after:"6b6728815b61052622498226f1942cd74be0917267a07377b4fefa915f0c7ae7",
       cp_insert_team_relay_v2_job:"a16b6ab0f3a0b730e46d866edabf1f2e354546f609ac7b96c8c682af2f28d0b2",
       cp_project_effect_change:"e85e2d9679ffcc665f2d125d3787d0cbb88425c9a708bda625c8fb9184eb5a0f",
-      cp_provider_delivery_guard:"230836960c8ede6836e3bce2afc156b10fa6495b730b9d128561abea4e1f9627",
-      cp_provider_delivery_delete_guard:"e81aff8787906c110cdb1f222824bbec8ba939b8d4d6b4448a5e3e48c8909e7a",
-      cp_reject_projection_job_v2_authority_mutation:"fb41729b151f0f30c20ae06bde8890328b7e385af98945ff69f458a7547b0d67"};
+      cp_provider_delivery_guard:"5c12474059a64ee2cbc07c94f317e59667a69cd31b52dcea817bc4feacc82477",
+      cp_provider_delivery_delete_guard:"e81aff8787906c110cdb1f222824bbec8ba939b8d4d6b4448a5e3e48c8909e7a"};
     const exactBodies=row?.function_bodies!==null&&row?.function_bodies!==undefined
       &&Object.keys(row.function_bodies).length===Object.keys(expectedBodies).length
       &&Object.entries(expectedBodies).every(([name,digest])=>typeof row.function_bodies?.[name]==="string"

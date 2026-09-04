@@ -31,7 +31,7 @@ tables.
 That shape is too broad for the supported Slack/GitHub, single-Runner profile.
 It makes the Control Plane resemble a provider-specific workflow engine and
 causes each new proof obligation to add another public operation and durable
-entity. The Agent Presence reset also establishes a fresh-database-only
+entity. The Teammate reset also establishes a fresh-database-only
 contract, so compatibility with the pre-reset schema is not a requirement.
 
 The design must preserve the valuable guarantees without preserving the
@@ -442,7 +442,7 @@ ordering details onto callers, so database complexity would quickly return.
 
 ## Migration and deletion policy
 
-This is a compulsory replacement inside the fresh-database Agent Presence
+This is a compulsory replacement inside the fresh-database Teammate
 reset. There is no compatibility adapter, dual-write period, shadow ledger, or
 in-place migration from the previous schema.
 
@@ -465,13 +465,21 @@ Implementation proceeds in vertical replacements:
    with one reviewed fresh baseline and retain only the checksum ledger needed
    for future forward migrations.
 
+The Teammate reset completes the publication replacement, removes the obsolete
+generic Source App installation layers, and establishes the fresh baseline.
+Material Action and Slack `ChannelProjection` replacement remain separate
+future verticals. Their current tables are not merged horizontally in this
+change: doing so before their interfaces and evidence policies are replaced
+would merely move complexity into nullable polymorphic columns and JSON
+branches.
+
 Each replacement follows replace-not-layer discipline. Once all active
 consumers cross the new interface and its acceptance tests pass, the old code
 is deleted rather than deprecated.
 
 Existing databases remain immutable recovery artifacts. The new release starts
 with a separate empty PostgreSQL database and separate empty Runner state, as
-required by the Agent Presence reset.
+required by the Teammate reset.
 
 ## Consequences
 

@@ -251,7 +251,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       FROM cp_provider_delivery_intent WHERE intent_id=$1`,[requests[1]!.intent.sideEffectIntentId])).rows[0])
       .toEqual({projection_revision:2,projection_event_sequence:event.rows[0]!.event_sequence,state:"pending"});
     await fixture.pool.query(`INSERT INTO cp_provider_delivery_intent(
-      intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,
+      intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,
       presentation_phase,current_truth_key,state,revision,sequence,scope_kind,scope_id,idempotency_key,
       provider_id,provider_instance_id,provider_binding_digest,provider_config_generation,
       provider_config_generation_digest,runtime_owner_id,runtime_generation,schema_generation,
@@ -261,7 +261,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       external_resource_id,outcome_recorded_at,deadline_at,created_at,updated_at)
       SELECT 'intent_duplicate_anchor',organization_id,$1,
         jsonb_set(jsonb_set(intent,'{sideEffectIntentId}','"intent_duplicate_anchor"'),
-          '{idempotencyKey}','"duplicate_anchor"'),payload,$2,'duplicate-custody',presentation_phase,
+          '{idempotencyKey}','"duplicate_anchor"'),payload,$2,presentation_phase,
         current_truth_key,state,revision,sequence,scope_kind,scope_id,'duplicate_anchor',provider_id,
         provider_instance_id,provider_binding_digest,provider_config_generation,
         provider_config_generation_digest,runtime_owner_id,runtime_generation,schema_generation,
@@ -460,12 +460,12 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await expect(fixture.pool.query("UPDATE cp_hosted_run SET projection_revision=0 WHERE run_id='run_projection'"))
       .rejects.toThrow();
     await fixture.pool.query(`INSERT INTO cp_provider_delivery_intent(intent_id,organization_id,
-      journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,presentation_phase,
+      journal_intent_digest,intent,payload,payload_digest,presentation_phase,
       current_truth_key,state,revision,sequence,scope_kind,scope_id,idempotency_key,provider_id,
       provider_instance_id,provider_binding_digest,provider_config_generation,
       provider_config_generation_digest,runtime_owner_id,runtime_generation,schema_generation,
       authority_snapshot_digest,projection_revision,projection_purpose,deadline_at,created_at,updated_at)
-      VALUES('constraint_delivery','org_projection',$1,'{}','{}',$2,'constraint','received',$3,
+      VALUES('constraint_delivery','org_projection',$1,'{}','{}',$2,'received',$3,
       'pending',1,1,'local_repository','repo','constraint','slack','A1',$4,1,$5,'control-plane',1,1,$6,
       1,'external',$7,$8,$8)`,[digest("journal"),digest("payload"),digest("truth"),digest("binding"),
       digest("generation"),digest("snapshot"),new Date(now.getTime()+60_000),now]);
@@ -493,13 +493,6 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await fixture.pool.query("DROP TRIGGER cp_delivery_projection_trigger ON cp_provider_delivery_intent");
     await expect(checkProjectionSchemaReadiness(fixture.pool)).resolves.toEqual({
       ready:false,reason:"migrations_pending"});
-  });
-
-  it("keeps the v2 activation authority immutable",async()=>{
-    await expect(fixture.pool.query(`UPDATE cp_projection_job_v2_authority SET activated_at=$1
-      WHERE authority_version=2`,[new Date(now.getTime()+1)])).rejects.toThrow("projection_v2_authority_immutable");
-    await expect(fixture.pool.query(`DELETE FROM cp_projection_job_v2_authority WHERE authority_version=2`))
-      .rejects.toThrow("projection_v2_authority_immutable");
   });
 
   it("ignores same-named projection tables and triggers in an unrelated schema",async()=>{
@@ -632,9 +625,6 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       ALTER COLUMN projection_event_sequence SET DEFAULT 99`],
     ["extra enabled projection trigger", `CREATE TRIGGER cp_projection_extra_trigger
       AFTER UPDATE ON cp_hosted_run FOR EACH ROW EXECUTE FUNCTION cp_hosted_run_projection_after()`],
-    ["deleted v2 activation row", `ALTER TABLE cp_projection_job_v2_authority
-      DISABLE TRIGGER cp_projection_job_v2_authority_immutable;
-      DELETE FROM cp_projection_job_v2_authority WHERE authority_version=2`],
     ["security definer projection function", `ALTER FUNCTION cp_hosted_run_projection_before() SECURITY DEFINER`],
     ["cursor organization default drift", `ALTER TABLE cp_projection_event_cursor
       ALTER COLUMN organization_id SET DEFAULT 'wrong'`],
