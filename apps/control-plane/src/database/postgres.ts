@@ -1,4 +1,3 @@
-import { drizzle } from "drizzle-orm/node-postgres";
 import {
   Pool,
   type PoolConfig,
@@ -72,7 +71,6 @@ export function createPostgresRuntime(input: PostgresPoolInput) {
   const pool = new Pool(createPoolConfig(input));
   return {
     pool,
-    database: drizzle({ client: pool }),
     async close() {
       await pool.end();
     },
