@@ -3,6 +3,8 @@
 - Status: Accepted; current supported-app scope note added 2026-09-02
 - Date: 2026-08-28
 - Decision owners: OpenTag maintainers
+- Partially superseded by: ADR 0006 for speculative generic Source App
+  registries, installation layers, and effect-delivery interfaces
 
 OpenTag will integrate Slack and every later Source App through one versioned
 Adapter contract with five narrow ports: ingress, context, presentation,
