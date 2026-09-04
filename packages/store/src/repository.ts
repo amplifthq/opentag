@@ -8,6 +8,8 @@ import { alias } from "drizzle-orm/sqlite-core";
 
 import { canonicalSha256Json } from "./canonical-json.js";
 
+import { createLocalEffectJournalRepository } from "./effect-journal.js";
+
 import { attempts, controlPlaneProjectionOutbox, hostedAttemptImports, hostedClaimOperations, hostedLifecycleOperations, hostedRunImports, runs, workThreads } from "./schema.js";
 
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
@@ -1362,6 +1364,7 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
         return acknowledged;
     }
     return {
+        ...createLocalEffectJournalRepository(db),
         async enqueueControlPlaneProjection(input: EnqueueControlPlaneProjectionInput): Promise<EnqueueControlPlaneProjectionResult> {
             return db.transaction((tx) => enqueueControlPlaneProjectionTx(tx, input), { behavior: "immediate" });
         },

@@ -29,6 +29,11 @@
       "types": "./dist/doctor.d.ts",
       "import": "./dist/doctor.js"
     },
+    "./effects": {
+      "development": "./src/effects/index.ts",
+      "types": "./dist/effects/index.d.ts",
+      "import": "./dist/effects/index.js"
+    },
     "./pr": {
       "development": "./src/pr.ts",
       "types": "./dist/pr.d.ts",

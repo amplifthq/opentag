@@ -159,6 +159,45 @@ export const hostedAttemptImports = sqliteTable("hosted_attempt_imports", {
     runIdx: index("hosted_attempt_imports_run_idx").on(table.runId)
 }));
 
+export const localEffectAttempts = sqliteTable("local_effect_attempts", {
+    acquireRequestId: text("acquire_request_id").primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id").notNull(),
+    runnerGeneration: integer("runner_generation").notNull(),
+    acquireJournalDigest: text("acquire_journal_digest").notNull(),
+    acquireRequestJson: text("acquire_request_json").notNull(),
+    state: text("state").notNull(),
+    permitKind: text("permit_kind"),
+    permitId: text("permit_id"),
+    effectId: text("effect_id"),
+    effectAttemptNumber: integer("effect_attempt_number"),
+    localJournalDigest: text("local_journal_digest"),
+    permitJson: text("permit_json"),
+    providerIoBegunAt: text("provider_io_begun_at"),
+    evidenceId: text("evidence_id"),
+    evidenceDigest: text("evidence_digest"),
+    evidenceJson: text("evidence_json"),
+    acknowledgementDigest: text("acknowledgement_digest"),
+    acknowledgementJson: text("acknowledgement_json"),
+    attentionReasonCode: text("attention_reason_code"),
+    executorLeaseOwner: text("executor_lease_owner"),
+    executorLeaseToken: text("executor_lease_token"),
+    executorLeaseExpiresAt: text("executor_lease_expires_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    acknowledgedAt: text("acknowledged_at")
+}, (table) => ({
+    journalIdx: uniqueIndex("local_effect_attempts_journal_idx").on(table.acquireJournalDigest),
+    permitIdx: uniqueIndex("local_effect_attempts_permit_idx").on(table.permitId),
+    effectAttemptIdx: uniqueIndex("local_effect_attempts_effect_attempt_idx")
+        .on(table.effectId, table.effectAttemptNumber),
+    recoveryIdx: index("local_effect_attempts_recovery_idx")
+        .on(table.organizationId, table.runnerId, table.runnerGeneration, table.state,
+            table.executorLeaseExpiresAt, table.createdAt),
+    retentionIdx: index("local_effect_attempts_retention_idx")
+        .on(table.state, table.acknowledgedAt)
+}));
+
 export const hostedLifecycleOperations = sqliteTable("hosted_lifecycle_operations", {
     destinationId: text("destination_id").notNull(),
     organizationId: text("organization_id").notNull(),
@@ -266,7 +305,7 @@ export const controlPlaneProjectionOutbox = sqliteTable("control_plane_projectio
       )`)
 }));
 
-const PAIRED_RUNNER_SCHEMA_VERSION = 1;
+const PAIRED_RUNNER_SCHEMA_VERSION = 2;
 
 const PAIRED_RUNNER_SCHEMA_SQL = `
 CREATE TABLE attempts (
@@ -400,6 +439,119 @@ CREATE TABLE hosted_lifecycle_operations (
           OR (state = 'leased' AND next_attempt_at IS NOT NULL AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL AND receipt_id IS NULL AND receipt_digest IS NULL AND receipt_json IS NULL AND acknowledged_at IS NULL)
           OR (state = 'acknowledged' AND next_attempt_at IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND receipt_id IS NOT NULL AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND acknowledged_at IS NOT NULL)
           OR (state = 'attention' AND next_attempt_at IS NULL AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL AND receipt_id IS NULL AND receipt_digest IS NULL AND receipt_json IS NULL AND last_reason_code IS NOT NULL AND acknowledged_at IS NULL)
+        )
+      );
+
+CREATE TABLE local_effect_attempts (
+        acquire_request_id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        runner_generation INTEGER NOT NULL CHECK (runner_generation > 0),
+        acquire_journal_digest TEXT NOT NULL,
+        acquire_request_json TEXT NOT NULL CHECK (
+          json_valid(acquire_request_json) AND json_type(acquire_request_json) = 'object'
+        ),
+        state TEXT NOT NULL CHECK (state IN (
+          'acquire_pending', 'permit_accepted', 'provider_io_begun',
+          'evidence_pending', 'acknowledged', 'attention'
+        )),
+        permit_kind TEXT CHECK (permit_kind IS NULL OR permit_kind IN ('execute', 'reconcile')),
+        permit_id TEXT,
+        effect_id TEXT,
+        effect_attempt_number INTEGER CHECK (
+          effect_attempt_number IS NULL OR effect_attempt_number > 0
+        ),
+        local_journal_digest TEXT,
+        permit_json TEXT CHECK (
+          permit_json IS NULL OR (json_valid(permit_json) AND json_type(permit_json) = 'object')
+        ),
+        provider_io_begun_at TEXT,
+        evidence_id TEXT,
+        evidence_digest TEXT,
+        evidence_json TEXT CHECK (
+          evidence_json IS NULL OR (json_valid(evidence_json) AND json_type(evidence_json) = 'object')
+        ),
+        acknowledgement_digest TEXT,
+        acknowledgement_json TEXT CHECK (
+          acknowledgement_json IS NULL
+          OR (json_valid(acknowledgement_json) AND json_type(acknowledgement_json) = 'object')
+        ),
+        attention_reason_code TEXT,
+        executor_lease_owner TEXT,
+        executor_lease_token TEXT,
+        executor_lease_expires_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        CHECK (
+          (permit_id IS NULL
+            AND permit_kind IS NULL AND effect_id IS NULL
+            AND effect_attempt_number IS NULL
+            AND local_journal_digest IS NULL AND permit_json IS NULL)
+          OR (permit_id IS NOT NULL
+            AND permit_kind IS NOT NULL AND effect_id IS NOT NULL
+            AND effect_attempt_number IS NOT NULL
+            AND local_journal_digest IS NOT NULL AND permit_json IS NOT NULL)
+        ),
+        CHECK (
+          (evidence_id IS NULL AND evidence_digest IS NULL AND evidence_json IS NULL)
+          OR (evidence_id IS NOT NULL AND evidence_digest IS NOT NULL AND evidence_json IS NOT NULL)
+        ),
+        CHECK (
+          (acknowledgement_digest IS NULL AND acknowledgement_json IS NULL AND acknowledged_at IS NULL)
+          OR (acknowledgement_digest IS NOT NULL AND acknowledgement_json IS NOT NULL AND acknowledged_at IS NOT NULL)
+        ),
+        CHECK (
+          (executor_lease_owner IS NULL AND executor_lease_token IS NULL
+            AND executor_lease_expires_at IS NULL)
+          OR (executor_lease_owner IS NOT NULL AND executor_lease_token IS NOT NULL
+            AND executor_lease_expires_at IS NOT NULL)
+        ),
+        CHECK (
+          length(acquire_journal_digest) = 71
+          AND substr(acquire_journal_digest, 1, 7) = 'sha256:'
+          AND substr(acquire_journal_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          AND (local_journal_digest IS NULL OR (
+            length(local_journal_digest) = 71 AND substr(local_journal_digest, 1, 7) = 'sha256:'
+            AND substr(local_journal_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          ))
+          AND (evidence_digest IS NULL OR (
+            length(evidence_digest) = 71 AND substr(evidence_digest, 1, 7) = 'sha256:'
+            AND substr(evidence_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          ))
+          AND (acknowledgement_digest IS NULL OR (
+            length(acknowledgement_digest) = 71
+            AND substr(acknowledgement_digest, 1, 7) = 'sha256:'
+            AND substr(acknowledgement_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          ))
+        ),
+        CHECK (
+          (state = 'acquire_pending'
+            AND permit_id IS NULL AND evidence_id IS NULL
+            AND acknowledgement_digest IS NULL AND provider_io_begun_at IS NULL
+            AND attention_reason_code IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'permit_accepted'
+            AND permit_id IS NOT NULL AND evidence_id IS NULL
+            AND acknowledgement_digest IS NULL AND provider_io_begun_at IS NULL
+            AND attention_reason_code IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'provider_io_begun'
+            AND permit_id IS NOT NULL AND evidence_id IS NULL
+            AND acknowledgement_digest IS NULL AND provider_io_begun_at IS NOT NULL
+            AND attention_reason_code IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'evidence_pending'
+            AND permit_id IS NOT NULL AND evidence_id IS NOT NULL
+            AND acknowledgement_digest IS NULL
+            AND attention_reason_code IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'acknowledged'
+            AND permit_id IS NOT NULL AND evidence_id IS NOT NULL
+            AND acknowledgement_digest IS NOT NULL
+            AND attention_reason_code IS NULL AND acknowledged_at IS NOT NULL
+            AND executor_lease_token IS NULL)
+          OR (state = 'attention'
+            AND permit_id IS NOT NULL AND evidence_id IS NOT NULL
+            AND acknowledgement_digest IS NOT NULL
+            AND attention_reason_code IS NOT NULL AND acknowledged_at IS NOT NULL
+            AND executor_lease_token IS NULL)
         )
       );
 
@@ -562,6 +714,24 @@ CREATE UNIQUE INDEX hosted_run_imports_source_idx
 
 CREATE UNIQUE INDEX hosted_run_imports_source_delivery_idx
         ON hosted_run_imports(source_provider, source_delivery_id);
+
+CREATE UNIQUE INDEX local_effect_attempts_effect_attempt_idx
+        ON local_effect_attempts(effect_id, effect_attempt_number);
+
+CREATE UNIQUE INDEX local_effect_attempts_journal_idx
+        ON local_effect_attempts(acquire_journal_digest);
+
+CREATE UNIQUE INDEX local_effect_attempts_permit_idx
+        ON local_effect_attempts(permit_id);
+
+CREATE INDEX local_effect_attempts_recovery_idx
+        ON local_effect_attempts(
+          organization_id, runner_id, runner_generation, state,
+          executor_lease_expires_at, created_at
+        );
+
+CREATE INDEX local_effect_attempts_retention_idx
+        ON local_effect_attempts(state, acknowledged_at);
 
 CREATE INDEX hosted_run_imports_work_thread_idx
         ON hosted_run_imports(work_thread_id);
@@ -861,6 +1031,113 @@ CREATE TRIGGER hosted_run_imports_immutable_update_guard
       BEFORE UPDATE ON hosted_run_imports
       BEGIN
         SELECT RAISE(ABORT, 'hosted_run_imports_immutable');
+      END;
+
+CREATE TRIGGER local_effect_attempts_delete_guard
+      BEFORE DELETE ON local_effect_attempts
+      WHEN OLD.state NOT IN ('acquire_pending', 'acknowledged')
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_delete_forbidden');
+      END;
+
+CREATE TRIGGER local_effect_attempts_identity_immutable_guard
+      BEFORE UPDATE OF
+        acquire_request_id, organization_id, runner_id, runner_generation,
+        acquire_journal_digest, acquire_request_json, created_at
+      ON local_effect_attempts
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_identity_immutable');
+      END;
+
+CREATE TRIGGER local_effect_attempts_permit_immutable_guard
+      BEFORE UPDATE OF
+        permit_kind, permit_id, effect_id, effect_attempt_number,
+        local_journal_digest, permit_json
+      ON local_effect_attempts
+      WHEN OLD.permit_id IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_permit_immutable');
+      END;
+
+CREATE TRIGGER local_effect_attempts_evidence_immutable_guard
+      BEFORE UPDATE OF evidence_id, evidence_digest, evidence_json
+      ON local_effect_attempts
+      WHEN OLD.evidence_id IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_evidence_immutable');
+      END;
+
+CREATE TRIGGER local_effect_attempts_ack_immutable_guard
+      BEFORE UPDATE OF acknowledgement_digest, acknowledgement_json,
+        attention_reason_code, acknowledged_at
+      ON local_effect_attempts
+      WHEN OLD.acknowledgement_digest IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_ack_immutable');
+      END;
+
+CREATE TRIGGER local_effect_attempts_lease_guard
+      BEFORE UPDATE OF executor_lease_owner, executor_lease_token,
+        executor_lease_expires_at
+      ON local_effect_attempts
+      WHEN (
+        (
+          OLD.executor_lease_token IS NULL
+          AND NEW.executor_lease_owner IS NOT NULL
+          AND NEW.executor_lease_token IS NOT NULL
+          AND NEW.executor_lease_expires_at > NEW.updated_at
+        )
+        OR (
+          OLD.executor_lease_token IS NOT NULL
+          AND OLD.executor_lease_expires_at <= NEW.updated_at
+          AND NEW.executor_lease_owner IS NOT NULL
+          AND NEW.executor_lease_token IS NOT NULL
+          AND NEW.executor_lease_token <> OLD.executor_lease_token
+          AND NEW.executor_lease_expires_at > NEW.updated_at
+        )
+        OR (
+          OLD.executor_lease_token IS NOT NULL
+          AND NEW.executor_lease_token = OLD.executor_lease_token
+          AND NEW.executor_lease_owner = OLD.executor_lease_owner
+          AND NEW.executor_lease_expires_at > OLD.executor_lease_expires_at
+        )
+        OR (
+          OLD.executor_lease_token IS NOT NULL
+          AND NEW.executor_lease_owner IS NULL
+          AND NEW.executor_lease_token IS NULL
+          AND NEW.executor_lease_expires_at IS NULL
+          AND NEW.state IN ('acknowledged', 'attention')
+        )
+      ) IS NOT TRUE
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_lease_invalid');
+      END;
+
+CREATE TRIGGER local_effect_attempts_transition_guard
+      BEFORE UPDATE OF state, provider_io_begun_at
+      ON local_effect_attempts
+      WHEN (
+        NEW.updated_at >= OLD.updated_at
+        AND (
+          (OLD.state = 'acquire_pending' AND NEW.state = 'permit_accepted')
+          OR (OLD.state = 'permit_accepted' AND NEW.state = 'provider_io_begun')
+          OR (OLD.state = 'permit_accepted' AND NEW.state = 'evidence_pending'
+            AND (
+              json_extract(NEW.evidence_json, '$.evidence.kind') = 'not_started'
+              OR (
+                json_extract(NEW.evidence_json, '$.evidence.kind') = 'attention'
+                AND json_extract(NEW.evidence_json, '$.evidence.reasonCode')
+                  = 'local.reconciliation-permit-expired-before-observation'
+                AND NEW.permit_kind = 'reconcile'
+              )
+            ))
+          OR (OLD.state = 'provider_io_begun' AND NEW.state = 'evidence_pending'
+            AND json_extract(NEW.evidence_json, '$.evidence.kind') <> 'not_started')
+          OR (OLD.state = 'evidence_pending' AND NEW.state IN ('acknowledged', 'attention'))
+        )
+      ) IS NOT TRUE
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_transition_invalid');
       END;
 `;
 

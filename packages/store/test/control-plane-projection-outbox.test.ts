@@ -111,6 +111,9 @@ describe("runner readiness outbox", () => {
         const sqlite = new Database(":memory:");
         migratePairedRunnerSchema(sqlite);
         migratePairedRunnerSchema(sqlite);
+        expect(sqlite.prepare(
+            "SELECT version, state FROM opentag_paired_runner_schema WHERE singleton = 1",
+        ).get()).toEqual({ version: 2, state: "ready" });
         const table = sqlite.prepare(`
       SELECT sql FROM sqlite_master
       WHERE type = 'table' AND name = 'control_plane_projection_outbox'
@@ -149,10 +152,24 @@ describe("runner readiness outbox", () => {
             "hosted_claim_operations",
             "hosted_lifecycle_operations",
             "hosted_run_imports",
+            "local_effect_attempts",
             "opentag_paired_runner_schema",
             "runs",
             "work_threads",
         ]);
+        sqlite.close();
+    });
+    it("fails closed on a version-1 paired schema marker", () => {
+        const sqlite = new Database(":memory:");
+        migratePairedRunnerSchema(sqlite);
+        sqlite.prepare(
+            "UPDATE opentag_paired_runner_schema SET version = 1 WHERE singleton = 1",
+        ).run();
+        expect(() => migratePairedRunnerSchema(sqlite))
+            .toThrow("paired_runner_schema_incompatible");
+        expect(sqlite.prepare(
+            "SELECT version, state FROM opentag_paired_runner_schema WHERE singleton = 1",
+        ).get()).toEqual({ version: 1, state: "ready" });
         sqlite.close();
     });
     it("leaves an unmarked existing database unchanged", () => {

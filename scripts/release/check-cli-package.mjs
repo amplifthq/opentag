@@ -236,6 +236,7 @@ function checkInstalledSqliteRuntime(installDir) {
       const expected = [
         "attempts", "control_plane_projection_outbox", "hosted_attempt_imports",
         "hosted_claim_operations", "hosted_lifecycle_operations", "hosted_run_imports",
+        "local_effect_attempts",
         "opentag_paired_runner_schema",
         "runs", "work_threads"
       ];

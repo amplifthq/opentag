@@ -6,6 +6,7 @@ export default defineConfig({
     "src/config.ts",
     "src/daemon.ts",
     "src/doctor.ts",
+    "src/effects/index.ts",
     "src/pr.ts",
     "src/runtime.ts"
   ],
