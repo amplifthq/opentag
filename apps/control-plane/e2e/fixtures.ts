@@ -67,5 +67,5 @@ export async function signIn(page: Page): Promise<void> {
     page.getByRole("button", { name: "Sign in" }).click(),
   ]);
   await expect(page).toHaveURL(/\/$/u);
-  await expect(page.getByRole("heading", { name: "System overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your AI teammates" })).toBeVisible();
 }
