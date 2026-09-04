@@ -255,14 +255,15 @@ try {
       (SELECT count(*) FROM cp_runner WHERE runner_id = 'runner_e2e_${runId}'),
       (SELECT count(*) FROM cp_project_target WHERE project_target_id = 'slack_target_${runId}'),
       (SELECT count(*) FROM cp_api_key WHERE label = 'browser-e2e-${runId}' AND revoked_at IS NOT NULL),
-      (SELECT count(*) FROM cp_slack_installation slack
-       JOIN cp_source_app_installation installation USING(organization_id, installation_id)
-       JOIN cp_source_binding binding USING(organization_id, installation_id)
-       WHERE slack.installation_id = 'slack_installation_${runId}'
-         AND binding.binding_id = 'slack_binding_${runId}'
-         AND slack.signing_secret_ref = 'file:/run/secrets/opentag_slack_signing_secret'
-         AND slack.bot_token_ref = 'file:/run/secrets/opentag_slack_bot_token'
-         AND installation.binding_digest = binding.binding_digest),
+      (SELECT count(*) FROM cp_slack_binding
+       WHERE organization_id = 'org_e2e'
+         AND installation_id = 'slack_installation_${runId}'
+         AND binding_id = 'slack_binding_${runId}'
+         AND state = 'active'
+         AND credential_generation = 1
+         AND signing_secret_ref = 'file:/run/secrets/opentag_slack_signing_secret'
+         AND bot_token_ref = 'file:/run/secrets/opentag_slack_bot_token'
+         AND display_name = 'OpenTag'),
       (SELECT count(DISTINCT job_kind) FROM cp_job
        WHERE job_kind IN ('hosted-attempt-reconciliation', 'runner-readiness-retention')
          AND state = 'succeeded');`,
@@ -373,8 +374,11 @@ try {
     `SELECT
       (SELECT count(*) FROM cp_runner WHERE runner_id = 'runner_e2e_${runId}'),
       (SELECT count(*) FROM cp_project_target WHERE project_target_id = 'slack_target_${runId}'),
-      (SELECT count(*) FROM cp_slack_installation
-       WHERE installation_id = 'slack_installation_${runId}'),
+      (SELECT count(*) FROM cp_slack_binding
+       WHERE organization_id = 'org_e2e'
+         AND installation_id = 'slack_installation_${runId}'
+         AND binding_id = 'slack_binding_${runId}'
+         AND display_name = 'OpenTag'),
       (SELECT count(*) FROM control_plane_migrations),
       (SELECT count(*) FROM cp_organization
        WHERE organization_id = 'org_e2e'

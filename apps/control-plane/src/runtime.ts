@@ -259,34 +259,25 @@ export function createControlPlaneRuntime(input: {
         installation_id: string; binding_id: string; project_target_id: string | null;
         publication_mode: "proposal_only" | "pull_request"; team_id: string; app_id: string;
         channel_id: string; bot_user_id: string; member_user_ids: string[];
-        app_instance_id: string; source_binding_digest: string;
+        source_binding_digest: string;
         credential_generation: number; credential_generation_digest: string;
         runner_id: string | null; target_binding_digest: string | null;
         repository_provider: string | null; owner: string | null; repo: string | null;
         default_executor: string | null; default_branch: string | null;
       }>(`SELECT slack.installation_id,slack.binding_id,slack.project_target_id,
           slack.publication_mode,slack.team_id,slack.app_id,slack.channel_id,
-          slack.bot_user_id,slack.member_user_ids,installation.app_instance_id,
-          installation.binding_digest AS source_binding_digest,
-          installation.credential_generation,installation.credential_generation_digest,
+          slack.bot_user_id,slack.member_user_ids,
+          slack.binding_digest AS source_binding_digest,
+          slack.credential_generation,slack.credential_generation_digest,
           target.runner_id,target.binding_digest AS target_binding_digest,
           target.provider AS repository_provider,target.owner,target.repo,
           target.default_executor,target.default_branch
-        FROM cp_slack_installation slack
-        JOIN cp_source_app_installation installation
-          ON installation.organization_id=slack.organization_id
-         AND installation.installation_id=slack.installation_id
-        JOIN cp_source_binding binding
-          ON binding.organization_id=slack.organization_id
-         AND binding.binding_id=slack.binding_id
-         AND binding.installation_id=slack.installation_id
+        FROM cp_slack_binding slack
         LEFT JOIN cp_project_target target
           ON target.organization_id=slack.organization_id
          AND target.project_target_id=slack.project_target_id
         WHERE slack.organization_id=$1 AND slack.installation_id=$2
-          AND slack.binding_id=$3 AND installation.source_app_id='slack'
-          AND installation.state='active' AND binding.state='active'
-          AND binding.binding_digest=installation.binding_digest`,
+          AND slack.binding_id=$3 AND slack.state='active'`,
       [command.reservation.organizationId, command.reservation.installationId,
         command.reservation.bindingId]);
       const installation = installationResult.rows[0];
@@ -493,7 +484,7 @@ export function createControlPlaneRuntime(input: {
       const text = renderSlackTeamRelayProjection(presentation);
       const blocks = createSlackTeamRelayProjectionBlocks(presentation);
       const providerBinding = { bindingKind: "established" as const,
-        providerId: "slack", providerInstanceId: installation.app_instance_id,
+        providerId: "slack", providerInstanceId: installation.installation_id,
         providerPrincipalDigest: `sha256:${createHash("sha256")
           .update(installation.bot_user_id).digest("hex")}`,
         principalAssurance: "provider_verified" as const,
@@ -658,7 +649,7 @@ export function createControlPlaneRuntime(input: {
             const slackSchema = await checkSlackIngressSchemaReadiness(postgres.pool);
             if (!slackSchema.ready) return slackSchema;
             const configured = await postgres.pool.query<{ count: number }>(
-              "SELECT count(*)::int AS count FROM cp_slack_installation");
+              "SELECT count(*)::int AS count FROM cp_slack_binding WHERE state='active'");
             if ((configured.rows[0]?.count ?? 0) > 0 && !slack) {
               return { ready: false, reason: "configuration_invalid" };
             }

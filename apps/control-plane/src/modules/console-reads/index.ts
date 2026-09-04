@@ -201,7 +201,7 @@ function summarizePresence(agents: AgentPresenceView[]): AgentPresenceSummary {
   if (agents.length === 0) {
     return {
       state: "setup_required",
-      reason: "No active Slack installation and binding are configured.",
+      reason: "No active Slack binding is configured.",
       agents: [],
     };
   }
@@ -226,19 +226,9 @@ export function createConsoleReadModel(input: { pool: Pool }) {
                   slack.binding_id, slack.project_target_id,
                   slack.team_id, slack.channel_id, slack.app_id,
                   slack.bot_user_id
-           FROM cp_slack_installation slack
-           JOIN cp_source_app_installation installation
-             ON installation.organization_id = slack.organization_id
-            AND installation.installation_id = slack.installation_id
-            AND installation.source_app_id = 'slack'
-            AND installation.state = 'active'
-           JOIN cp_source_binding binding
-             ON binding.organization_id = slack.organization_id
-            AND binding.binding_id = slack.binding_id
-            AND binding.installation_id = slack.installation_id
-            AND binding.binding_digest = installation.binding_digest
-            AND binding.state = 'active'
+           FROM cp_slack_binding slack
            WHERE slack.organization_id = $1
+             AND slack.state='active'
          )
          SELECT slack.installation_id, slack.binding_id, slack.team_id,
                 slack.channel_id, slack.app_id, slack.bot_user_id,

@@ -495,8 +495,7 @@ export async function checkSourceIngressSchemaReadiness(
     const result = await pool.query<{ present: boolean }>(
       `SELECT bool_and(to_regclass(name) IS NOT NULL) AS present
       FROM unnest($1::text[]) AS required(name)`,
-      [["cp_source_app_installation", "cp_source_binding",
-        "cp_ingress_reservation"]],
+      [["cp_slack_binding", "cp_ingress_reservation"]],
     );
     return result.rows[0]?.present
       ? { ready: true }
@@ -510,38 +509,113 @@ export async function checkSlackIngressSchemaReadiness(
   pool: Pick<MigrationPool, "query">,
 ): Promise<ReadinessResult> {
   try {
-    const result = await pool.query<{ present: boolean }>(`SELECT
-      to_regclass('cp_slack_installation') IS NOT NULL
+    const result = await pool.query<{ present: boolean }>(`WITH catalog_line(line) AS (
+      SELECT concat_ws('|','column',attribute.attnum::text,attribute.attname,
+        format_type(attribute.atttypid,attribute.atttypmod),attribute.attnotnull::text,
+        COALESCE(pg_get_expr(default_value.adbin,default_value.adrelid,true),'<null>'))
+      FROM pg_attribute attribute
+      LEFT JOIN pg_attrdef default_value ON default_value.adrelid=attribute.attrelid
+        AND default_value.adnum=attribute.attnum
+      WHERE attribute.attrelid=to_regclass('cp_slack_binding')
+        AND attribute.attnum>0 AND NOT attribute.attisdropped
+      UNION ALL
+      SELECT concat_ws('|','constraint',source.relname,constraint_row.conname,
+        constraint_row.contype::text,
+        array_to_string(ARRAY(SELECT target_attribute.attname::text
+          FROM unnest(constraint_row.conkey) WITH ORDINALITY key(attnum,n)
+          JOIN pg_attribute target_attribute ON target_attribute.attrelid=constraint_row.conrelid
+            AND target_attribute.attnum=key.attnum ORDER BY n),','),
+        CASE WHEN constraint_row.confrelid=0 THEN '<null>'
+          ELSE constraint_row.confrelid::regclass::text END,
+        array_to_string(ARRAY(SELECT target_attribute.attname::text
+          FROM unnest(constraint_row.confkey) WITH ORDINALITY key(attnum,n)
+          JOIN pg_attribute target_attribute ON target_attribute.attrelid=constraint_row.confrelid
+            AND target_attribute.attnum=key.attnum ORDER BY n),','),
+        constraint_row.convalidated::text,constraint_row.confmatchtype::text,
+        constraint_row.confupdtype::text,constraint_row.confdeltype::text,
+        constraint_row.condeferrable::text,constraint_row.condeferred::text,
+        constraint_row.connoinherit::text,
+        regexp_replace(pg_get_constraintdef(constraint_row.oid,true),'[[:space:]]+','','g'))
+      FROM pg_constraint constraint_row
+      JOIN pg_class source ON source.oid=constraint_row.conrelid
+      WHERE source.relnamespace=current_schema()::regnamespace
+        AND (constraint_row.conrelid=to_regclass('cp_slack_binding')
+          OR constraint_row.conname IN ('cp_ingress_reservation_slack_binding_fkey',
+            'cp_slack_action_authority_slack_binding_fkey'))
+      UNION ALL
+      SELECT concat_ws('|','index',index_table.relname,index_row.indisunique::text,
+        index_row.indisprimary::text,index_row.indisvalid::text,index_row.indisready::text,
+        index_row.indnkeyatts::text,index_row.indnatts::text,
+        array_to_string(ARRAY(SELECT pg_get_indexdef(index_row.indexrelid,n,false)
+          FROM generate_series(1,index_row.indnatts) n ORDER BY n),','),
+        COALESCE(regexp_replace(pg_get_expr(index_row.indpred,index_row.indrelid,true),
+          '[[:space:]]+','','g'),'<null>'))
+      FROM pg_index index_row JOIN pg_class index_table ON index_table.oid=index_row.indexrelid
+      WHERE index_row.indrelid=to_regclass('cp_slack_binding')
+      UNION ALL
+      SELECT concat_ws('|','trigger',trigger_row.tgname,trigger_row.tgenabled,
+        trigger_row.tgtype::text,COALESCE(pg_get_expr(trigger_row.tgqual,
+          trigger_row.tgrelid,true),'<null>'),encode(trigger_row.tgargs,'hex'),
+        function_row.proname,regexp_replace(function_row.prosrc,'[[:space:]]+','','g'))
+      FROM pg_trigger trigger_row JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
+      WHERE trigger_row.tgrelid=to_regclass('cp_slack_binding')
+        AND NOT trigger_row.tgisinternal
+    ), catalog_fingerprint(value) AS (
+      SELECT md5(string_agg(line,E'\n' ORDER BY line)) FROM catalog_line
+    ) SELECT
+      to_regclass('cp_slack_binding') IS NOT NULL
       AND to_regclass('cp_slack_action_authority') IS NOT NULL
-      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_installation'::regclass
-        AND attname='project_target_id' AND NOT attisdropped)
-      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_installation'::regclass
-        AND attname='publication_mode' AND attnotnull AND NOT attisdropped)
-      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_installation'::regclass
-        AND attname='operator_user_ids' AND attnotnull AND NOT attisdropped)
-      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_installation'::regclass
-        AND attname='approver_user_id' AND NOT attisdropped)
-      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_installation'::regclass
-        AND attname='admin_user_ids' AND attnotnull AND NOT attisdropped)
-      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_installation'::regclass
-        AND conname='cp_slack_installation_publication_mode_check' AND convalidated)
-      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_installation'::regclass
-        AND conname='cp_slack_installation_roles_check' AND convalidated)
-      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
-        AND attname='projection_generation' AND attnotnull AND NOT attisdropped)
+      AND to_regclass('cp_source_app_installation') IS NULL
+      AND to_regclass('cp_source_binding') IS NULL
+      AND to_regclass('cp_slack_installation') IS NULL
+      AND (SELECT array_agg(column_name::text ORDER BY ordinal_position)
+        FROM information_schema.columns WHERE table_schema=current_schema()
+          AND table_name='cp_slack_binding')=ARRAY[
+        'organization_id','binding_id','installation_id','binding_digest','state',
+        'credential_generation','credential_generation_digest','route_identity','team_id',
+        'app_id','channel_id','bot_user_id','member_user_ids','operator_user_ids',
+        'approver_user_id','admin_user_ids','signing_secret_ref','bot_token_ref',
+        'project_target_id','publication_mode','display_name','created_at','updated_at']
+      AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_slack_binding' AND column_name='display_name'
+        AND data_type='text' AND is_nullable='NO' AND column_default='''OpenTag''::text')
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_binding'::regclass
+        AND conname='cp_slack_binding_pkey' AND contype='p' AND convalidated
+        AND pg_get_constraintdef(oid)='PRIMARY KEY (organization_id, binding_id)')
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_binding'::regclass
+        AND conname='cp_slack_binding_organization_id_installation_id_key' AND contype='u'
+        AND convalidated AND pg_get_constraintdef(oid)=
+          'UNIQUE (organization_id, installation_id)')
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_binding'::regclass
+        AND conname='cp_slack_binding_organization_id_binding_id_installation_id_key'
+        AND contype='u' AND convalidated AND pg_get_constraintdef(oid)=
+          'UNIQUE (organization_id, binding_id, installation_id)')
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_binding'::regclass
+        AND conname='cp_slack_binding_route_identity_key' AND contype='u' AND convalidated)
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_binding'::regclass
+        AND conname='cp_slack_binding_team_id_app_id_channel_id_key'
+        AND contype='u' AND convalidated)
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_binding'::regclass
+        AND conname='cp_slack_binding_publication_mode_check' AND contype='c' AND convalidated)
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_binding'::regclass
+        AND conname='cp_slack_binding_roles_check' AND contype='c' AND convalidated)
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_ingress_reservation'::regclass
+        AND conname='cp_ingress_reservation_slack_binding_fkey' AND contype='f' AND convalidated
+        AND confrelid='cp_slack_binding'::regclass AND confdeltype='a'
+        AND ARRAY(SELECT attname::text FROM unnest(conkey) WITH ORDINALITY key(attnum,n)
+          JOIN pg_attribute ON attrelid=conrelid AND pg_attribute.attnum=key.attnum ORDER BY n)
+          =ARRAY['organization_id','binding_id','installation_id'])
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
+        AND conname='cp_slack_action_authority_slack_binding_fkey' AND contype='f' AND convalidated
+        AND confrelid='cp_slack_binding'::regclass AND confdeltype='c'
+        AND ARRAY(SELECT attname::text FROM unnest(conkey) WITH ORDINALITY key(attnum,n)
+          JOIN pg_attribute ON attrelid=conrelid AND pg_attribute.attnum=key.attnum ORDER BY n)
+          =ARRAY['organization_id','binding_id','installation_id'])
       AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
         AND attname='effect_approval' AND NOT attisdropped AND NOT attnotnull
         AND format_type(atttypid,atttypmod)='jsonb'
         AND NOT EXISTS (SELECT 1 FROM pg_attrdef
           WHERE adrelid='cp_slack_action_authority'::regclass AND adnum=attnum))
-      AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
-        AND attname='publication_approval' AND NOT attisdropped)
-      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
-        AND attname='authority_family_id' AND attnotnull AND NOT attisdropped)
-      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
-        AND attname='authority_epoch' AND attnotnull AND NOT attisdropped)
-      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
-        AND attname='claim_state' AND attnotnull AND NOT attisdropped)
       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
         AND conname='cp_slack_action_authority_projection_generation_check' AND convalidated)
       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
@@ -552,13 +626,13 @@ export async function checkSlackIngressSchemaReadiness(
           'CHECK((action_kind=ANY(ARRAY[''status''::text,''cancel''::text,''approval''::text,''effect''::text,''bind''::text,''unbind''::text])))')
       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
         AND conname='cp_slack_action_authority_claim_shape_check' AND convalidated)
+      AND (SELECT value FROM catalog_fingerprint)='14357047bdee89643757ab33fd042fd3'
       AS present`);
     return result.rows[0]?.present
       ? { ready: true }
       : { ready: false, reason: "migrations_pending" };
   } catch { return { ready: false, reason: "migrations_pending" }; }
 }
-
 export async function checkProjectionSchemaReadiness(
   pool: Pick<MigrationPool, "query">,
 ): Promise<ReadinessResult> {

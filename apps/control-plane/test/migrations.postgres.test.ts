@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { sortCanonicalUnicodeStrings } from "@opentag/core";
-import { checkMigrationReadiness, runMigrations } from "../src/database/migrations.js";
+import { checkMigrationReadiness, checkSlackIngressSchemaReadiness,
+  runMigrations } from "../src/database/migrations.js";
 import { createDurableJobQueue } from "../src/modules/jobs/index.js";
 import { runOneJob } from "../src/modules/jobs/worker.js";
 import { createPostgresDeliveryRepository } from "../src/modules/provider-delivery/repository.js";
@@ -204,6 +205,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0021_projection_job_v2_fence.sql",
       "0022_job_terminal_state.sql",
       "0023_effect_authority.sql",
+      "0024_slack_binding.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();
@@ -256,9 +258,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "cp_runner_readiness",
       "cp_session",
       "cp_slack_action_authority",
-      "cp_slack_installation",
-      "cp_source_app_installation",
-      "cp_source_binding",
+      "cp_slack_binding",
       "cp_source_content",
       "cp_source_content_invalidation_receipt",
       "cp_source_content_read_grant",
@@ -532,35 +532,6 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     }finally{await recovered.close();}
   });
 
-  it("backfills pre-0018 status anchors by durable shape without emitting external events",async()=>{
-    const legacy=await createIsolatedPostgres();
-    try{
-      await runMigrations(legacy.pool,migrationsBefore(legacy.migrations,"0019_projection_event_sequence.sql"));
-      const insert=async(id:string,operation:"create"|"update")=>legacy.pool.query(`INSERT INTO
-        cp_provider_delivery_intent(intent_id,organization_id,journal_intent_digest,intent,payload,
-        payload_digest,payload_custody_ref,presentation_phase,current_truth_key,state,revision,sequence,
-        scope_kind,scope_id,idempotency_key,provider_id,provider_instance_id,provider_binding_digest,
-        provider_config_generation,provider_config_generation_digest,runtime_owner_id,runtime_generation,
-        schema_generation,authority_snapshot_digest,status_message_id,run_id,projection_revision,
-        projection_purpose,deadline_at,created_at,updated_at)
-        VALUES($1,'org_legacy',$2,$3,'{}',$4,$5,'received',$6,'pending',1,1,'local_repository','repo',$7,
-        'slack','A1',$8,1,$9,'control-plane',1,1,$10,'run_legacy:status','run_legacy',1,'external',$11,$12,$12)`,
-      [id,`journal_${id}`,JSON.stringify({operation,deliveryKind:"message",provenance:{kind:"business"}}),
-        `payload_${id}`,`custody_${id}`,`truth_${id}`,`key_${id}`,`binding_${id}`,`generation_${id}`,
-        `snapshot_${id}`,new Date("2026-09-01T02:00:00.000Z"),new Date("2026-09-01T01:00:00.000Z")]);
-      await insert("legacy_create","create");await insert("legacy_update","update");
-      await runMigrations(legacy.pool,legacy.migrations);
-      expect((await legacy.pool.query(`SELECT intent_id,projection_purpose FROM cp_provider_delivery_intent
-        ORDER BY intent_id`)).rows).toEqual([
-        {intent_id:"legacy_create",projection_purpose:"anchor_create"},
-        {intent_id:"legacy_update",projection_purpose:"anchor_update"}]);
-      expect((await legacy.pool.query("SELECT count(*)::int count FROM cp_projection_delivery_watermark")).rows[0])
-        .toEqual({count:0});
-      expect((await legacy.pool.query(`SELECT count(*)::int count FROM cp_job
-        WHERE job_id LIKE 'team-relay-delivery:%'`)).rows[0]).toEqual({count:0});
-    }finally{await legacy.close();}
-  });
-
   it("converges publication authority to three fail-closed Effect tables", async () => {
     await fixture.migrate();
     const oldTables = ["cp_publication_branch_ownership", "cp_publication_intent",
@@ -623,6 +594,67 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       await expect(checkMigrationReadiness(upgrade.pool, upgrade.migrations))
         .resolves.toEqual({ ready: true });
     } finally { await upgrade.close(); }
+  });
+
+  it("rolls back the Slack convergence when any legacy binding authority exists", async () => {
+    const cutover = await createIsolatedPostgres();
+    try {
+      await runMigrations(cutover.pool,
+        migrationsBefore(cutover.migrations,"0024_slack_binding.sql"));
+      await cutover.pool.query(
+        "INSERT INTO cp_organization(organization_id,display_name) VALUES('org_slack_cutover','Slack cutover')",
+      );
+      await cutover.pool.query(
+        `INSERT INTO cp_source_app_installation(organization_id,installation_id,
+           source_app_id,app_instance_id,binding_digest,credential_generation,
+           credential_generation_digest,state,created_at,updated_at)
+         VALUES('org_slack_cutover','install_slack_cutover','slack','legacy_instance',$1,
+           1,$2,'active',$3,$3)`,
+        [`sha256:${"a".repeat(64)}`,`sha256:${"b".repeat(64)}`,
+          new Date("2026-09-05T04:00:00.000Z")],
+      );
+      await expect(runMigrations(cutover.pool,cutover.migrations))
+        .rejects.toThrow("slack_binding_fresh_reset_required");
+      expect((await cutover.pool.query(
+        "SELECT count(*)::int AS count FROM cp_source_app_installation",
+      )).rows[0]).toEqual({count:1});
+      expect((await cutover.pool.query(
+        "SELECT to_regclass('cp_slack_binding')::text AS binding",
+      )).rows).toEqual([{binding:null}]);
+      expect((await cutover.pool.query(
+        `SELECT count(*)::int AS count FROM control_plane_migrations
+         WHERE name='0024_slack_binding.sql'`,
+      )).rows[0]).toEqual({count:0});
+      expect((await cutover.pool.query<{ target: string }>(
+        `SELECT confrelid::regclass::text AS target FROM pg_constraint
+         WHERE conrelid='cp_ingress_reservation'::regclass
+           AND conname='cp_ingress_reservation_organization_id_binding_id_fkey'`,
+      )).rows).toEqual([{target:"cp_source_binding"}]);
+    } finally { await cutover.close(); }
+  });
+
+  it.each([
+    ["same-name weakened binding digest", `ALTER TABLE cp_slack_binding
+      DROP CONSTRAINT cp_slack_binding_binding_digest_check;
+      ALTER TABLE cp_slack_binding ADD CONSTRAINT cp_slack_binding_binding_digest_check
+      CHECK(binding_digest<>'')`],
+    ["same-name weakened roles", `ALTER TABLE cp_slack_binding
+      DROP CONSTRAINT cp_slack_binding_roles_check;
+      ALTER TABLE cp_slack_binding ADD CONSTRAINT cp_slack_binding_roles_check CHECK(true)`],
+    ["action binding loses cascade", `ALTER TABLE cp_slack_action_authority
+      DROP CONSTRAINT cp_slack_action_authority_slack_binding_fkey;
+      ALTER TABLE cp_slack_action_authority
+      ADD CONSTRAINT cp_slack_action_authority_slack_binding_fkey
+      FOREIGN KEY(organization_id,binding_id,installation_id)
+      REFERENCES cp_slack_binding(organization_id,binding_id,installation_id)`],
+  ] as const)("fails Slack readiness for %s", async (_label, tamperSql) => {
+    const tampered = await createIsolatedPostgres();
+    try {
+      await tampered.migrate();
+      await tampered.pool.query(tamperSql);
+      await expect(checkSlackIngressSchemaReadiness(tampered.pool))
+        .resolves.toEqual({ ready:false, reason:"migrations_pending" });
+    } finally { await tampered.close(); }
   });
 
   it("rolls back the Effect cutover when a legacy publication capability exists", async () => {

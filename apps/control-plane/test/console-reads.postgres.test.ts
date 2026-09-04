@@ -50,7 +50,7 @@ describe("derived Agent Presence read model", () => {
 
     await expect(reads.presence(consolePrincipal)).resolves.toEqual({
       state: "setup_required",
-      reason: "No active Slack installation and binding are configured.",
+      reason: "No active Slack binding is configured.",
       agents: [],
     });
     expect(query).toHaveBeenCalledWith(
@@ -58,7 +58,8 @@ describe("derived Agent Presence read model", () => {
       ["org_presence"],
     );
     const sql = String(query.mock.calls[0]?.[0]);
-    expect(sql).toContain("binding.binding_digest = installation.binding_digest");
+    expect(sql).toContain("FROM cp_slack_binding slack");
+    expect(sql).toContain("slack.state='active'");
     expect(sql).toContain("hosted_admission->'projectTarget'->>'projectTargetId'");
     expect(sql).toContain("hosted_admission->'projectTarget'->>'digest'");
     expect(sql).toContain("runner_id = target.runner_id");
@@ -235,7 +236,7 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
     expect(JSON.stringify(runners)).not.toContain("runner_concealed");
     await expect(reads.presence(principal)).resolves.toEqual({
       state: "setup_required",
-      reason: "No active Slack installation and binding are configured.",
+      reason: "No active Slack binding is configured.",
       agents: [],
     });
   });
@@ -253,41 +254,17 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
       [`sha256:${"a".repeat(64)}`],
     );
     await fixture.pool.query(
-      `INSERT INTO cp_source_app_installation(
-         organization_id, installation_id, source_app_id, app_instance_id,
-         binding_digest, credential_generation, credential_generation_digest,
-         state, created_at, updated_at
-       ) VALUES(
-         'org_console_read', 'install_presence', 'slack', 'slack_presence',
-         $1, 1, $2, 'active', clock_timestamp(), clock_timestamp()
-       )`,
-      [`sha256:${"b".repeat(64)}`, `sha256:${"c".repeat(64)}`],
-    );
-    await fixture.pool.query(
-      `INSERT INTO cp_source_binding(
-         organization_id, binding_id, installation_id, binding_digest, state,
-         created_at, updated_at
-       ) VALUES(
-         'org_console_read', 'binding_presence', 'install_presence', $1,
-         'active', clock_timestamp(), clock_timestamp()
-       )`,
-      [`sha256:${"b".repeat(64)}`],
-    );
-    await fixture.pool.query(
-      `INSERT INTO cp_slack_installation(
-         organization_id, installation_id, binding_id, project_target_id,
-         publication_mode, team_id, app_id, channel_id, bot_user_id,
-         signing_secret_ref, member_user_ids, operator_user_ids,
-         approver_user_id, admin_user_ids, bot_token_ref, route_identity,
-         created_at, updated_at
-       ) VALUES(
-         'org_console_read', 'install_presence', 'binding_presence',
-         'target_presence', 'proposal_only', 'T_PRESENCE', 'A_PRESENCE',
-         'C_PRESENCE', 'U_BOT', 'secret://slack/signing',
-         ARRAY['U_MEMBER'], ARRAY['U_MEMBER'], 'U_MEMBER', ARRAY['U_MEMBER'],
-         'secret://slack/bot', 'route_presence', clock_timestamp(),
-         clock_timestamp()
-       )`,
+      `INSERT INTO cp_slack_binding(organization_id,binding_id,installation_id,
+         binding_digest,state,credential_generation,credential_generation_digest,
+         route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,
+         operator_user_ids,approver_user_id,admin_user_ids,signing_secret_ref,
+         bot_token_ref,project_target_id,publication_mode,created_at,updated_at)
+       VALUES('org_console_read','binding_presence','install_presence',$1,'active',1,$2,
+         'route_presence','T_PRESENCE','A_PRESENCE','C_PRESENCE','U_BOT',
+         ARRAY['U_MEMBER'],ARRAY['U_MEMBER'],'U_MEMBER',ARRAY['U_MEMBER'],
+         'secret://slack/signing','secret://slack/bot','target_presence',
+         'proposal_only',clock_timestamp(),clock_timestamp())`,
+      [`sha256:${"b".repeat(64)}`,`sha256:${"c".repeat(64)}`],
     );
     await fixture.pool.query(
       `INSERT INTO cp_runner_readiness(
@@ -378,26 +355,6 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
        )
        WHERE organization_id = 'org_console_read'
          AND receipt_id = 'readiness_presence'`,
-    );
-
-    await fixture.pool.query(
-      `UPDATE cp_source_binding
-       SET binding_digest = $1
-       WHERE organization_id = 'org_console_read'
-         AND binding_id = 'binding_presence'`,
-      [`sha256:${"f".repeat(64)}`],
-    );
-    await expect(reads.presence(principal)).resolves.toEqual({
-      state: "setup_required",
-      reason: "No active Slack installation and binding are configured.",
-      agents: [],
-    });
-    await fixture.pool.query(
-      `UPDATE cp_source_binding
-       SET binding_digest = $1
-       WHERE organization_id = 'org_console_read'
-         AND binding_id = 'binding_presence'`,
-      [`sha256:${"b".repeat(64)}`],
     );
 
     const insertRun = async (
@@ -554,7 +511,7 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
       [`sha256:${"9".repeat(64)}`, `sha256:${"e".repeat(64)}`],
     );
     await fixture.pool.query(
-      `UPDATE cp_slack_installation
+      `UPDATE cp_slack_binding
        SET project_target_id = 'target_rebound'
        WHERE organization_id = 'org_console_read'
          AND installation_id = 'install_presence'`,
@@ -564,7 +521,7 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
       agents: [{ activeRun: null }],
     });
     await fixture.pool.query(
-      `UPDATE cp_slack_installation
+      `UPDATE cp_slack_binding
        SET project_target_id = 'target_presence'
        WHERE organization_id = 'org_console_read'
          AND installation_id = 'install_presence'`,
@@ -589,7 +546,7 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
       organizationId: "org_other_read",
     })).resolves.toEqual({
       state: "setup_required",
-      reason: "No active Slack installation and binding are configured.",
+      reason: "No active Slack binding is configured.",
       agents: [],
     });
   });

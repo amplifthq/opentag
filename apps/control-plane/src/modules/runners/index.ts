@@ -571,22 +571,10 @@ export function createRunnerDirectory(input: {
         }
         const slackBinding = await client.query(
           `SELECT 1
-           FROM cp_slack_installation slack
-           JOIN cp_source_app_installation installation
-             ON installation.organization_id = slack.organization_id
-            AND installation.installation_id = slack.installation_id
-            AND installation.source_app_id = 'slack'
-            AND installation.state = 'active'
-           JOIN cp_source_binding binding
-             ON binding.organization_id = slack.organization_id
-            AND binding.binding_id = slack.binding_id
-            AND binding.installation_id = slack.installation_id
-            AND binding.binding_digest = installation.binding_digest
-            AND binding.state = 'active'
-           WHERE slack.organization_id = $1
-             AND slack.project_target_id = $2
+           FROM cp_slack_binding
+           WHERE organization_id=$1 AND project_target_id=$2 AND state='active'
            LIMIT 1
-           FOR SHARE OF slack, installation, binding`,
+           FOR SHARE`,
           [principal.organizationId, target.projectTargetId],
         );
         if (slackBinding.rows.length === 0) {

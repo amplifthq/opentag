@@ -108,22 +108,12 @@ async function resolveInstallation(pool: Pool, identity: { organizationId: strin
     team_id: string; app_id: string; channel_id: string; bot_user_id: string;
     member_user_ids: string[];
     operator_user_ids: string[]; approver_user_id: string | null; admin_user_ids: string[];
-    signing_secret_ref: string; bot_token_ref: string; app_instance_id: string;
+    signing_secret_ref: string; bot_token_ref: string;
     binding_digest: string; credential_generation: number; credential_generation_digest: string;
-  }>(`SELECT slack.*, installation.app_instance_id, installation.binding_digest,
-      installation.credential_generation, installation.credential_generation_digest
-    FROM cp_slack_installation slack
-    JOIN cp_source_app_installation installation
-      ON installation.organization_id = slack.organization_id
-     AND installation.installation_id = slack.installation_id
-    JOIN cp_source_binding binding
-      ON binding.organization_id = slack.organization_id
-     AND binding.binding_id = slack.binding_id
-     AND binding.installation_id = slack.installation_id
+  }>(`SELECT slack.*
+    FROM cp_slack_binding slack
     WHERE ${route ? "slack.route_identity = $1" : "slack.organization_id = $1 AND slack.installation_id = $2"}
-      AND installation.source_app_id = 'slack'
-      AND installation.state = 'active' AND binding.state = 'active'
-      AND binding.binding_digest = installation.binding_digest LIMIT 2`, route
+      AND slack.state='active' LIMIT 2`, route
       ? [identity.routeIdentity] : [identity.organizationId, identity.installationId]);
   if (result.rows.length === 0) return { kind: "not_found" };
   if (result.rows.length > 1) return { kind: "ambiguous" };
@@ -137,7 +127,7 @@ async function resolveInstallation(pool: Pool, identity: { organizationId: strin
     memberUserIds: row.member_user_ids, operatorUserIds: row.operator_user_ids,
     approverUserId: row.approver_user_id, adminUserIds: row.admin_user_ids,
     signingSecretRef: row.signing_secret_ref, botTokenRef: row.bot_token_ref,
-    appInstanceId: row.app_instance_id, bindingDigest: row.binding_digest,
+    appInstanceId: row.installation_id, bindingDigest: row.binding_digest,
     credentialGeneration: row.credential_generation,
     credentialGenerationDigest: row.credential_generation_digest,
   } };
@@ -360,17 +350,9 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
   return {
     async preloadSourceApps() {
       const rows = await input.pool.query<{ organization_id: string; installation_id: string }>(
-        `SELECT slack.organization_id,slack.installation_id FROM cp_slack_installation slack
-         JOIN cp_source_app_installation installation
-           ON installation.organization_id=slack.organization_id
-          AND installation.installation_id=slack.installation_id
-         JOIN cp_source_binding binding
-           ON binding.organization_id=slack.organization_id
-          AND binding.binding_id=slack.binding_id
-          AND binding.installation_id=slack.installation_id
-         WHERE installation.source_app_id='slack' AND installation.state='active'
-           AND binding.state='active' AND binding.binding_digest=installation.binding_digest
-         ORDER BY slack.organization_id, slack.installation_id`);
+        `SELECT organization_id,installation_id FROM cp_slack_binding
+         WHERE state='active'
+         ORDER BY organization_id,installation_id`);
       const healthy: SourceAppDefinition<unknown, unknown, unknown>[] = [];
       const failures: Array<{ organizationId: string; installationId: string;
         errorCode: string; evidenceDigest: string }> = [];
@@ -401,7 +383,8 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
     async checkReadiness() {
       try {
         const rows = await input.pool.query<{ organization_id: string; installation_id: string }>(
-          "SELECT organization_id,installation_id FROM cp_slack_installation ORDER BY organization_id, installation_id");
+          `SELECT organization_id,installation_id FROM cp_slack_binding
+           WHERE state='active' ORDER BY organization_id,installation_id`);
         for (const row of rows.rows) {
           const resolved = await resolveInstallation(input.pool, {
             organizationId: row.organization_id, installationId: row.installation_id });
@@ -468,8 +451,8 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
           slack.member_user_ids,slack.operator_user_ids,slack.approver_user_id,
           slack.admin_user_ids
         FROM cp_hosted_run run
-        JOIN cp_slack_installation slack ON slack.organization_id=run.organization_id
-          AND slack.binding_id=run.hosted_admission->>'bindingId'
+        JOIN cp_slack_binding slack ON slack.organization_id=run.organization_id
+          AND slack.binding_id=run.hosted_admission->>'bindingId' AND slack.state='active'
         WHERE run.organization_id=$1 AND run.run_id=$2 AND run.runner_id=$3
         FOR UPDATE OF run,slack`,
       [command.principal.organizationId, command.request.runId, command.principal.runnerId]);
@@ -564,8 +547,8 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
           effect.approval_request_digest,effect.approval_expires_at,
           effect.state AS effect_state
         FROM cp_hosted_run run
-        JOIN cp_slack_installation slack ON slack.organization_id=run.organization_id
-          AND slack.binding_id=run.hosted_admission->>'bindingId'
+        JOIN cp_slack_binding slack ON slack.organization_id=run.organization_id
+          AND slack.binding_id=run.hosted_admission->>'bindingId' AND slack.state='active'
         JOIN cp_effect effect ON effect.organization_id=run.organization_id
           AND effect.run_id=run.run_id
         WHERE run.organization_id=$1 AND run.run_id=$2 AND run.runner_id=$3

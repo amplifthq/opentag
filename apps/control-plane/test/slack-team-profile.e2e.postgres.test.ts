@@ -26,14 +26,15 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack team relay certification profile", ()
     fixture = await createIsolatedPostgres();
     await fixture.migrate();
     await fixture.pool.query("INSERT INTO cp_organization(organization_id,display_name) VALUES('org_cert','Certification')");
-    await fixture.pool.query(`INSERT INTO cp_source_app_installation(
-      organization_id,installation_id,source_app_id,app_instance_id,binding_digest,
-      credential_generation,credential_generation_digest,state,created_at,updated_at)
-      VALUES('org_cert','install_cert','slack','A_CERT',$1,1,$2,'active',$3,$3)`,
+    await fixture.pool.query(`INSERT INTO cp_slack_binding(
+      organization_id,binding_id,installation_id,binding_digest,state,
+      credential_generation,credential_generation_digest,route_identity,
+      team_id,app_id,channel_id,bot_user_id,member_user_ids,
+      signing_secret_ref,bot_token_ref,created_at,updated_at)
+      VALUES('org_cert','binding_cert','install_cert',$1,'active',1,$2,
+      'route_cert','T_CERT','A_CERT','C_CERT','U_APP',ARRAY['U_MEMBER'],
+      'secret://cert/signing','secret://cert/bot',$3,$3)`,
     [digest("binding"), digest("generation"), now]);
-    await fixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,
-      installation_id,binding_digest,state,created_at,updated_at)
-      VALUES('org_cert','binding_cert','install_cert',$1,'active',$2,$2)`, [digest("binding"), now]);
   });
   afterEach(async () => fixture.close());
 
@@ -44,7 +45,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack team relay certification profile", ()
     const custody = createRelayContentCustody({ pool: fixture.pool, clock,
       key: { key: randomBytes(32), keyVersion: "cert-v1" } });
     const sourceIngress = createSourceIngressService({ pool: fixture.pool, clock, custody, jobs });
-    const installation = { organizationId: "org_cert", appInstanceId: "A_CERT",
+    const installation = { organizationId: "org_cert", appInstanceId: "install_cert",
       bindingDigest: digest("binding"), credentialGeneration: 1,
       credentialGenerationDigest: digest("generation") };
     const sourceApp = createSlackSourceApp({ installation, signingSecret: "cert-signing-secret",

@@ -90,6 +90,16 @@ describe("checked-in PostgreSQL migrations", () => {
     expect(effects?.sql).toContain("DROP TABLE cp_publication_completion");
     expect(effects?.sql).not.toContain("CREATE VIEW");
   });
+  it("converges Slack installation authority to one fresh-only binding table", async () => {
+    const migrations = await loadSqlMigrations(join(process.cwd(), "apps/control-plane/migrations"));
+    const slack = migrations.find(({ name }) => name === "0024_slack_binding.sql");
+    expect(slack?.sql).toContain("slack_binding_fresh_reset_required");
+    expect(slack?.sql).toContain("CREATE TABLE cp_slack_binding");
+    expect(slack?.sql).toContain("cp_ingress_reservation_slack_binding_fkey");
+    expect(slack?.sql).toContain("cp_slack_action_authority_slack_binding_fkey");
+    expect(slack?.sql).toContain("DROP TABLE cp_source_app_installation");
+    expect(slack?.sql).not.toContain("CREATE VIEW");
+  });
   it("serializes migration application and records the reviewed checksum", async () => {
     const harness = migrationHarness();
     const first = migration("0000_control_plane.sql", "CREATE TABLE example(id text)");

@@ -162,21 +162,16 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     if (authenticated.kind !== "authenticated") throw new Error("runner authentication failed");
     const runtimeClient = createOpenTagClient({ controlPlaneUrl: "http://control.test",
       controlCredential: { kind: "runtime", token: registered.response.runnerToken }, fetchImpl });
-    await slackFixture.pool.query(`INSERT INTO cp_source_app_installation(organization_id,installation_id,
-      source_app_id,app_instance_id,binding_digest,credential_generation,credential_generation_digest,
-      state,created_at,updated_at) VALUES('org_slack_runtime','install_runtime','slack','A_RUNTIME',$1,1,$2,'active',$3,$3)`,
-      [sourceBindingDigest, generationDigest, now]);
-    await slackFixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,installation_id,
-      binding_digest,state,created_at,updated_at) VALUES('org_slack_runtime','binding_runtime',
-      'install_runtime',$1,'active',$2,$2)`, [sourceBindingDigest, now]);
-    await slackFixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,binding_id,
-      project_target_id,publication_mode,route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,
-      operator_user_ids,approver_user_id,admin_user_ids,
-      signing_secret_ref,bot_token_ref,created_at,updated_at)
-      VALUES('org_slack_runtime','install_runtime','binding_runtime','target_slack_runtime','pull_request','route_runtime',
-      'T_RUNTIME','A_RUNTIME','C_RUNTIME','U_APP',ARRAY['U_MEMBER','U_APPROVER','U_OPERATOR'],
-      ARRAY['U_OPERATOR'],'U_APPROVER',ARRAY['U_OPERATOR'],
-      'env:SLACK_SIGNING_SECRET','env:SLACK_BOT_TOKEN',$1,$1)`, [now]);
+    await slackFixture.pool.query(`INSERT INTO cp_slack_binding(organization_id,binding_id,
+      installation_id,binding_digest,state,credential_generation,credential_generation_digest,
+      route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,operator_user_ids,
+      approver_user_id,admin_user_ids,signing_secret_ref,bot_token_ref,project_target_id,
+      publication_mode,created_at,updated_at)
+      VALUES('org_slack_runtime','binding_runtime','install_runtime',$1,'active',1,$2,
+      'route_runtime','T_RUNTIME','A_RUNTIME','C_RUNTIME','U_APP',
+      ARRAY['U_MEMBER','U_APPROVER','U_OPERATOR'],ARRAY['U_OPERATOR'],'U_APPROVER',
+      ARRAY['U_OPERATOR'],'env:SLACK_SIGNING_SECRET','env:SLACK_BOT_TOKEN',
+      'target_slack_runtime','pull_request',$3,$3)`,[sourceBindingDigest,generationDigest,now]);
     const targetUpsert = await runtime.runners.upsertProjectTarget({ principal: authenticated.principal,
       request: { schemaVersion: 1, protocolVersion: "1.0",
         requiredCapabilities: ["relay.repository-binding.v1"],
@@ -264,7 +259,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         WHERE run.organization_id='org_slack_runtime' AND run.run_id=$1`, [runId]);
       expect(durable.rows).toEqual([{ run_state: "queued", provider: "slack",
         event_name: "app_mention", intent_state: "pending", projection_purpose: "anchor_create",
-        provider_instance_id: "A_RUNTIME", operation_kind: "create_message",
+        provider_instance_id: "install_runtime", operation_kind: "create_message",
         thread_ts: "1700000000.000100" }]);
       const projectedActionToken = async (decision: "allow_once" | "effect_approve") => {
         const findToken = (value: unknown): string | null => {
@@ -672,32 +667,17 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
       };
       const targetBindingDigest = await computeGitHubProjectTargetBindingDigestV1(target);
       await authorityFixture.pool.query(
-        `INSERT INTO cp_source_app_installation(
-           organization_id,installation_id,source_app_id,app_instance_id,binding_digest,
-           credential_generation,credential_generation_digest,state,created_at,updated_at)
-         VALUES('org_stale_readiness','install_stale_readiness','slack','A_STALE',$1,
-           1,$2,'active',$3,$3)`,
-        [sourceBindingDigest, digest("stale-source-generation"), now],
-      );
-      await authorityFixture.pool.query(
-        `INSERT INTO cp_source_binding(
-           organization_id,binding_id,installation_id,binding_digest,state,created_at,updated_at)
-         VALUES('org_stale_readiness','binding_stale_readiness',
-           'install_stale_readiness',$1,'active',$2,$2)`,
-        [sourceBindingDigest, now],
-      );
-      await authorityFixture.pool.query(
-        `INSERT INTO cp_slack_installation(
-           organization_id,installation_id,binding_id,project_target_id,publication_mode,
+        `INSERT INTO cp_slack_binding(organization_id,binding_id,installation_id,
+           binding_digest,state,credential_generation,credential_generation_digest,
            route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,
            operator_user_ids,approver_user_id,admin_user_ids,signing_secret_ref,
-           bot_token_ref,created_at,updated_at)
-         VALUES('org_stale_readiness','install_stale_readiness','binding_stale_readiness',
-           'target_stale_readiness','proposal_only','route_stale_readiness','T_STALE',
-           'A_STALE','C_STALE','U_APP',ARRAY['U_MEMBER'],ARRAY['U_MEMBER'],
-           'U_MEMBER',ARRAY['U_MEMBER'],'env:SLACK_SIGNING_SECRET',
-           'env:SLACK_BOT_TOKEN',$1,$1)`,
-        [now],
+           bot_token_ref,project_target_id,publication_mode,created_at,updated_at)
+         VALUES('org_stale_readiness','binding_stale_readiness','install_stale_readiness',
+           $1,'active',1,$2,'route_stale_readiness','T_STALE','A_STALE','C_STALE',
+           'U_APP',ARRAY['U_MEMBER'],ARRAY['U_MEMBER'],'U_MEMBER',ARRAY['U_MEMBER'],
+           'env:SLACK_SIGNING_SECRET','env:SLACK_BOT_TOKEN','target_stale_readiness',
+           'proposal_only',$3,$3)`,
+        [sourceBindingDigest,digest("stale-source-generation"),now],
       );
       await expect(runtime.runners.upsertProjectTarget({
         principal: authenticated.principal,
@@ -714,7 +694,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
           target,
         },
       })).resolves.toMatchObject({ kind: "upserted" });
-
       const readinessPayload = {
         readinessId: "readiness_stale_generation",
         runnerId: authenticated.principal.runnerId,
@@ -970,11 +949,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
       const bindingDigest = sourceDigest("runtime_binding");
       const generationDigest = sourceDigest("runtime_generation");
       const sourceApp: SourceAppDefinition<unknown, unknown, unknown> = {
-        appId: "runtime-source", protocol: "opentag.channel.v1",
+        appId: "slack", protocol: "opentag.channel.v1",
         capabilities: { threads: true, messageUpdate: true, reactions: false,
           interactiveActions: false, attachments: "metadata",
           authenticatedDeletion: true, stableSourceVersions: true },
-        installation: { organizationId: "org_runtime_source", appInstanceId: "runtime-instance", bindingDigest,
+        installation: { organizationId: "org_runtime_source", appInstanceId: "runtime_installation", bindingDigest,
           credentialGeneration: 1, credentialGenerationDigest: generationDigest },
         ingress: { verify: async (value) => value, normalize: () => null },
         context: { readThread: async () => ({ messages: [], truncated: false,
@@ -984,18 +963,15 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
           reconcile: async () => ({ status: "failed", error: { code: "unused", retryable: false } }) },
       };
       await fixture.pool.query(
-        `INSERT INTO cp_source_app_installation(organization_id, installation_id,
-           source_app_id, app_instance_id, binding_digest, credential_generation,
-           credential_generation_digest, state, created_at, updated_at)
-         VALUES($1,$2,$3,$4,$5,1,$6,'active',clock_timestamp(),clock_timestamp())`,
-        ["org_runtime_source", "runtime_installation", sourceApp.appId,
-          sourceApp.installation.appInstanceId, bindingDigest, generationDigest],
-      );
-      await fixture.pool.query(
-        `INSERT INTO cp_source_binding(organization_id, binding_id, installation_id,
-           binding_digest, state, created_at, updated_at)
-         VALUES($1,$2,$3,$4,'active',clock_timestamp(),clock_timestamp())`,
-        ["org_runtime_source", "runtime_binding", "runtime_installation", bindingDigest],
+        `INSERT INTO cp_slack_binding(organization_id,binding_id,installation_id,
+           binding_digest,state,credential_generation,credential_generation_digest,
+           route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,
+           signing_secret_ref,bot_token_ref,created_at,updated_at)
+         VALUES('org_runtime_source','runtime_binding','runtime_installation',$1,'active',1,$2,
+           'route_runtime_source','T_RUNTIME_SOURCE','A_RUNTIME_SOURCE','C_RUNTIME_SOURCE',
+           'U_RUNTIME_SOURCE',ARRAY['U_RUNTIME_SOURCE'],'env:SLACK_SIGNING_SECRET',
+           'env:SLACK_BOT_TOKEN',clock_timestamp(),clock_timestamp())`,
+        [bindingDigest,generationDigest],
       );
       const rawDigest = sourceDigest("runtime_raw");
       const deliveryId = "runtime_delivery";

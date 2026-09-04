@@ -14,20 +14,22 @@ const now = new Date("2026-08-30T00:00:00.000Z");
 
 describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
-  const installation = { organizationId: "org_a", appInstanceId: "A1", bindingDigest: digest("binding"),
+  const installation = { organizationId: "org_a", appInstanceId: "install_1", bindingDigest: digest("binding"),
     credentialGeneration: 1, credentialGenerationDigest: digest("generation") };
 
   beforeEach(async () => {
     fixture = await createIsolatedPostgres(); await fixture.migrate();
     await fixture.pool.query("INSERT INTO cp_organization(organization_id, display_name) VALUES('org_a','A')");
-    await fixture.pool.query(`INSERT INTO cp_source_app_installation(
-      organization_id, installation_id, source_app_id, app_instance_id, binding_digest,
-      credential_generation, credential_generation_digest, state, created_at, updated_at)
-      VALUES('org_a','install_1','slack','A1',$1,1,$2,'active',$3,$3)`,
-      [installation.bindingDigest, installation.credentialGenerationDigest, now]);
-    await fixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,
-      installation_id,binding_digest,state,created_at,updated_at)
-      VALUES('org_a','binding_1','install_1',$1,'active',$2,$2)`, [installation.bindingDigest, now]);
+    await fixture.pool.query(`INSERT INTO cp_slack_binding(organization_id,binding_id,
+      installation_id,binding_digest,state,credential_generation,credential_generation_digest,
+      route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,operator_user_ids,
+      approver_user_id,admin_user_ids,signing_secret_ref,bot_token_ref,publication_mode,
+      created_at,updated_at) VALUES('org_a','binding_1','install_1',$1,'active',1,$2,
+      'route_1','T1','A1','C1','U_APP',
+      ARRAY['U1','U_MEMBER','U_REQUESTER','U_OPERATOR','U_APPROVER','U_ADMIN'],
+      ARRAY['U_OPERATOR'],'U_APPROVER',ARRAY['U_ADMIN'],
+      'secret://slack/signing','secret://slack/bot','proposal_only',$3,$3)`,
+    [installation.bindingDigest,installation.credentialGenerationDigest,now]);
   });
   afterEach(async () => fixture.close());
 
@@ -90,12 +92,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
   }
 
   async function insertSlackInstallation() {
-    await fixture.pool.query(`INSERT INTO cp_slack_installation(
-      organization_id, installation_id, route_identity, binding_id, team_id, app_id, channel_id,
-      bot_user_id, member_user_ids, signing_secret_ref, bot_token_ref, created_at, updated_at)
-      VALUES('org_a','install_1','route_1','binding_1','T1','A1','C1','U_APP',
-        ARRAY['U1','U_MEMBER','U_REQUESTER','U_OPERATOR','U_APPROVER','U_ADMIN'],
-        'secret://slack/signing','secret://slack/bot',$1,$1)`, [now]);
+    return Promise.resolve();
   }
 
   function productionComponents(input: { commandAuthority?: any; effectAuthority?: any;
@@ -130,45 +127,38 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     await insertSlackInstallation();
     for (const [suffix, state, secretRef] of [["2", "active", "secret://missing"],
       ["3", "disabled", "secret://slack/signing"]] as const) {
-      await fixture.pool.query(`INSERT INTO cp_source_app_installation(
-        organization_id,installation_id,source_app_id,app_instance_id,binding_digest,
-        credential_generation,credential_generation_digest,state,created_at,updated_at)
-        VALUES('org_a',$1,'slack',$2,$3,1,$4,$5,$6,$6)`,
-      [`install_${suffix}`, `A${suffix}`, digest(`binding_${suffix}`),
-        digest(`generation_${suffix}`), state, now]);
-      await fixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,
-        installation_id,binding_digest,state,created_at,updated_at)
-        VALUES('org_a',$1,$2,$3,'active',$4,$4)`,
-      [`binding_${suffix}`, `install_${suffix}`, digest(`binding_${suffix}`), now]);
-      await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,
-        route_identity,binding_id,team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,
-        bot_token_ref,created_at,updated_at) VALUES('org_a',$1,$2,$3,$4,$5,$6,$7,ARRAY['U1'],$8,
-        'secret://slack/bot',$9,$9)`, [`install_${suffix}`, `route_${suffix}`, `binding_${suffix}`, `T${suffix}`,
-          `A${suffix}`, `C${suffix}`, `U${suffix}`, secretRef, now]);
+      await fixture.pool.query(`INSERT INTO cp_slack_binding(organization_id,binding_id,
+        installation_id,binding_digest,state,credential_generation,credential_generation_digest,
+        route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,
+        signing_secret_ref,bot_token_ref,created_at,updated_at)
+        VALUES('org_a',$1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,ARRAY['U1'],$11,
+          'secret://slack/bot',$12,$12)`,
+      [`binding_${suffix}`,`install_${suffix}`,digest(`binding_${suffix}`),state,
+        digest(`generation_${suffix}`),`route_${suffix}`,`T${suffix}`,`A${suffix}`,
+        `C${suffix}`,`U${suffix}`,secretRef,now]);
     }
     const runtime = productionComponents();
     await expect(runtime.ingress.preloadSourceApps()).resolves.toEqual({ registered: 1,
-      healthy: [{ organizationId: "org_a", appId: "slack", appInstanceId: "A1",
+      healthy: [{ organizationId: "org_a", appId: "slack", appInstanceId: "install_1",
         bindingDigest: digest("binding"), credentialGeneration: 1,
         credentialGenerationDigest: digest("generation") }],
       failures: [{ organizationId: "org_a", installationId: "install_2",
         errorCode: "slack_installation_preload_failed",
         evidenceDigest: expect.stringMatching(/^sha256:/u) }] });
     expect(runtime.sourceApps.resolveDelivery({ organizationId: "org_a", appId: "slack",
-      appInstanceId: "A1", bindingDigest: digest("binding"), credentialGeneration: 1,
+      appInstanceId: "install_1", bindingDigest: digest("binding"), credentialGeneration: 1,
       credentialGenerationDigest: digest("generation") })).toBeDefined();
     for (const suffix of ["2", "3"]) expect(runtime.sourceApps.resolveDelivery({
-      organizationId: "org_a", appId: "slack", appInstanceId: `A${suffix}`,
+      organizationId: "org_a", appId: "slack", appInstanceId: `install_${suffix}`,
       bindingDigest: digest(`binding_${suffix}`), credentialGeneration: 1,
       credentialGenerationDigest: digest(`generation_${suffix}`) })).toBeUndefined();
     runtime.material.set("secret://missing", "recovered-signing-secret");
     await expect(runtime.ingress.preloadSourceApps()).resolves.toMatchObject({ registered: 2,
       failures: [] });
     expect(runtime.sourceApps.resolveDelivery({ organizationId: "org_a", appId: "slack",
-      appInstanceId: "A2", bindingDigest: digest("binding_2"), credentialGeneration: 1,
+      appInstanceId: "install_2", bindingDigest: digest("binding_2"), credentialGeneration: 1,
       credentialGenerationDigest: digest("generation_2") })).toBeDefined();
   });
-
   it("republishes exact Slack delivery authority when route resolution recovers a secret", async () => {
     await insertSlackInstallation();
     const runtime = productionComponents();
@@ -185,37 +175,34 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     await expect(runtime.ingress.receiveEvents("route_1", challengeRequest()))
       .resolves.toEqual({ status: 200, body: "challenge_abc123" });
     expect(runtime.sourceApps.resolveDelivery({ organizationId: "org_a", appId: "slack",
-      appInstanceId: "A1", bindingDigest: digest("binding"), credentialGeneration: 1,
+      appInstanceId: "install_1", bindingDigest: digest("binding"), credentialGeneration: 1,
       credentialGenerationDigest: digest("generation") })).toBeDefined();
     expect(runtime.sourceApps.deliveryAuthorities()).toEqual([{ organizationId: "org_a",
-      appId: "slack", appInstanceId: "A1", bindingDigest: digest("binding"),
+      appId: "slack", appInstanceId: "install_1", bindingDigest: digest("binding"),
       credentialGeneration: 1, credentialGenerationDigest: digest("generation") }]);
   });
 
   it("routes the same installation id independently across organizations", async () => {
     await insertSlackInstallation();
     await fixture.pool.query("INSERT INTO cp_organization(organization_id,display_name) VALUES('org_b','B')");
-    await fixture.pool.query(`INSERT INTO cp_source_app_installation(organization_id,installation_id,
-      source_app_id,app_instance_id,binding_digest,credential_generation,credential_generation_digest,
-      state,created_at,updated_at) VALUES('org_b','install_1','slack','A1',$1,1,$2,'active',$3,$3)`,
-    [digest("binding_b"), digest("generation_b"), now]);
-    await fixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,installation_id,
-      binding_digest,state,created_at,updated_at) VALUES('org_b','binding_b','install_1',$1,'active',$2,$2)`,
-    [digest("binding_b"), now]);
-    await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,
-      route_identity,binding_id,team_id,app_id,channel_id,bot_user_id,member_user_ids,
+    await fixture.pool.query(`INSERT INTO cp_slack_binding(organization_id,binding_id,
+      installation_id,binding_digest,state,credential_generation,credential_generation_digest,
+      route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,
       signing_secret_ref,bot_token_ref,created_at,updated_at)
-      VALUES('org_b','install_1','route_b','binding_b','TB','AB','CB','UB',ARRAY['U1'],
-        'secret://slack/signing','secret://slack/bot',$1,$1)`, [now]);
+      VALUES('org_b','binding_b','install_1',$1,'active',1,$2,'route_b','TB','AB','CB','UB',
+        ARRAY['U1'],'secret://slack/signing','secret://slack/bot',$3,$3)`,
+    [digest("binding_b"),digest("generation_b"),now]);
     const runtime = productionComponents();
-    await expect(runtime.ingress.preloadSourceApps()).resolves.toMatchObject({ registered: 2, failures: [] });
+    await expect(runtime.ingress.preloadSourceApps()).resolves.toMatchObject({
+      registered: 2, failures: [],
+    });
     await expect(runtime.ingress.receiveEvents("route_1", challengeRequest()))
       .resolves.toMatchObject({ status: 200 });
     await expect(runtime.ingress.receiveEvents("route_b",
       challengeRequest("challenge_b", { teamId: "TB", appId: "AB" })))
       .resolves.toEqual({ status: 200, body: "challenge_b" });
     for (const organizationId of ["org_a", "org_b"]) expect(runtime.sourceApps.resolveDelivery({
-      organizationId, appId: "slack", appInstanceId: "A1",
+      organizationId, appId: "slack", appInstanceId: "install_1",
       bindingDigest: organizationId === "org_a" ? digest("binding") : digest("binding_b"),
       credentialGeneration: 1,
       credentialGenerationDigest: organizationId === "org_a" ? digest("generation") : digest("generation_b"),
@@ -234,7 +221,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
   });
 
   it("returns non-success when transaction authority fails", async () => {
-    await fixture.pool.query("UPDATE cp_source_binding SET state='disabled'");
+    await fixture.pool.query("UPDATE cp_slack_binding SET state='disabled'");
     await expect(components().ingress.receiveEvents(request())).resolves.toMatchObject({ status: 503 });
     expect((await fixture.pool.query("SELECT count(*)::int count FROM cp_ingress_reservation")).rows[0])
       .toEqual({ count: 0 });
@@ -422,7 +409,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       verificationEvidenceIds: [digest("effect-verification")],
       publicationPolicyDigest: policyDigest, createdAt: now.toISOString() };
     const effectCandidateDigest = await computeControlPayloadDigestV1(effectCandidate);
-    await fixture.pool.query(`UPDATE cp_slack_installation SET project_target_id=$1,
+    await fixture.pool.query(`UPDATE cp_slack_binding SET project_target_id=$1,
       publication_mode='pull_request' WHERE organization_id='org_a' AND installation_id='install_1'`,
     [effectTarget.projectTargetId]);
     await fixture.pool.query(`INSERT INTO cp_project_target(organization_id,project_target_id,

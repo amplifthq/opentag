@@ -85,19 +85,15 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
   async function signedIngress(commandAuthority: ReturnType<typeof createControlPlaneSourceThreadAuthority>) {
     const bindingDigest=`sha256:${"7".repeat(64)}`;
     const generationDigest=`sha256:${"8".repeat(64)}`;
-    await fixture.pool.query(`INSERT INTO cp_source_app_installation(organization_id,installation_id,
-      source_app_id,app_instance_id,binding_digest,credential_generation,credential_generation_digest,
-      state,created_at,updated_at) VALUES('org_permission','install_permission','slack','A_PERMISSION',
-      $1,1,$2,'active',$3,$3) ON CONFLICT DO NOTHING`,[bindingDigest,generationDigest,now]);
-    await fixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,installation_id,
-      binding_digest,state,created_at,updated_at) VALUES('org_permission','binding_permission',
-      'install_permission',$1,'active',$2,$2) ON CONFLICT DO NOTHING`,[bindingDigest,now]);
-    await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,route_identity,
-      binding_id,team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,bot_token_ref,
-      created_at,updated_at) VALUES('org_permission','install_permission','route_permission',
-      'binding_permission','T_PERMISSION','A_PERMISSION','C_PERMISSION','U_APP',
-      ARRAY['U_MEMBER','U_APPROVER'],'secret://permission/signing','secret://permission/bot',$1,$1)
-      ON CONFLICT DO NOTHING`,[now]);
+    await fixture.pool.query(`INSERT INTO cp_slack_binding(
+      organization_id,binding_id,installation_id,binding_digest,state,
+      credential_generation,credential_generation_digest,route_identity,
+      team_id,app_id,channel_id,bot_user_id,member_user_ids,approver_user_id,
+      signing_secret_ref,bot_token_ref,created_at,updated_at)
+      VALUES('org_permission','binding_permission','install_permission',$1,'active',1,$2,
+      'route_permission','T_PERMISSION','A_PERMISSION','C_PERMISSION','U_APP',
+      ARRAY['U_MEMBER','U_APPROVER'],'U_APPROVER','secret://permission/signing',
+      'secret://permission/bot',$3,$3) ON CONFLICT DO NOTHING`,[bindingDigest,generationDigest,now]);
     const clock={now:()=>now};
     const jobs=createDurableJobQueue({pool:fixture.pool,clock,leaseDurationMs:30_000,
       tokenFactory:()=>"permission-job-lease"});

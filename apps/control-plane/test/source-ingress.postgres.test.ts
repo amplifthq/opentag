@@ -16,7 +16,7 @@ const generationDigest = digest("generation_1");
 
 function sourceApp(): SourceAppDefinition<unknown, unknown, unknown> {
   return {
-    appId: "fixture-source",
+    appId: "slack",
     protocol: "opentag.channel.v1",
     capabilities: {
       threads: true, messageUpdate: true, reactions: false,
@@ -25,7 +25,7 @@ function sourceApp(): SourceAppDefinition<unknown, unknown, unknown> {
     },
     installation: {
       organizationId: "org_a",
-      appInstanceId: "instance_1", bindingDigest,
+      appInstanceId: "install_1", bindingDigest,
       credentialGeneration: 1, credentialGenerationDigest: generationDigest,
     },
     ingress: { verify: async (input) => input, normalize: () => null },
@@ -51,20 +51,15 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
       ["org_a", "A"],
     );
     await fixture.pool.query(
-      `INSERT INTO cp_source_app_installation(
-         organization_id, installation_id, source_app_id, app_instance_id,
-         binding_digest, credential_generation, credential_generation_digest,
-         state, created_at, updated_at
-       ) VALUES($1,$2,$3,$4,$5,$6,$7,'active',$8,$8)`,
-      ["org_a", "install_1", "fixture-source", "instance_1", bindingDigest,
-        1, generationDigest, now],
-    );
-    await fixture.pool.query(
-      `INSERT INTO cp_source_binding(
-         organization_id, binding_id, installation_id, binding_digest,
-         state, created_at, updated_at
-       ) VALUES($1,$2,$3,$4,'active',$5,$5)`,
-      ["org_a", "binding_1", "install_1", bindingDigest, now],
+      `INSERT INTO cp_slack_binding(
+         organization_id,binding_id,installation_id,binding_digest,state,
+         credential_generation,credential_generation_digest,route_identity,
+         team_id,app_id,channel_id,bot_user_id,member_user_ids,
+         signing_secret_ref,bot_token_ref,created_at,updated_at
+       ) VALUES($1,$2,$3,$4,'active',1,$5,$6,$7,$8,$9,$10,ARRAY[$11],$12,$13,$14,$14)`,
+      ["org_a", "binding_1", "install_1", bindingDigest, generationDigest,
+        "route_org_a", "T_ORG_A", "A_ORG_A", "C_ORG_A", "U_APP_ORG_A",
+        "U_MEMBER_ORG_A", "secret://org_a/signing", "secret://org_a/bot", now],
     );
   });
 
@@ -132,15 +127,15 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
   it("returns typed not-found, found, and ambiguous source-version identity outcomes", async () => {
     const { ingress } = components();
     await expect(ingress.findSourceIdentity({ organizationId: "org_a", installationId: "install_1",
-      sourceAppId: "fixture-source", sourceVersionRef: "missing" }))
+      sourceAppId: "slack", sourceVersionRef: "missing" }))
       .resolves.toEqual({ kind: "not_found" });
     await ingress.reserve(command("evt_1"));
     await expect(ingress.findSourceIdentity({ organizationId: "org_a", installationId: "install_1",
-      sourceAppId: "fixture-source", sourceVersionRef: "fixture:message_1:v1" }))
+      sourceAppId: "slack", sourceVersionRef: "fixture:message_1:v1" }))
       .resolves.toEqual({ kind: "found", sourceDeliveryId: "evt_1", sourceMessageId: "message_1" });
     await ingress.reserve(command("evt_2", digest("raw_b")));
     await expect(ingress.findSourceIdentity({ organizationId: "org_a", installationId: "install_1",
-      sourceAppId: "fixture-source", sourceVersionRef: "fixture:message_1:v1" }))
+      sourceAppId: "slack", sourceVersionRef: "fixture:message_1:v1" }))
       .resolves.toEqual({ kind: "ambiguous" });
   });
 
@@ -161,20 +156,15 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
       ["org_b", "B"],
     );
     await fixture.pool.query(
-      `INSERT INTO cp_source_app_installation(
-         organization_id, installation_id, source_app_id, app_instance_id,
-         binding_digest, credential_generation, credential_generation_digest,
-         state, created_at, updated_at
-       ) VALUES($1,$2,$3,$4,$5,$6,$7,'active',$8,$8)`,
-      ["org_b", "install_1", "fixture-source", "instance_1", bindingDigest,
-        1, generationDigest, now],
-    );
-    await fixture.pool.query(
-      `INSERT INTO cp_source_binding(
-         organization_id, binding_id, installation_id, binding_digest,
-         state, created_at, updated_at
-       ) VALUES($1,$2,$3,$4,'active',$5,$5)`,
-      ["org_b", "binding_1", "install_1", bindingDigest, now],
+      `INSERT INTO cp_slack_binding(
+         organization_id,binding_id,installation_id,binding_digest,state,
+         credential_generation,credential_generation_digest,route_identity,
+         team_id,app_id,channel_id,bot_user_id,member_user_ids,
+         signing_secret_ref,bot_token_ref,created_at,updated_at
+       ) VALUES($1,$2,$3,$4,'active',1,$5,$6,$7,$8,$9,$10,ARRAY[$11],$12,$13,$14,$14)`,
+      ["org_b", "binding_1", "install_1", bindingDigest, generationDigest,
+        "route_org_b", "T_ORG_B", "A_ORG_B", "C_ORG_B", "U_APP_ORG_B",
+        "U_MEMBER_ORG_B", "secret://org_b/signing", "secret://org_b/bot", now],
     );
     const { ingress } = components();
     const first = await ingress.reserve(command());

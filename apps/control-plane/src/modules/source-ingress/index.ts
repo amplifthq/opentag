@@ -189,26 +189,21 @@ export function createSourceIngressService(input: {
               : { outcome: "conflict", mayAcknowledge: false } as const;
           }
           const authority = await client.query<{
-            source_app_id: string; app_instance_id: string; binding_digest: string;
+            installation_id: string; binding_digest: string;
             credential_generation: number; credential_generation_digest: string;
           }>(
-            `SELECT installation.source_app_id, installation.app_instance_id,
-                    installation.binding_digest, installation.credential_generation,
-                    installation.credential_generation_digest
-             FROM cp_source_app_installation installation
-             JOIN cp_source_binding binding
-               ON binding.organization_id = installation.organization_id
-              AND binding.installation_id = installation.installation_id
-             WHERE installation.organization_id = $1 AND installation.installation_id = $2
-               AND binding.binding_id = $3 AND installation.state = 'active'
-               AND binding.state = 'active' AND binding.binding_digest = installation.binding_digest
-             FOR UPDATE OF installation, binding`,
+            `SELECT installation_id,binding_digest,credential_generation,
+                    credential_generation_digest
+             FROM cp_slack_binding
+             WHERE organization_id=$1 AND installation_id=$2 AND binding_id=$3
+               AND state='active'
+             FOR UPDATE`,
             [command.organizationId, command.installationId, command.bindingId],
           );
           const row = authority.rows[0];
           const installation = command.sourceApp.installation;
-          if (!row || row.source_app_id !== command.sourceApp.appId
-            || row.app_instance_id !== installation.appInstanceId
+          if (!row || command.sourceApp.appId !== "slack"
+            || row.installation_id !== installation.appInstanceId
             || row.binding_digest !== installation.bindingDigest
             || row.credential_generation !== installation.credentialGeneration
             || row.credential_generation_digest !== installation.credentialGenerationDigest) {
