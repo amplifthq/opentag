@@ -261,7 +261,9 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await fixture.pool.query(
       `INSERT INTO cp_hosted_attempt
        SELECT (jsonb_populate_record(NULL::cp_hosted_attempt, to_jsonb(source) || jsonb_build_object(
-         'run_id',$2::text,'attempt_id',$3::text,'lease_expires_at',$4::timestamptz,'runner_id',$5::text))).*
+         'run_id',$2::text,'attempt_id',$3::text,'lease_expires_at',$4::timestamptz,
+         'runner_id',$5::text,'claim_operation_id','operation_' || $2::text,
+         'claim_request_digest','request_digest_' || $2::text))).*
        FROM cp_hosted_attempt source WHERE organization_id=$1 AND run_id=$6 AND attempt_id=$7`,
       [principal.organizationId, runId, attemptId, new Date(now.getTime() + 60_000), runnerId,
         candidate.runId, claim.attempt.id],
@@ -742,7 +744,9 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await fixture.pool.query(
        `INSERT INTO cp_hosted_attempt
        SELECT (jsonb_populate_record(NULL::cp_hosted_attempt, to_jsonb(source) || jsonb_build_object(
-         'run_id',$2::text,'attempt_id',$3::text,'lease_expires_at',$4::timestamptz))).*
+         'run_id',$2::text,'attempt_id',$3::text,'lease_expires_at',$4::timestamptz,
+         'claim_operation_id','operation_' || $2::text,
+         'claim_request_digest','request_digest_' || $2::text))).*
        FROM cp_hosted_attempt source WHERE organization_id=$1 AND run_id=$5 AND attempt_id=$6`,
       [principal.organizationId, runId, attemptId, new Date(now.getTime() + 60_000), candidate.runId, claim.attempt.id],
     );

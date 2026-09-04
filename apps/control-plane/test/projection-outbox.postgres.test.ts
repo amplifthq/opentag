@@ -39,9 +39,11 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       new Date(now.getTime() + 300_000), digest("ceiling"), digest("policy"),
       digest("completion"), now]);
     await fixture.pool.query(`INSERT INTO cp_hosted_attempt(organization_id,run_id,attempt_number,
-      attempt_id,runner_id,credential_id,fencing_token_digest,lease_expires_at,material_start_state,
+      attempt_id,runner_id,credential_id,fencing_token_digest,claim_operation_id,
+      claim_request_digest,claim,lease_expires_at,material_start_state,
       state,claimed_at,updated_at) VALUES('org_projection','run_projection',1,'attempt_projection',
-      'runner_projection','credential_projection',$1,$2,'open','claimed',$3,$3)`,
+      'runner_projection','credential_projection',$1,'operation_projection_claim',
+      'request_digest_projection_claim','{}'::jsonb,$2,'open','claimed',$3,$3)`,
     [digest("fence"), new Date(now.getTime() + 60_000), now]);
   }
 

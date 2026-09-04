@@ -224,7 +224,6 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "cp_api_key",
       "cp_hosted_attempt",
       "cp_hosted_audit_event",
-      "cp_hosted_claim",
       "cp_hosted_lifecycle_receipt",
       "cp_hosted_run",
       "cp_ingress_reservation",

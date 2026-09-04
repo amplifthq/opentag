@@ -152,27 +152,31 @@ CREATE TABLE cp_hosted_attempt (
   runner_id text NOT NULL,
   credential_id text NOT NULL,
   fencing_token_digest text NOT NULL,
+  claim_operation_id text NOT NULL,
+  claim_request_digest text NOT NULL,
+  claim jsonb NOT NULL,
   lease_expires_at timestamptz NOT NULL,
   state text NOT NULL CHECK (state IN ('claimed', 'running', 'cancelled', 'completed', 'rejected', 'expired')),
   claimed_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
   PRIMARY KEY (organization_id, run_id, attempt_number),
   UNIQUE (organization_id, attempt_id),
+  UNIQUE (organization_id, claim_operation_id),
   FOREIGN KEY (organization_id, run_id)
     REFERENCES cp_hosted_run(organization_id, run_id)
 );
 
-CREATE TABLE cp_hosted_claim (
-  organization_id text NOT NULL,
-  operation_id text NOT NULL,
-  request_digest text NOT NULL,
-  run_id text NOT NULL,
-  claim jsonb NOT NULL,
-  created_at timestamptz NOT NULL,
-  PRIMARY KEY (organization_id, operation_id),
-  FOREIGN KEY (organization_id, run_id)
-    REFERENCES cp_hosted_run(organization_id, run_id)
-);
+CREATE FUNCTION cp_reject_hosted_attempt_claim_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'hosted_attempt_claim_immutable';
+END;
+$$;
+
+CREATE TRIGGER cp_hosted_attempt_claim_immutable
+BEFORE UPDATE OF claim_operation_id, claim_request_digest, claim
+ON cp_hosted_attempt
+FOR EACH ROW EXECUTE FUNCTION cp_reject_hosted_attempt_claim_mutation();
 
 CREATE TABLE cp_hosted_lifecycle_receipt (
   organization_id text NOT NULL,

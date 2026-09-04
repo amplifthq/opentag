@@ -460,11 +460,13 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
     await fixture.pool.query(
       `INSERT INTO cp_hosted_attempt(
          organization_id, run_id, attempt_number, attempt_id, runner_id,
-         credential_id, fencing_token_digest, lease_expires_at, state,
+         credential_id, fencing_token_digest, claim_operation_id,
+         claim_request_digest, claim, lease_expires_at, state,
          claimed_at, updated_at
        ) VALUES(
          'org_console_read', 'run_presence', 1, 'attempt_presence',
-         'runner_visible', 'credential_console', $1,
+         'runner_visible', 'credential_console', $1, 'operation_presence_claim',
+         'request_digest_presence_claim', '{}'::jsonb,
          clock_timestamp() - interval '1 minute', 'running',
          clock_timestamp(), clock_timestamp()
        )`,

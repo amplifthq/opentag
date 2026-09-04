@@ -395,9 +395,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
         new Date(now.getTime() + 120_000), frozenCeilingDigest, policyDigest,
         digest("completion"), now]);
     await fixture.pool.query(`INSERT INTO cp_hosted_attempt(organization_id,run_id,attempt_number,
-      attempt_id,runner_id,credential_id,fencing_token_digest,lease_expires_at,material_start_state,
+      attempt_id,runner_id,credential_id,fencing_token_digest,claim_operation_id,
+      claim_request_digest,claim,lease_expires_at,material_start_state,
       blocked_permission_request_id,blocked_action_descriptor_digest,blocked_policy_snapshot_digest,
-      state,claimed_at,updated_at) VALUES('org_a','run_1',1,'attempt_1','runner_1','credential_1',$1,$2,
+      state,claimed_at,updated_at) VALUES('org_a','run_1',1,'attempt_1','runner_1','credential_1',$1,
+      'operation_slack_1','request_digest_slack_1','{}'::jsonb,$2,
       'open','permission_1',$3,$4,'needs_approval',$5,$5)`,
       [fencingTokenDigest, new Date(now.getTime() + 60_000), actionDescriptorDigest, policyDigest, now]);
     await fixture.pool.query(`INSERT INTO cp_permission_request(organization_id,permission_request_id,
@@ -587,9 +589,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       [await issue("stale_bind", ["bind"], "bind"), "bind", "U_ADMIN"],
     ] as const;
     await fixture.pool.query(`INSERT INTO cp_hosted_attempt(organization_id,run_id,attempt_number,
-      attempt_id,runner_id,credential_id,fencing_token_digest,lease_expires_at,material_start_state,
+      attempt_id,runner_id,credential_id,fencing_token_digest,claim_operation_id,
+      claim_request_digest,claim,lease_expires_at,material_start_state,
       state,claimed_at,updated_at)
-      VALUES('org_a','run_1',2,'attempt_2','runner_1','credential_1',$1,$2,'open','claimed',$3,$3)`,
+      VALUES('org_a','run_1',2,'attempt_2','runner_1','credential_1',$1,
+      'operation_slack_2','request_digest_slack_2','{}'::jsonb,$2,'open','claimed',$3,$3)`,
     [digest("fence_2"), new Date(now.getTime() + 60_000), now]);
     await fixture.pool.query(`UPDATE cp_hosted_run SET current_attempt_number=2,updated_at=$1
       WHERE organization_id='org_a' AND run_id='run_1'`, [now]);
