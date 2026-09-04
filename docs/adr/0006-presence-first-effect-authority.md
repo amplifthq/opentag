@@ -362,18 +362,25 @@ profile it is a projection over one active Slack binding, one registered
 Runner, one Project Target, configured executor capability, and recent bounded
 readiness. It is not initially a new authority aggregate or table.
 
-Display name, avatar, and role are optional profile metadata. They do not
-receive separate tables or independent lifecycle until a concrete product
-behavior requires independently mutable identity, permissions, or history.
+The first profile uses `binding_id` as `teammateId`: the binding, rather than a
+Slack installation, Runner, or transient executor, is the stable identity that
+already joins channel ingress, authorization, Work, and projection. Its
+`displayName` is required in the read model and defaults to `OpenTag`. Avatar
+and persona role are absent from the first database and API rather than being
+nullable columns. Slack already owns the rendered app avatar, while existing
+`role` fields describe human authorization or technical integration roles. A
+future product behavior must justify independently mutable profile metadata.
 
-Presence remains a time-bounded read model with these user-facing states:
+Being backed by an active Slack binding means the Teammate remains present in
+the channel even while its Runner is offline. The time-bounded derived field is
+therefore named `workState`, not Presence:
 
 ```text
-available | queued | working | needs_attention | offline | setup_required
+ready | queued | working | needs_attention | runner_offline | setup_required
 ```
 
-No Presence state can claim work, grant an Effect permit, cancel an Attempt,
-or assert provider completion.
+No work-state value can claim work, grant an Effect permit, cancel an Attempt,
+or assert provider completion. There is no writable Teammate Presence table.
 
 ## Relationship to prior ADRs
 
