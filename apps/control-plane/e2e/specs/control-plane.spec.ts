@@ -46,8 +46,8 @@ test("creates, persists, and revokes an API key through the real console", async
   await page.getByRole("link", { name: "API keys" }).click();
   await expect(page.getByRole("heading", { name: "API keys" })).toBeVisible();
 
+  await expect(page.getByLabel("Allow governed permission decisions")).toHaveCount(0);
   await page.getByLabel("Key label").fill(apiKeyLabel);
-  await page.getByLabel("Allow governed permission decisions").check();
   await Promise.all([
     page.waitForResponse((response) =>
       response.url().endsWith("/api/console/api-keys")
@@ -58,6 +58,7 @@ test("creates, persists, and revokes an API key through the real console", async
   await expect(page.getByText("Copy this token now.")).toBeVisible();
   const row = page.getByRole("row").filter({ hasText: apiKeyLabel });
   await expect(row).toContainText("run:read");
+  await expect(row).not.toContainText("permission:resolve");
   await expect(row).toContainText("active");
 
   await page.reload();
