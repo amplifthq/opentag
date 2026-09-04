@@ -82,6 +82,10 @@ FOR EACH ROW
 WHEN (OLD.state IN ('succeeded', 'failed'))
 EXECUTE FUNCTION cp_reject_terminal_job_mutation();
 
+CREATE INDEX cp_job_terminal_retention_idx
+ON cp_job(job_kind, state, settled_at, job_id)
+WHERE state IN ('succeeded', 'failed');
+
 CREATE OR REPLACE FUNCTION cp_insert_team_relay_v2_job(
   p_job text,
   p_org text,

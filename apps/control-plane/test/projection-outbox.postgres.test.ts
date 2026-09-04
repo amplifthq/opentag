@@ -123,7 +123,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       [legacyJob.rows[0]!.job_id]);
     expect(migrated.rows[0]?.payload).toMatchObject({ deliveryIntentId: legacyIntent.sideEffectIntentId,
       deliveryRevision: 4, eventSequence: expect.any(Number) });
-    await fixture.pool.query(`UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'
+    await fixture.pool.query(`DELETE FROM cp_job WHERE job_kind='team-relay.project.v2'
       AND job_id<>$1`,[legacyJob.rows[0]!.job_id]);
     const projected: any[]=[];
     const projectionRepository=createPostgresDeliveryRepository({pool:fixture.pool,owner,
@@ -328,7 +328,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       organizationId:external.organizationId,providerId:"slack",providerInstanceId:"A1",
       providerBindingDigest:digest("binding"),providerConfigGeneration:1,
       providerConfigGenerationDigest:digest("generation"),...owner}})};
-    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'");
+    await fixture.pool.query("DELETE FROM cp_job WHERE job_kind='team-relay.project.v2'");
     await repository.recordIntent(external,externalPayload);
     const externalClaim=(await repository.claimNext())!;
     const externalRenewed=(await repository.renewLease(externalClaim))!;
@@ -508,7 +508,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await fixture.pool.query(`INSERT INTO cp_projection_deferred_revision(organization_id,run_id,
       projection_revision,anchor_intent_id,state,created_at)
       VALUES('org_projection','run_projection',2,'unrelated_anchor','pending',$1)`,[now]);
-    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'");
+    await fixture.pool.query("DELETE FROM cp_job WHERE job_kind='team-relay.project.v2'");
     await repository.settleOrReadTerminal({ ...begun,outcome:"accepted",
       evidenceDigest:digest("accepted"),externalResourceId:"171.002",
       externalResourceDigest:digest("resource") });
@@ -527,7 +527,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       clock:{now:()=>wakeClock}})).resolves.toMatchObject({kind:"settled"});
     expect(requests).toHaveLength(1);
     expect(requests[0]?.intent.operation).toBe("update");
-    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'");
+    await fixture.pool.query("DELETE FROM cp_job WHERE job_kind='team-relay.project.v2'");
     const selfIntent=DeliveryIntentV2Schema.parse({...baseline,
       sideEffectIntentId:"intent_projection_self",idempotencyKey:"projection_self",
       operation:"update",projectionPurpose:"anchor_update",presentationDigest:digest("self"),

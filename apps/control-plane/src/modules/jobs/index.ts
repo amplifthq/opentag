@@ -5,6 +5,15 @@ import { withPostgresTransaction, type PostgresTransactionClient } from "../../d
 type Clock = { now(): Date };
 
 const DOMAIN_FINALIZED_JOB_KINDS = ["source_ingress.process"] as const;
+const TERMINAL_RETENTION_JOB_KINDS = [
+  "hosted-attempt-reconciliation",
+  "runner-readiness-retention",
+  "provider-delivery",
+  "source-content-purge",
+  "job-retention",
+] as const;
+const SUCCEEDED_JOB_RETENTION_MS = 86_400_000;
+const FAILED_JOB_RETENTION_MS = 7 * 86_400_000;
 
 type JobRow = {
   job_id: string;
@@ -247,6 +256,32 @@ export function createDurableJobQueue(input: {
         return { kind: "failed" } as const;
       });
     },
+
+    async pruneTerminalMaintenance() {
+      const now = input.clock.now();
+      const succeededBefore = new Date(now.getTime() - SUCCEEDED_JOB_RETENTION_MS);
+      const failedBefore = new Date(now.getTime() - FAILED_JOB_RETENTION_MS);
+      return withPostgresTransaction(input.pool, async (client) => {
+        const succeeded = await client.query<{ job_id: string }>(
+          `DELETE FROM cp_job
+           WHERE job_kind = ANY($1::text[]) AND state = 'succeeded'
+             AND settled_at < $2
+           RETURNING job_id`,
+          [TERMINAL_RETENTION_JOB_KINDS, succeededBefore],
+        );
+        const failed = await client.query<{ job_id: string }>(
+          `DELETE FROM cp_job
+           WHERE job_kind = ANY($1::text[]) AND state = 'failed'
+             AND settled_at < $2
+           RETURNING job_id`,
+          [TERMINAL_RETENTION_JOB_KINDS, failedBefore],
+        );
+        return {
+          succeeded: succeeded.rows.length,
+          failed: failed.rows.length,
+        };
+      });
+    },
   };
 }
 
@@ -287,6 +322,13 @@ export async function scheduleControlPlaneMaintenance(input: {
       kind: "provider-delivery",
       payload: { windowStart },
       maxAttempts: 1,
+    },
+    {
+      jobId: `job-retention:${windowStart}`,
+      organizationId: null,
+      kind: "job-retention",
+      payload: { windowStart },
+      maxAttempts: 5,
     },
   ];
   if (input.includeSourceContentPurge) commands.push({

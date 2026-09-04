@@ -612,6 +612,7 @@ export function createControlPlaneRuntime(input: {
       }
       return { kind: "bounded", delivered };
     },
+    "job-retention": async () => jobs.pruneTerminalMaintenance(),
     "team-relay.project.v2": createTeamRelayProjectionJobHandler(teamRelayProjection),
     ...(sourceContent ? createSourceContentJobHandlers(sourceContent) : {}),
   };

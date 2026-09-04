@@ -37,6 +37,13 @@ describe("durable job worker", () => {
         payload: { windowStart: "2026-08-15T12:34:00.000Z" },
         maxAttempts: 1,
       },
+      {
+        jobId: "job-retention:2026-08-15T12:34:00.000Z",
+        organizationId: null,
+        kind: "job-retention",
+        payload: { windowStart: "2026-08-15T12:34:00.000Z" },
+        maxAttempts: 5,
+      },
     ]);
   });
 
