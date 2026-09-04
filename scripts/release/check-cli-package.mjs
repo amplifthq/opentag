@@ -308,7 +308,11 @@ try {
   checkInstalledSqliteRuntime(installDir);
 
   console.log("Auditing installed production dependencies...");
-  run("npm", ["audit", "--omit=dev", "--audit-level=high"], {
+  // The runtime probes above validate the installed node_modules tree. Audit
+  // the lockfile that the clean install just generated so npm 10 and npm 11
+  // submit the same dependency graph instead of rebuilding it through the
+  // retiring quick-audit endpoint.
+  run("npm", ["audit", "--package-lock-only", "--omit=dev", "--audit-level=high"], {
     cwd: installDir,
     env: { ...isolatedNpmEnv, npm_config_audit: "true" }
   });
