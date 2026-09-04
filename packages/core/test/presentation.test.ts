@@ -263,6 +263,36 @@ describe("OpenTagPresentation", () => {
     expect(JSON.stringify(presentation)).not.toContain("action_id");
   });
 
+  it("escapes backslashes and backticks in inline action details", () => {
+    const presentation = createFinalSummaryPresentation({
+      result: {
+        conclusion: "needs_human",
+        summary: "Prepared a PR proposal.",
+        suggestedChanges: [{
+          proposalId: "proposal_escape",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a pull request.",
+          intents: [{
+            intentId: "intent_escape",
+            domain: "pull_request",
+            action: "create_pull_request",
+            summary: "Create a pull request.",
+            params: {
+              head: "feature\\name`tick",
+              base: "main\\base`tick",
+              changedFiles: ["src\\demo`file.ts"]
+            }
+          }]
+        }]
+      }
+    });
+
+    const rendered = renderOpenTagPresentationPlainText(presentation);
+    expect(rendered).toContain("`feature\\\\name\\`tick`");
+    expect(rendered).toContain("`main\\\\base\\`tick`");
+    expect(rendered).toContain("`src\\\\demo\\`file.ts`");
+  });
+
   it("renders standalone action receipts with command and audit fallback", () => {
     const presentation = createActionReceiptPresentation({
       auditRunId: "run_receipt_1",

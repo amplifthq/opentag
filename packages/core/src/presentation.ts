@@ -346,7 +346,12 @@ function stringArrayParam(params: Record<string, unknown> | undefined, key: stri
 }
 
 function inlineCode(value: string): string {
-  return `\`${value.replace(/`/g, "\\`")}\``;
+  let escaped = "";
+  for (const character of value) {
+    if (character === "\\" || character === "`") escaped += "\\";
+    escaped += character;
+  }
+  return `\`${escaped}\``;
 }
 
 function listValue(values: string[]): string {
@@ -459,8 +464,8 @@ function presentationActionDetailsFromReceipt(receipt: ActionReceipt): string[] 
     const head = stringParam(params, "head") ?? stringParam(params, "branch");
     const base = stringParam(params, "base") ?? stringParam(params, "baseBranch");
     const changedFiles = stringArrayParam(params, "changedFiles");
-    if (head || base) details.push(`Branch: \`${head ?? "unknown"}\` -> \`${base ?? "main"}\``);
-    if (changedFiles.length > 0) details.push(`Changed files: ${changedFiles.map((file) => `\`${file}\``).join(", ")}`);
+    if (head || base) details.push(`Branch: ${inlineCode(head ?? "unknown")} -> ${inlineCode(base ?? "main")}`);
+    if (changedFiles.length > 0) details.push(`Changed files: ${changedFiles.map(inlineCode).join(", ")}`);
   }
   if (receipt.candidate.proposalPreconditions?.length) {
     details.push(`Preconditions: ${receipt.candidate.proposalPreconditions.length} check(s) in the audit log.`);

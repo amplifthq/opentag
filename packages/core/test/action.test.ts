@@ -363,6 +363,20 @@ describe("thread action commands", () => {
     });
   });
 
+  it("keeps adversarial trailing-punctuation input bounded", () => {
+    const reason = `${"!".repeat(50_000)}x`;
+    const startedAt = performance.now();
+    const parsed = parseThreadActionCommand(`approve ${reason}`);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(parsed).toMatchObject({
+      verb: "approve",
+      selection: { kind: "latest" },
+      reason
+    });
+    expect(elapsedMs).toBeLessThan(250);
+  });
+
   it("parses concise Chinese action replies", () => {
     expect(parseThreadActionCommand("批准 1")).toEqual({
       verb: "approve",
@@ -424,6 +438,18 @@ describe("thread action commands", () => {
       optionId: "staging",
       reason: "Use the safe target"
     });
+  });
+
+  it("parses a long resolve reason without ambiguous flag backtracking", () => {
+    const reason = "Use the safe target ".repeat(5_000).trim();
+    expect(parseThreadControlCommand(`/resolve escalation_linear --reason ${reason} --option staging`))
+      .toEqual({
+        verb: "resolve",
+        rawText: `/resolve escalation_linear --reason ${reason} --option staging`,
+        escalationId: "escalation_linear",
+        optionId: "staging",
+        reason
+      });
   });
 
   it("does not parse non-slash status words as control commands", () => {

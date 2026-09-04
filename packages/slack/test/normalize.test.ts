@@ -37,6 +37,13 @@ describe("Slack normalization", () => {
     expect(stripSlackAppMention("<@U_TEAMMATE> fix this", "U_APP")).toBeNull();
   });
 
+  it("rejects a large malformed leading mention in bounded time", () => {
+    const malformed = `<@${"<@=".repeat(50_000)}command`;
+    const startedAt = performance.now();
+    expect(stripSlackAppMention(malformed, "U_APP")).toBeNull();
+    expect(performance.now() - startedAt).toBeLessThan(250);
+  });
+
   it("routes intent correctly when a teammate is mentioned before the bot", () => {
     const event = normalizeSlackAppMention({
       teamId: "T123",

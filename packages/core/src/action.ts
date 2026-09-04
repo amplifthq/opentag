@@ -255,12 +255,36 @@ const DOMAIN_ALIASES: Record<string, string> = {
   pull_requests: "pull_request"
 };
 
+const TRAILING_TOKEN_PUNCTUATION = new Set([
+  ".", ",", ";", ":", "!", "?", "，", "。", "；", "：", "！", "？"
+]);
+
 function normalizeToken(token: string): string {
-  return token.trim().replace(/[.,;:!?，。；：！？]+$/u, "");
+  const trimmed = token.trim();
+  let end = trimmed.length;
+  while (end > 0 && TRAILING_TOKEN_PUNCTUATION.has(trimmed[end - 1]!)) end -= 1;
+  return trimmed.slice(0, end);
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function firstToken(value: string): { token: string; rest: string } | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  let end = 0;
+  while (end < trimmed.length && trimmed[end]!.trim() !== "") end += 1;
+  return { token: trimmed.slice(0, end), rest: trimmed.slice(end).trim() };
+}
+
+function tokenSpans(value: string): Array<{ token: string; start: number }> {
+  const spans: Array<{ token: string; start: number }> = [];
+  let cursor = 0;
+  while (cursor < value.length) {
+    while (cursor < value.length && value[cursor]!.trim() === "") cursor += 1;
+    if (cursor >= value.length) break;
+    const start = cursor;
+    while (cursor < value.length && value[cursor]!.trim() !== "") cursor += 1;
+    spans.push({ token: value.slice(start, cursor), start });
+  }
+  return spans;
 }
 
 function threadCommandText(rawText: string): string {
@@ -288,22 +312,47 @@ function parseSelection(tokens: string[]): ThreadActionSelection {
 
 function reasonAfterSelection(rest: string, selection: ThreadActionSelection): string | undefined {
   if (!rest.trim()) return undefined;
-  if (selection.kind === "all") {
-    const stripped = rest.replace(/^\s*(?:all|全部)\s*/iu, "").trim();
-    return stripped.length > 0 ? stripped : undefined;
-  }
   if (selection.kind === "latest") return rest.trim();
-  const selectionText =
-    selection.kind === "index"
-      ? String(selection.index)
+  const first = firstToken(rest);
+  if (!first) return undefined;
+  const normalized = normalizeToken(first.token);
+  const selectedFirst = selection.kind === "all"
+    ? normalized.toLowerCase() === "all" || normalized === "全部"
+    : selection.kind === "index"
+      ? normalized === String(selection.index)
       : selection.kind === "proposal"
-        ? escapeRegExp(selection.proposalId)
+        ? normalized === selection.proposalId
         : selection.kind === "intent"
-          ? escapeRegExp(selection.intentId)
-          : Object.keys(DOMAIN_ALIASES).join("|");
-  const pattern = new RegExp(`^\\s*(?:${selectionText})\\b\\s*`, "i");
-  const stripped = rest.replace(pattern, "").trim();
+          ? normalized === selection.intentId
+          : DOMAIN_ALIASES[normalized.toLowerCase()] === selection.domain;
+  const stripped = selectedFirst ? first.rest : rest.trim();
   return stripped.length > 0 ? stripped : undefined;
+}
+
+function parseResolveFlags(flags: string): { optionId?: string; reason?: string } | null {
+  const first = firstToken(flags);
+  if (!first) return {};
+  const flag = first.token.toLowerCase();
+  if (flag === "--option") {
+    const option = firstToken(first.rest);
+    if (!option) return null;
+    if (!option.rest) return { optionId: option.token };
+    const reasonFlag = firstToken(option.rest);
+    if (!reasonFlag || reasonFlag.token.toLowerCase() !== "--reason" || !reasonFlag.rest) {
+      return null;
+    }
+    return { optionId: option.token, reason: reasonFlag.rest };
+  }
+  if (flag !== "--reason" || !first.rest) return null;
+
+  const spans = tokenSpans(first.rest);
+  const optionFlag = spans.at(-2);
+  const optionValue = spans.at(-1);
+  if (spans.length >= 3 && optionFlag?.token.toLowerCase() === "--option" && optionValue) {
+    const reason = first.rest.slice(0, optionFlag.start).trim();
+    if (reason) return { optionId: optionValue.token, reason };
+  }
+  return { reason: first.rest };
 }
 
 export function parseThreadActionCommand(rawText: string): ThreadActionCommand | null {
@@ -343,43 +392,45 @@ export function parseThreadActionCommand(rawText: string): ThreadActionCommand |
 export function parseThreadControlCommand(rawText: string): ThreadControlCommand | null {
   const text = threadCommandText(rawText);
   if (!text) return null;
+  const command = firstToken(text);
+  if (!command) return null;
+  const commandName = command.token.toLowerCase();
 
-  const simple = text.match(/^\/(status|doctor)\s*$/i);
-  if (simple) {
+  if ((commandName === "/status" || commandName === "/doctor") && !command.rest) {
     return {
-      verb: simple[1]!.toLowerCase() as "status" | "doctor",
+      verb: commandName.slice(1) as "status" | "doctor",
       rawText: text
     };
   }
 
-  const stop = text.match(/^\/stop(?:\s+(\S+))?\s*$/i);
-  if (stop) {
+  if (commandName === "/stop") {
+    const run = firstToken(command.rest);
+    if (run?.rest) return null;
     return {
       verb: "stop",
       rawText: text,
-      ...(stop[1] ? { runId: stop[1] } : {})
+      ...(run ? { runId: run.token } : {})
     };
   }
 
-  const acknowledge = text.match(/^\/(?:ack|acknowledge)\s+(\S+)\s*$/i);
-  if (acknowledge) {
-    return { verb: "acknowledge", rawText: text, escalationId: acknowledge[1]! };
+  if (commandName === "/ack" || commandName === "/acknowledge") {
+    const escalation = firstToken(command.rest);
+    return escalation && !escalation.rest
+      ? { verb: "acknowledge", rawText: text, escalationId: escalation.token }
+      : null;
   }
 
-  const resolve = text.match(/^\/resolve\s+(\S+)(?:\s+(.+))?\s*$/i);
-  if (!resolve) return null;
-  const flags = resolve[2]?.trim();
-  const optionThenReason = flags?.match(/^--option\s+(\S+)(?:\s+--reason\s+(.+))?$/i);
-  const reasonThenOption = flags?.match(/^--reason\s+(.+?)(?:\s+--option\s+(\S+))?$/i);
-  if (flags && !optionThenReason && !reasonThenOption) return null;
-  const optionId = optionThenReason?.[1] ?? reasonThenOption?.[2];
-  const reason = optionThenReason?.[2] ?? reasonThenOption?.[1];
+  if (commandName !== "/resolve") return null;
+  const escalation = firstToken(command.rest);
+  if (!escalation) return null;
+  const flags = parseResolveFlags(escalation.rest);
+  if (!flags) return null;
   return {
     verb: "resolve",
     rawText: text,
-    escalationId: resolve[1]!,
-    ...(optionId ? { optionId } : {}),
-    ...(reason?.trim() ? { reason: reason.trim() } : {})
+    escalationId: escalation.token,
+    ...(flags.optionId ? { optionId: flags.optionId } : {}),
+    ...(flags.reason ? { reason: flags.reason } : {})
   };
 }
 
