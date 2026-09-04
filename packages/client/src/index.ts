@@ -12,6 +12,11 @@ import {
   computePermissionFencingTokenDigestV1,
   computePermissionRequestDigestV1,
   ControlErrorHttpResponseV1Schema,
+  EffectAcquireRequestV1Schema,
+  EffectEvidenceEnvelopeV1Schema,
+  EffectPermitV1Schema,
+  EffectRequestV1Schema,
+  EffectViewV1Schema,
   HostedClaimRequestV1Schema,
   HostedClaimV1Schema,
   HostedCompleteRequestV1Schema,
@@ -58,6 +63,9 @@ import {
   verifyHostedClaimExpectedAuthorityV1,
   verifyHostedClaimFencingTokenDigestV1,
   verifyHostedLifecycleReceiptV1,
+  verifyEffectEvidenceEnvelopeV1,
+  verifyEffectPermitV1,
+  verifyEffectRequestV1,
   type HostedClaimRequestV1,
   type HostedClaimV1,
   type HostedCompleteRequestV1,
@@ -70,6 +78,11 @@ import {
   type HostedRunningRequestV1,
   type HostedSourceContentRedeemRequestV1,
   type HostedSourceContentRedeemResponseV1,
+  type EffectAcquireRequestV1,
+  type EffectEvidenceEnvelopeV1,
+  type EffectPermitV1,
+  type EffectRequestV1,
+  type EffectViewV1,
   type RunnerBranchOwnershipAttestationV1,
   type MaterialActionReceiptEnvelopeV1,
   type PermissionResolutionReceiptEnvelopeV1,
@@ -98,6 +111,11 @@ import {
 } from "@opentag/control-protocol";
 
 export type {
+  EffectAcquireRequestV1,
+  EffectEvidenceEnvelopeV1,
+  EffectPermitV1,
+  EffectRequestV1,
+  EffectViewV1,
   HostedClaimRequestV1,
   HostedClaimV1,
   MaterialActionReceiptEnvelopeV1,
@@ -219,6 +237,9 @@ export type OpenTagClient = {
   reconcileMaterialActionControlV1(input: RunnerMaterialActionReconcileRequestV1): Promise<MaterialActionReconcileControlV1Result>;
   beginMaterialActionControlV1(input: RunnerMaterialActionBeginV1): Promise<{
     status: 200 | 201; replayed: boolean; outcome: "accepted" }>;
+  requestEffectControlV1(input: EffectRequestV1): Promise<EffectViewV1>;
+  acquireEffectControlV1(input: EffectAcquireRequestV1): Promise<EffectPermitV1 | null>;
+  recordEffectEvidenceControlV1(input: EffectEvidenceEnvelopeV1): Promise<EffectViewV1>;
   claimNextPublicationOperationControlV1(input: RunnerPublicationClaimNextV1): Promise<{
     capability: PublicationOperationCapabilityV1; completionPending: false; completionReceipt?: never
   } | ({ completionPending: true } & RunnerPublicationCompletionPendingV1)
@@ -1583,6 +1604,83 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         return { ...RunnerPublicationReconciliationPendingV1Schema.parse(body), reconciliationPending: true as const };
       }
       return { capability: PublicationOperationCapabilityV1Schema.parse(body), completionPending: false as const };
+    },
+
+    async requestEffectControlV1(input) {
+      const action = "requestEffectControlV1";
+      const request = EffectRequestV1Schema.parse(input);
+      if (!await verifyEffectRequestV1(request)) {
+        throw new OpenTagClientHttpError(action, 0, "invalid_effect_request_digest");
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/effects/request`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action,
+      );
+      assertControlResponseBoundary(response, action, trustedControlOrigin);
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200 && response.status !== 201) {
+        throwControlV1Error(response, body, action, request.requestId);
+      }
+      const view = EffectViewV1Schema.parse(body);
+      if (view.effectId !== request.effectId) {
+        throw new OpenTagClientHttpError(action, response.status, "invalid_effect_response_identity");
+      }
+      return view;
+    },
+
+    async acquireEffectControlV1(input) {
+      const action = "acquireEffectControlV1";
+      const request = EffectAcquireRequestV1Schema.parse(input);
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/effects/acquire`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action,
+      );
+      assertControlResponseBoundary(response, action, trustedControlOrigin);
+      if (response.status === 204) return null;
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200 && response.status !== 201) {
+        throwControlV1Error(response, body, action, request.requestId);
+      }
+      const permit = EffectPermitV1Schema.parse(body);
+      if (permit.organizationId !== request.organizationId
+        || permit.runnerId !== request.runnerId
+        || permit.runnerGeneration !== request.runnerGeneration
+        || permit.acquireRequestId !== request.requestId
+        || permit.acquireJournalDigest !== request.acquireJournalDigest) {
+        throw new OpenTagClientHttpError(action, response.status, "invalid_effect_permit_identity");
+      }
+      if (!await verifyEffectPermitV1(permit)) {
+        throw new OpenTagClientHttpError(action, response.status, "invalid_effect_permit_digest");
+      }
+      return permit;
+    },
+
+    async recordEffectEvidenceControlV1(input) {
+      const action = "recordEffectEvidenceControlV1";
+      const envelope = EffectEvidenceEnvelopeV1Schema.parse(input);
+      if (!await verifyEffectEvidenceEnvelopeV1(envelope)) {
+        throw new OpenTagClientHttpError(action, 0, "invalid_effect_evidence_digest");
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(envelope.producer.runnerId)}/effects/${encodeURIComponent(envelope.effectId)}/evidence`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(envelope) },
+        action,
+      );
+      assertControlResponseBoundary(response, action, trustedControlOrigin);
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200 && response.status !== 201) {
+        throwControlV1Error(response, body, action, envelope.evidenceId);
+      }
+      const view = EffectViewV1Schema.parse(body);
+      if (view.effectId !== envelope.effectId) {
+        throw new OpenTagClientHttpError(action, response.status, "invalid_effect_response_identity");
+      }
+      return view;
     },
 
     async beginPublicationOperationControlV1(input) {

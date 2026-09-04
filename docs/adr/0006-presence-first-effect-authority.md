@@ -138,15 +138,22 @@ interface EffectAuthority {
 
 `request` describes one desired logical effect, not its provider-specific
 steps. An `EffectRequest` binds the Organization, Work, Attempt, Runner,
-fencing digest, exact target, policy and approval evidence, idempotency
-identity, and expiry.
+fencing digest, exact target and target-binding generation, policy snapshot,
+approval-request identity and expiry, and idempotency identity. The first
+supported policy always requires a human decision, so approval evidence cannot
+exist at request time. Approval is a separate immutable internal transition on
+the same Effect; it records the human decision and digest before the Effect can
+become `authorized`, and every execute permit binds that approval digest.
 
 `acquire` atomically revalidates current authority and records that an effect
 attempt and its permit were issued before returning the execute permit. Permit
 issuance means provider I/O may become possible; it does not claim that the
 executor actually started that I/O. The executor separately records the actual
 provider-I/O begin in its own transaction-owner journal immediately before the
-call. If permit issuance committed but its response may not have reached the
+call. Before acquisition, the Runner durably creates an `acquire_pending`
+journal entry and sends its digest; the issued permit binds that digest, and
+any later not-started evidence must bind both the acquisition and local-journal
+digests. If permit issuance committed but its response may not have reached the
 executor, the next acquisition returns a reconciliation permit instead of
 another mutation permit unless the original executor supplies admissible
 not-started evidence.
@@ -159,7 +166,6 @@ type EffectEvidence =
   | EffectNotStartedEvidence
   | EffectPresentEvidence
   | EffectAbsentEvidence
-  | EffectFailedEvidence
   | EffectAmbiguousEvidence
   | OperatorAttentionAnnotation;
 ```
@@ -169,16 +175,17 @@ evidence digest, appends accepted evidence, and derives the current Effect
 view. Callers cannot request `succeeded`, authorize a retry, or overwrite an
 earlier observation directly.
 
-`EffectNotStartedEvidence`, `EffectAbsentEvidence`, and
-`EffectFailedEvidence` are not interchangeable:
+`EffectNotStartedEvidence` and `EffectAbsentEvidence` are not interchangeable:
 
 - not-started evidence must come from the original transaction owner's intact
   journal and prove provider I/O never crossed its begin marker;
 - absence evidence must bind provider, effect, target, operation identity,
   binding generation, observation scope, and time, and must satisfy the
   Adapter-specific evidence policy;
-- failure supports a successor only when the provider conclusively proves the
-  intended effect did not occur;
+- provider rejection or failure does not by itself prove absence and therefore
+  becomes `outcome_unknown` or `attention`; the first Effect kind has no
+  caller-asserted failed evidence and only exact scoped absence can authorize a
+  successor mutation;
 - an operator annotation explains attention but does not prove success,
   absence, or authorize an automatic successor. Any future break-glass release
   requires a separate accepted decision and audit contract.
@@ -254,7 +261,7 @@ The Control Plane Effect view is:
 requested
   -> authorized
   -> permit_issued
-  -> succeeded | failed | outcome_unknown | attention
+  -> succeeded | outcome_unknown | attention
 
 outcome_unknown
   -> read-only observation
@@ -266,7 +273,7 @@ The Runner transaction journal for a local material or publication effect is:
 ```text
 permit_accepted
   -> provider_io_begun
-  -> succeeded | failed | outcome_unknown
+  -> succeeded | outcome_unknown | attention
 ```
 
 `permit_issued` means execution became possible and therefore prevents silent
