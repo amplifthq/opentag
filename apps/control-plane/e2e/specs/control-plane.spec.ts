@@ -96,6 +96,7 @@ test("pairs a real runner and declares a persistent target and GitHub binding", 
       "relay.hosted-claim.v1",
       "relay.lifecycle.v1",
       "relay.readiness.v1",
+      "relay.source-content-redeem.v1",
     ],
   });
   expect(registered.replayed).toBe(false);

@@ -1,4 +1,5 @@
-import type { CompletionAssessment } from "@opentag/core";
+import { CompletionWaiverSchema, HumanEscalationSchema, VerificationEvidenceSchema,
+  type CompletionAssessment } from "@opentag/core";
 import { deriveWorkLoopView, evaluateCompletion } from "./evaluate.js";
 import type {
   CompletionEvaluationSnapshot,
@@ -105,16 +106,19 @@ export function createOpenTagGovernance(input: {
 
   async function execute(command: GovernanceCommand): Promise<GovernanceCommandResult> {
     if (command.type === "ingest_evidence") {
+      VerificationEvidenceSchema.shape.id.parse(command.evidence.id);
       await input.repository.recordEvidence(command.evidence);
       return reassess(command.evidence.workThreadId);
     }
     if (command.type === "apply_completion_waiver") {
-      await input.repository.recordWaiver(command.waiver);
+      const waiver = CompletionWaiverSchema.parse(command.waiver);
+      await input.repository.recordWaiver(waiver);
       return reassess(command.workThreadId);
     }
     if (command.type === "resolve_human_escalation") {
-      await input.repository.resolveHumanEscalation(command.escalation);
-      if (command.waiver) await input.repository.recordWaiver(command.waiver);
+      const escalation = HumanEscalationSchema.parse(command.escalation);
+      await input.repository.resolveHumanEscalation(escalation);
+      if (command.waiver) await input.repository.recordWaiver(CompletionWaiverSchema.parse(command.waiver));
       return reassess(command.workThreadId);
     }
     return reassess(command.workThreadId);

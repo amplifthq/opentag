@@ -11,7 +11,7 @@ type ClaimedJob = {
 };
 
 type WorkerQueue = {
-  claim(workerId: string): Promise<
+  claim(workerId: string, jobKinds?: readonly string[]): Promise<
     | { kind: "claimed"; job: ClaimedJob }
     | { kind: "empty" }
   >;
@@ -28,10 +28,12 @@ type WorkerQueue = {
   }): Promise<{ kind: string }>;
 };
 
-type JobHandler = (input: {
+export type JobHandler = (input: {
   organizationId: string | null;
   payload: unknown;
 }) => Promise<unknown>;
+
+export type JobHandlerMap = Readonly<Record<string, JobHandler>>;
 
 export class JobHandlerError extends Error {
   constructor(
@@ -46,13 +48,13 @@ export class JobHandlerError extends Error {
 export async function runOneJob(input: {
   queue: WorkerQueue;
   workerId: string;
-  handlers: Readonly<Record<string, JobHandler>>;
+  handlers: JobHandlerMap;
   retryDelayMs: number;
   clock: { now(): Date };
   beforeClaim?: () => Promise<void>;
 }) {
   await input.beforeClaim?.();
-  const claim = await input.queue.claim(input.workerId);
+  const claim = await input.queue.claim(input.workerId, Object.keys(input.handlers).sort());
   if (claim.kind === "empty") return { kind: "empty" } as const;
   const handler = input.handlers[claim.job.kind];
   if (!handler) {
@@ -98,7 +100,7 @@ export async function runOneJob(input: {
 export async function runJobLoop(input: {
   queue: WorkerQueue;
   workerId: string;
-  handlers: Readonly<Record<string, JobHandler>>;
+  handlers: JobHandlerMap;
   retryDelayMs: number;
   pollIntervalMs: number;
   clock: { now(): Date };

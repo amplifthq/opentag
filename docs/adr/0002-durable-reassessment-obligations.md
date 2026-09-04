@@ -1,10 +1,17 @@
 # ADR 0002: Make completion reassessment a durable obligation
 
-- Status: Accepted
+- Status: Accepted; current team-relay scope note added 2026-09-02
 - Date: 2026-08-04
 - Decision owners: OpenTag maintainers
 
 ## Context
+
+This ADR's durable obligation is a governance-delivery primitive, not a source
+of provider authority. In the current self-hosted `paired_relay` profile, it
+does not authorize scheduled work, ambient follow-up, or a material provider
+action. Slack delivery and GitHub observations stay separately attributed; an
+ambiguous observation remains `outcome_unknown` unless an exact bounded
+reconciliation authority applies.
 
 OpenTag records governance-relevant facts durably before it evaluates their
 effect on completion. Examples include a terminal Run result, verification

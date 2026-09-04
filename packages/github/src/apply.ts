@@ -133,14 +133,13 @@ function stringArrayParam(intent: MutationIntent, key: string): string[] {
 function verificationLinesFromIntent(intent: MutationIntent): string[] {
   const value = intent.params?.["verification"];
   if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
-      const command = (item as Record<string, unknown>)["command"];
-      const outcome = (item as Record<string, unknown>)["outcome"];
-      return typeof command === "string" && typeof outcome === "string" ? `- \`${command}\`: ${outcome}` : undefined;
-    })
-    .filter((line): line is string => Boolean(line));
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const command = (item as Record<string, unknown>)["command"];
+    const outcome = (item as Record<string, unknown>)["outcome"];
+    return typeof command === "string" && typeof outcome === "string"
+      ? `- \`${command}\`: ${outcome}` : undefined;
+  }).filter((line): line is string => Boolean(line));
 }
 
 function pullRequestBodyFromIntent(intent: MutationIntent): string {
@@ -153,14 +152,11 @@ function pullRequestBodyFromIntent(intent: MutationIntent): string {
   if (changedFiles.length > 0) {
     lines.push("", "## Changed Files", ...changedFiles.map((file) => `- \`${file}\``));
   }
-  if (risks.length > 0) {
-    lines.push("", "## Risks", ...risks.map((risk) => `- ${risk}`));
-  }
-  if (verification.length > 0) {
-    lines.push("", "## Verification", ...verification);
-  }
+  if (risks.length > 0) lines.push("", "## Risks", ...risks.map((risk) => `- ${risk}`));
+  if (verification.length > 0) lines.push("", "## Verification", ...verification);
   if (executorConditions.length > 0) {
-    lines.push("", "## Executor Conditions", ...executorConditions.map((condition) => `- ${condition}`));
+    lines.push("", "## Executor Conditions",
+      ...executorConditions.map((condition) => `- ${condition}`));
   }
   return lines.join("\n");
 }
@@ -256,27 +252,15 @@ export function compileGitHubIssueMutationIntent(
 ): GitHubIssueMutationCompilation {
   if (intent.action === "create_pull_request") {
     const head = stringParam(intent, "head", "branch");
-    if (!head) {
-      return {
-        ok: false,
-        outcome: {
-          intentId: intent.intentId,
-          outcome: "failed",
-          message: "create_pull_request requires params.head or params.branch."
-        }
-      };
-    }
+    if (!head) return { ok: false, outcome: { intentId: intent.intentId,
+      outcome: "failed", message: "create_pull_request requires params.head or params.branch." } };
     return {
       ok: true,
       intentId: intent.intentId,
-      operation: {
-        kind: "create_pull_request",
-        intentId: intent.intentId,
+      operation: { kind: "create_pull_request", intentId: intent.intentId,
         title: stringParam(intent, "title") ?? intent.summary,
-        body: pullRequestBodyFromIntent(intent),
-        head,
-        base: stringParam(intent, "base", "baseBranch") ?? "main"
-      }
+        body: pullRequestBodyFromIntent(intent), head,
+        base: stringParam(intent, "base", "baseBranch") ?? "main" },
     };
   }
 
@@ -458,18 +442,10 @@ export async function applyGitHubIssueMutationOperation(input: {
   const fetchImpl = input.fetchImpl ?? fetch;
   try {
     if (input.operation.kind === "create_pull_request") {
-      const externalUri = await createPullRequestViaFetch(
-        {
-          token: input.target.token,
-          owner: input.target.owner,
-          repo: input.target.repo,
-          title: input.operation.title,
-          body: input.operation.body,
-          head: input.operation.head,
-          base: input.operation.base
-        },
-        fetchImpl
-      );
+      const externalUri = await createPullRequestViaFetch({ token: input.target.token,
+        owner: input.target.owner, repo: input.target.repo,
+        title: input.operation.title, body: input.operation.body,
+        head: input.operation.head, base: input.operation.base, draft: true }, fetchImpl);
       return { intentId: input.operation.intentId, outcome: "applied", externalUri };
     }
 

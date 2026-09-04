@@ -177,6 +177,12 @@ const app = acp
     }
 
     await writeFile(join(session.cwd, "acp-output.txt"), "created by the ACP fixture\n");
+    if (mode === "unicode-order") {
+      await writeFile(join(session.cwd, "😀.ts"), "supplementary\n");
+      await writeFile(join(session.cwd, "é.ts"), "accented\n");
+      await writeFile(join(session.cwd, "a.ts"), "lowercase\n");
+      await writeFile(join(session.cwd, "B.ts"), "uppercase\n");
+    }
     await ctx.client.notify(acp.methods.client.session.update, {
       sessionId: ctx.params.sessionId,
       update: {

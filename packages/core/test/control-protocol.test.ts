@@ -88,6 +88,7 @@ import {
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestHttpResponseV1Schema,
   RunnerPermissionRequestV1Schema,
+  RunnerMaterialActionBeginV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
   RunnerRegistrationRequestV1Schema,
   RunnerRegistrationResponseV1Schema,
@@ -427,6 +428,7 @@ describe("hosted admission and claim V1 protocol", () => {
     "relay.hosted-claim.v1",
     "relay.lifecycle.v1",
     "relay.readiness.v1",
+    "relay.source-content-redeem.v1",
   ] as const;
   const sourceIdentityInput = {
     provider: "github",
@@ -489,6 +491,13 @@ describe("hosted admission and claim V1 protocol", () => {
         digest,
       },
       runnerId: "runner_1",
+      sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
+        aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: digest,
+        payloadDigest: digest },
+      queueClaimDeadline: "2026-08-09T00:00:00.000Z",
+      permissionCeiling: { allowedActionDescriptors: ["workspace.write"], digest },
+      publicationPolicy: { mode: "proposal_only", digest },
+      completionContract: { mode: "proposal_ready", digest },
       admissionPolicySnapshot: {
         snapshotId: "policy_1",
         digest: otherDigest,
@@ -535,6 +544,7 @@ describe("hosted admission and claim V1 protocol", () => {
           bindingId: "binding_1",
           providerRepositoryId: "123",
           defaultBranch: "main",
+          authorizedPublicationModes: ["proposal_only", "pull_request"],
         },
         runner: {
           runnerId: "runner_1",
@@ -576,6 +586,11 @@ describe("hosted admission and claim V1 protocol", () => {
         fencingToken: "fence_secret_canary",
         fencingTokenDigest: publicFenceDigest,
         leaseExpiresAt: "2026-08-08T00:02:00.000Z",
+      },
+      sourceContentGrant: {
+        grantId: "grant_1", token: "grant_token_1", keyVersion: "test-v1",
+        fenceDigest: publicFenceDigest, contentIds: ["content_1"],
+        purpose: "source_context", expiresAt: "2026-08-08T00:02:00.000Z",
       },
       authority: {
         organizationId: "org_1",
@@ -1014,6 +1029,9 @@ describe("hosted admission and claim V1 protocol", () => {
         ...common,
         conclusion,
         reasonCode,
+        ...(conclusion === "needs_human" ? { blockedPermission: {
+          permissionRequestId: "permission_1", actionDescriptorDigest: digest,
+          policySnapshotDigest: otherDigest } } : {}),
       }).success).toBe(true);
       expect(HostedLifecycleReceiptPayloadV1Schema.safeParse({
         operation: "executor_result",
@@ -1023,6 +1041,9 @@ describe("hosted admission and claim V1 protocol", () => {
         resultDigest: digest,
         artifactDigests: [],
         evidenceDigests: [],
+        ...(conclusion === "needs_human" ? { blockedPermission: {
+          permissionRequestId: "permission_1", actionDescriptorDigest: digest,
+          policySnapshotDigest: otherDigest } } : {}),
       }).success).toBe(true);
     }
 
@@ -1188,10 +1209,10 @@ describe("permission V1 control protocol", () => {
     },
     permissionRequestId: "permission_request_1",
     actionId: "action_1",
-    actionFamily: "publish",
+    actionDescriptor: "github.release.create",
+    actionDescriptorDigest: digest,
     riskTier: "high",
     targetFingerprint: otherDigest,
-    permissionScopes: ["npm:publish", "package:write"],
     policySnapshotRef: "policy_1",
     policySnapshotDigest: digest,
     permissionRequestDigest: otherDigest,
@@ -1207,10 +1228,10 @@ describe("permission V1 control protocol", () => {
     attempt,
     permissionRequestId: request.permissionRequestId,
     actionId: request.actionId,
-    actionFamily: request.actionFamily,
+    actionDescriptor: request.actionDescriptor,
+    actionDescriptorDigest: request.actionDescriptorDigest,
     riskTier: request.riskTier,
     targetFingerprint: request.targetFingerprint,
-    permissionScopes: request.permissionScopes,
     policySnapshotRef: request.policySnapshotRef,
     policySnapshotDigest: request.policySnapshotDigest,
     requestedAt: request.requestedAt,
@@ -1238,10 +1259,10 @@ describe("permission V1 control protocol", () => {
       permissionRequestId: "permission_request_1",
       permissionRequestDigest: otherDigest,
       actionId: "action_1",
-      actionFamily: "publish",
+      actionDescriptor: "github.release.create",
+      actionDescriptorDigest: digest,
       riskTier: "high",
       targetFingerprint: otherDigest,
-      permissionScopes: ["npm:publish", "package:write"],
       policySnapshotRef: "policy_1",
       policySnapshotDigest: digest,
       state: "waiting",
@@ -1297,7 +1318,7 @@ describe("permission V1 control protocol", () => {
 
     const expectedDigest = await computePermissionRequestDigestV1(digestSource);
     expect(expectedDigest).toBe(
-      "sha256:bc7e39fcc63caab71661680c54ec90dc7a98fd043082b8af45c1d78cffb19154",
+      "sha256:6497e6c33f021a605448c46aca080ff1d67d98bf7aef6c2bd70c4a094508212b",
     );
     expect(await computePermissionRequestDigestV1(buildPermissionRequestDigestInputV1(digestSource))).toBe(expectedDigest);
 
@@ -1326,10 +1347,10 @@ describe("permission V1 control protocol", () => {
       { ...digestSource, attempt: { ...attempt, fencingTokenDigest: otherDigest } },
       { ...digestSource, permissionRequestId: "permission_request_2" },
       { ...digestSource, actionId: "action_2" },
-      { ...digestSource, actionFamily: "deploy" },
+      { ...digestSource, actionDescriptor: "workspace.write" as const },
+      { ...digestSource, actionDescriptorDigest: otherDigest },
       { ...digestSource, riskTier: "critical" as const },
       { ...digestSource, targetFingerprint: digest },
-      { ...digestSource, permissionScopes: ["npm:publish"] as const },
       { ...digestSource, policySnapshotRef: "policy_2" },
       { ...digestSource, policySnapshotDigest: otherDigest },
       { ...digestSource, requestedAt: "2026-08-08T00:00:01.000Z" },
@@ -1526,7 +1547,9 @@ describe("permission V1 control protocol", () => {
 describe("material action receipt V1 control protocol", () => {
   const payload = {
     actionId: "action_1",
-    actionFamily: "publish",
+    actionDescriptor: "github.release.create",
+    actionDescriptorDigest: digest,
+    idempotencyKey: "material_publish_1",
     provider: "npm",
     connectionRef: "connection_1",
     targetFingerprint: digest,
@@ -1585,8 +1608,46 @@ describe("material action receipt V1 control protocol", () => {
     expectedCurrentReceiptId: "material_receipt_1",
     expectedCurrentReceiptDigest: otherDigest,
   } as const;
+  const beginRequest = {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.material-receipt.v1"],
+    requestId: "material_begin_request_1",
+    operationId: "material_begin_operation_1",
+    organizationId: "org_1",
+    runnerId: "runner_1",
+    runId: "run_1",
+    attempt: reconcileRequest.attempt,
+    actionId: payload.actionId,
+    actionDescriptor: payload.actionDescriptor,
+    actionDescriptorDigest: payload.actionDescriptorDigest,
+    targetFingerprint: payload.targetFingerprint,
+    policySnapshotRef: "policy_1",
+    policySnapshotDigest: otherDigest,
+    authority: {
+      kind: "permission_resolution",
+      permissionRequestId: "permission_1",
+      permissionRequestDigest: digest,
+      resolutionReceiptId: "permission_receipt_1",
+      resolutionReceiptDigest: otherDigest,
+    },
+    idempotencyKey: payload.idempotencyKey,
+    begunAt: observedAt,
+  } as const;
 
   it("accepts the strict locally authoritative material receipt and canonical digest inputs", async () => {
+    expect(RunnerMaterialActionBeginV1Schema.safeParse(beginRequest).success).toBe(true);
+    const { authority: _authority, ...missingAuthority } = beginRequest;
+    expect(RunnerMaterialActionBeginV1Schema.safeParse(missingAuthority).success).toBe(false);
+    expect(RunnerMaterialActionBeginV1Schema.safeParse({ ...beginRequest,
+      authority: { kind: "runner_declared", digest } }).success).toBe(false);
+    expect(RunnerMaterialActionBeginV1Schema.safeParse({ ...beginRequest,
+      authority: {
+        kind: "admission_preauthorization",
+        admissionId: "admission_1",
+        preauthorizationDigest: digest,
+      },
+    }).success).toBe(false);
     expect(MaterialActionPayloadV1Schema.safeParse(payload).success).toBe(true);
     expect(MaterialActionReceiptEnvelopeV1Schema.safeParse(receipt).success).toBe(true);
     const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
@@ -3680,6 +3741,7 @@ describe("ReceiptEnvelope V1", () => {
         bindingId: "binding_1",
         providerRepositoryId: "123",
         defaultBranch: "main",
+        authorizedPublicationModes: ["proposal_only", "pull_request"],
       },
       runner: { runnerId: "runner_1", readinessReceiptDigest: digest },
       executor: { executorId: "executor_acp", capabilityDigest: digest },

@@ -2,6 +2,8 @@ import { z } from "zod";
 import { canonicalJsonStringify } from "./canonical-json.js";
 import { isCredentialSafeText } from "./credential-safety.js";
 import {
+  CanonicalUtcMillisTimestampSchema,
+  compareWellFormedUnicodeStrings,
   COMPLETION_REASON_ALLOWED_GATE_STATES,
   CompletionReasonCodeSchema,
   reduceCompletionGateStates,
@@ -9,10 +11,18 @@ import {
 
 export {
   COMPLETION_REASON_ALLOWED_GATE_STATES,
+  CanonicalUtcMillisTimestampSchema,
+  compareWellFormedUnicodeStrings,
   CompletionAssessmentStateSchema,
   CompletionGateResultStateSchema,
   CompletionReasonCodeSchema,
+  isCanonicalUtcMillisTimestamp,
+  isWellFormedUnicodeString,
+  ProposalReadinessAssessmentSchema,
   reduceCompletionGateStates,
+  sortWellFormedUnicodeStrings,
+  WellFormedNonEmptyUnicodeStringSchema,
+  WellFormedUnicodeStringSchema,
 } from "./completion.js";
 export { canonicalJsonStringify } from "./canonical-json.js";
 
@@ -32,10 +42,12 @@ export const RelayCapabilitySchema = z.enum([
   "relay.repository-binding.v1",
   "relay.hosted-admission.v1",
   "relay.hosted-claim.v1",
+  "relay.source-content-redeem.v1",
   "relay.claim-fence.v1",
   "relay.lifecycle.v1",
   "relay.permission.v1",
   "relay.material-receipt.v1",
+  "relay.publication.v1",
   "relay.cancel-resume.v1",
   "relay.follow-up.v1",
   "relay.work-thread-ref.v1",
@@ -46,16 +58,7 @@ export const RelayCapabilitySchema = z.enum([
   "relay.check-observation.v1",
 ]);
 
-function compareUnicodeCodePoints(left: string, right: string): number {
-  const leftPoints = Array.from(left, (value) => value.codePointAt(0) ?? 0);
-  const rightPoints = Array.from(right, (value) => value.codePointAt(0) ?? 0);
-  const length = Math.min(leftPoints.length, rightPoints.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = (leftPoints[index] ?? 0) - (rightPoints[index] ?? 0);
-    if (difference !== 0) return difference;
-  }
-  return leftPoints.length - rightPoints.length;
-}
+const compareUnicodeCodePoints = compareWellFormedUnicodeStrings;
 
 function sortedUniqueArray<T extends z.ZodType<string>>(item: T) {
   return z.array(item).superRefine((values, ctx) => {
@@ -77,13 +80,7 @@ function sortedUniqueArray<T extends z.ZodType<string>>(item: T) {
 export const RequiredRelayCapabilitiesSchema = sortedUniqueArray(RelayCapabilitySchema).min(1);
 export const RelayCapabilitiesSchema = sortedUniqueArray(RelayCapabilitySchema);
 export const ReceiptDigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
-export const ControlTimestampSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u)
-  .refine((value) => {
-    const timestamp = Date.parse(value);
-    return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
-  }, "Timestamp must be a real RFC 3339 UTC millisecond instant.");
+export const ControlTimestampSchema = CanonicalUtcMillisTimestampSchema;
 export const WorkerReleaseShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
 export const WorkerReleaseIdentitySchema = z.union([z.literal("local"), WorkerReleaseShaSchema]);
 export const NpmPackageVersionSchema = z
@@ -312,6 +309,18 @@ export const PermissionActionFamilyV1Schema = z
   .regex(/^[a-z][a-z0-9._-]{0,63}$/u)
   .refine(isCredentialSafeText, "Action family must not contain credential-like data.");
 
+export const PermissionActionDescriptorV1Schema = z.enum([
+  "workspace.read", "workspace.write", "command.execute", "git.read",
+  "git.push", "git.force_push", "git.target_write",
+  "github.pull_request.create", "github.pull_request.update",
+  "github.pull_request.merge", "github.release.create", "github.branch.delete",
+]);
+export const HOSTED_PUBLICATION_ACTION_CAPABILITIES_V1 = [
+  "git.push", "git.force_push", "git.target_write",
+  "github.pull_request.create", "github.pull_request.update",
+  "github.pull_request.merge", "github.release.create", "github.branch.delete",
+] as const;
+
 export const PermissionScopeV1Schema = z
   .string()
   .min(1)
@@ -332,6 +341,298 @@ export const MaterialActionNormalizedNameV1Schema = z
   .string()
   .regex(/^[a-z][a-z0-9._-]{0,63}$/u)
   .refine(isCredentialSafeText, "Normalized name must not contain credential-like data.");
+
+export const PublicationOperationStepV1Schema = z.enum([
+  "push_owned_branch",
+  "create_draft_pull_request",
+]);
+
+export const PublicationRepositoryV1Schema = z.object({
+  provider: z.literal("github"),
+  owner: z.string().min(1).max(100).regex(/^[a-z0-9](?:[a-z0-9-]{0,38})$/u),
+  repo: z.string().min(1).max(100).regex(/^[A-Za-z0-9._-]+$/u),
+  remote: z.string().min(1).max(128).regex(/^[A-Za-z0-9._/-]+$/u),
+  baseBranch: z.string().min(1).max(255),
+}).strict();
+
+export const PublicationOperationCapabilityV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  capabilityId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  epoch: z.number().int().positive(),
+  fencingTokenDigest: ReceiptDigestSchema,
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  approvalId: MaterialActionStableIdV1Schema,
+  approverId: MaterialActionStableIdV1Schema,
+  repository: PublicationRepositoryV1Schema,
+  branch: z.string().min(1).max(255),
+  expectedHeadSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  step: PublicationOperationStepV1Schema,
+  operationId: MaterialActionStableIdV1Schema,
+  idempotencyKey: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  issuedAt: ControlTimestampSchema,
+  expiresAt: ControlTimestampSchema,
+}).strict().superRefine((capability, ctx) => {
+  if (capability.epoch !== capability.attemptNumber) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["epoch"],
+      message: "Publication Attempt epoch must equal attempt number." });
+  }
+  if (capability.branch === capability.repository.baseBranch) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["branch"],
+      message: "Publication branch must not be the target branch." });
+  }
+  const issued = Date.parse(capability.issuedAt);
+  const expires = Date.parse(capability.expiresAt);
+  if (!(expires > issued) || expires - issued > 5 * 60_000) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expiresAt"],
+      message: "Publication capability must be short-lived." });
+  }
+});
+
+export const RunnerPublicationClaimV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  fencingToken: z.string().min(1).max(4096),
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  step: PublicationOperationStepV1Schema,
+}).strict();
+
+/** Credential-free Runner poll for the next coordinator-owned publication operation. */
+export const RunnerPublicationClaimNextV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+}).strict();
+
+export const RunnerBranchOwnershipAttestationV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  fencingToken: z.string().min(1).max(4096),
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  projectTargetId: MaterialActionStableIdV1Schema,
+  targetBindingDigest: ReceiptDigestSchema,
+  remote: z.string().min(1).max(128).regex(/^[A-Za-z0-9._/-]+$/u),
+  baseBranch: z.string().min(1).max(255),
+  frozenBaseRevision: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  workspaceTreeDigest: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  branch: z.string().min(1).max(255),
+  expectedHeadSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  attestedAt: ControlTimestampSchema,
+}).strict().superRefine((attestation, ctx) => {
+  if (attestation.branch !== `opentag/${attestation.runId}`) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["branch"],
+      message: "Publication branch must be the deterministic Run branch." });
+  }
+  if (attestation.branch === attestation.baseBranch) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["branch"],
+      message: "Publication branch must not be the target branch." });
+  }
+});
+
+export const HumanPublicationApprovalV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  ownershipId: MaterialActionStableIdV1Schema,
+  ownershipDigest: ReceiptDigestSchema,
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  approvalId: MaterialActionStableIdV1Schema,
+  approvedAt: ControlTimestampSchema,
+  expiresAt: ControlTimestampSchema,
+}).strict();
+
+export const RunnerPublicationBeginV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  fencingToken: z.string().min(1).max(4096),
+  capability: PublicationOperationCapabilityV1Schema,
+  begunAt: ControlTimestampSchema,
+}).strict();
+
+export const PublicationOperationObservationV1Schema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("present"), headSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+    externalId: MaterialActionStableIdV1Schema.optional(),
+    externalUri: z.string().url().max(2048).refine(isCredentialSafeText).optional(),
+    draft: z.literal(true).optional(), provider: z.literal("github").optional(),
+    repository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) })
+      .strict().optional(), baseBranch: z.string().min(1).max(255).optional(),
+    state: z.literal("open").optional(), headBranch: z.string().min(1).max(255).optional(),
+    headRepository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) })
+      .strict().optional() }).strict(),
+  z.object({ kind: z.literal("absent") }).strict(),
+  z.object({ kind: z.literal("ambiguous"), reason: z.string().min(1).max(256).optional() }).strict(),
+]);
+
+const PublicationOperationReceiptBaseV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  receiptId: MaterialActionStableIdV1Schema,
+  capabilityId: MaterialActionStableIdV1Schema,
+  operationId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  step: PublicationOperationStepV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  fencingTokenDigest: ReceiptDigestSchema,
+  observation: PublicationOperationObservationV1Schema,
+  outcome: z.enum(["succeeded", "failed", "outcome_unknown"]),
+  observedAt: ControlTimestampSchema,
+  receiptDigest: ReceiptDigestSchema,
+}).strict();
+
+export const PublicationOperationReceiptDigestInputV1Schema =
+  PublicationOperationReceiptBaseV1Schema.omit({ receiptDigest: true });
+
+export const PublicationOperationReceiptV1Schema =
+  PublicationOperationReceiptBaseV1Schema.superRefine((receipt, ctx) => {
+  const expected = receipt.observation.kind === "present" ? "succeeded"
+    : receipt.observation.kind === "absent" ? "failed" : "outcome_unknown";
+  if (receipt.outcome !== expected) ctx.addIssue({ code: z.ZodIssueCode.custom,
+    path: ["outcome"], message: "Publication outcome must match the observation." });
+  if (receipt.step === "create_draft_pull_request" && receipt.observation.kind === "present"
+    && (!receipt.observation.headBranch || !receipt.observation.headRepository)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["observation"],
+      message: "Succeeded draft-PR receipts require provider-observed head provenance." });
+  }
+  });
+
+export const RunnerPublicationReceiptV1Schema = z.object({
+  fencingToken: z.string().min(1).max(4096),
+  receipt: PublicationOperationReceiptV1Schema,
+}).strict();
+
+export const RunnerPublicationCompletionPendingV1Schema = z.object({
+  capability: PublicationOperationCapabilityV1Schema,
+  completionReceipt: PublicationOperationReceiptV1Schema,
+}).strict().superRefine((value, ctx) => {
+  if (value.capability.step !== "create_draft_pull_request"
+    || value.completionReceipt.step !== "create_draft_pull_request"
+    || value.capability.capabilityId !== value.completionReceipt.capabilityId
+    || value.capability.operationId !== value.completionReceipt.operationId
+    || value.completionReceipt.outcome !== "succeeded"
+    || value.completionReceipt.observation.kind !== "present"
+    || value.completionReceipt.observation.draft !== true
+    || !value.completionReceipt.observation.externalId
+    || !value.completionReceipt.observation.externalUri) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom,
+      message: "Publication completion dispatch requires the exact succeeded draft PR receipt." });
+  }
+});
+
+export const RunnerPublicationReconciliationPendingV1Schema = z.object({
+  capability: PublicationOperationCapabilityV1Schema,
+}).strict();
+
+export const RunnerPublicationReconcileV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  capabilityId: MaterialActionStableIdV1Schema,
+  operationId: MaterialActionStableIdV1Schema,
+  observation: PublicationOperationObservationV1Schema,
+  observedAt: ControlTimestampSchema,
+}).strict();
+
+export const PublicationCompletionObservationV1Schema = z.object({
+  provider: z.literal("github"),
+  repository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) }).strict(),
+  remote: z.string().min(1).max(128),
+  branch: z.string().min(1).max(255),
+  baseBranch: z.string().min(1).max(255),
+  pullRequestNumber: z.number().int().positive(),
+  pullRequestResourceRef: z.string().min(1).max(512),
+  pullRequestUrl: z.string().url().max(2048).refine(isCredentialSafeText),
+  draft: z.literal(true),
+  state: z.enum(["open", "closed", "merged"]),
+  headSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  headBranch: z.string().min(1).max(255),
+  headRepository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) }).strict(),
+  baseSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  checks: z.record(z.string().min(1).max(256), z.enum(["passed", "failed", "pending"])),
+  checksComplete: z.boolean(),
+  observedAt: ControlTimestampSchema,
+}).strict();
+
+export const RunnerPublicationCompletionV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  fencingToken: z.string().min(1).max(4096),
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  observation: PublicationCompletionObservationV1Schema,
+}).strict();
+
+export function computePublicationCapabilityDigestV1(
+  capability: z.input<typeof PublicationOperationCapabilityV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(
+    PublicationOperationCapabilityV1Schema.parse(capability)));
+}
+
+export function computeBranchOwnershipAttestationDigestV1(
+  attestation: z.input<typeof RunnerBranchOwnershipAttestationV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(
+    RunnerBranchOwnershipAttestationV1Schema.parse(attestation)));
+}
+
+export function computePublicationOperationReceiptDigestV1(
+  receipt: z.input<typeof PublicationOperationReceiptDigestInputV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(
+    PublicationOperationReceiptDigestInputV1Schema.parse(receipt)));
+}
 
 export const MaterialActionExternalUriV1Schema = z
   .string()
@@ -431,10 +732,69 @@ export const RunnerMaterialActionReconcileRequestV1Schema = z
     }
   });
 
+export const RunnerMaterialActionNonStartProofV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.material-receipt.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  operationId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attempt: MaterialActionAttemptRefV1Schema.extend({
+    fencingToken: z.string().min(1).max(4096),
+  }).strict(),
+  proofId: MaterialActionStableIdV1Schema,
+  proofDigest: ReceiptDigestSchema,
+  recordedAt: ControlTimestampSchema,
+}).strict();
+
+export const MaterialActionBeginAuthorityV1Schema = z.object({
+  kind: z.literal("permission_resolution"),
+  permissionRequestId: PermissionStableIdV1Schema,
+  permissionRequestDigest: ReceiptDigestSchema,
+  resolutionReceiptId: PermissionStableIdV1Schema,
+  resolutionReceiptDigest: ReceiptDigestSchema,
+  workspaceAttestationDigest: ReceiptDigestSchema.optional(),
+}).strict();
+
+export const RunnerMaterialActionBeginV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.material-receipt.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  operationId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attempt: MaterialActionAttemptRefV1Schema.extend({
+    fencingToken: z.string().min(1).max(4096),
+  }).strict(),
+  actionId: MaterialActionStableIdV1Schema,
+  actionDescriptor: PermissionActionDescriptorV1Schema,
+  actionDescriptorDigest: ReceiptDigestSchema,
+  targetFingerprint: ReceiptDigestSchema,
+  policySnapshotRef: MaterialActionStableIdV1Schema,
+  policySnapshotDigest: ReceiptDigestSchema,
+  workspaceAttestationDigest: ReceiptDigestSchema.optional(),
+  authority: MaterialActionBeginAuthorityV1Schema,
+  idempotencyKey: MaterialActionStableIdV1Schema,
+  begunAt: ControlTimestampSchema,
+}).strict();
+
+export const HostedRunnerMaterialActionBeginV1Schema = RunnerMaterialActionBeginV1Schema
+  .refine((request) => request.workspaceAttestationDigest !== undefined
+    && request.authority.workspaceAttestationDigest !== undefined, {
+    path: ["workspaceAttestationDigest"],
+    message: "Hosted material begin requires accepted workspace attestation.",
+  });
+
 export const MaterialActionPayloadV1Schema = z
   .object({
     actionId: MaterialActionStableIdV1Schema,
-    actionFamily: MaterialActionNormalizedNameV1Schema,
+    actionDescriptor: PermissionActionDescriptorV1Schema,
+    actionDescriptorDigest: ReceiptDigestSchema,
+    idempotencyKey: MaterialActionStableIdV1Schema,
     provider: MaterialActionNormalizedNameV1Schema,
     connectionRef: MaterialActionStableIdV1Schema,
     targetFingerprint: ReceiptDigestSchema,
@@ -501,10 +861,10 @@ export const MaterialActionPayloadV1Schema = z
 
 const PermissionActionSummaryV1Shape = {
   actionId: PermissionStableIdV1Schema,
-  actionFamily: PermissionActionFamilyV1Schema,
+  actionDescriptor: PermissionActionDescriptorV1Schema,
+  actionDescriptorDigest: ReceiptDigestSchema,
   riskTier: z.enum(["low", "medium", "high", "critical"]),
   targetFingerprint: ReceiptDigestSchema,
-  permissionScopes: PermissionScopesV1Schema,
 };
 
 const PermissionMutationRequestV1Shape = {
@@ -563,6 +923,7 @@ export const RunnerPermissionRequestV1Schema = z
     ...PermissionActionSummaryV1Shape,
     policySnapshotRef: PermissionStableIdV1Schema,
     policySnapshotDigest: ReceiptDigestSchema,
+    workspaceAttestationDigest: ReceiptDigestSchema.optional(),
     permissionRequestDigest: ReceiptDigestSchema,
     requestedAt: ControlTimestampSchema,
   })
@@ -575,6 +936,12 @@ export const RunnerPermissionRequestV1Schema = z
         message: "Permission capability is required.",
       });
     }
+  });
+
+export const HostedRunnerPermissionRequestV1Schema = RunnerPermissionRequestV1Schema
+  .refine((request) => request.workspaceAttestationDigest !== undefined, {
+    path: ["workspaceAttestationDigest"],
+    message: "Hosted permission requires accepted workspace attestation.",
   });
 
 export const PermissionRequestDigestInputV1Schema = z
@@ -590,6 +957,7 @@ export const PermissionRequestDigestInputV1Schema = z
     ...PermissionActionSummaryV1Shape,
     policySnapshotRef: PermissionStableIdV1Schema,
     policySnapshotDigest: ReceiptDigestSchema,
+    workspaceAttestationDigest: ReceiptDigestSchema.optional(),
     requestedAt: ControlTimestampSchema,
   })
   .strict();
@@ -1459,6 +1827,7 @@ export const PermissionResolutionPayloadV1Schema = z
     ...PermissionActionSummaryV1Shape,
     policySnapshotRef: PermissionStableIdV1Schema,
     policySnapshotDigest: ReceiptDigestSchema,
+    workspaceAttestationDigest: ReceiptDigestSchema.optional(),
     state: PermissionResolutionStateV1Schema,
     decision: PermissionDecisionV1Schema.optional(),
     decisionRef: PermissionStableIdV1Schema.optional(),
@@ -1604,35 +1973,39 @@ const HostedAdmissionEnvelopeDigestInputV1Shape = {
   organizationId: NonEmptyIdSchema,
   bindingId: NonEmptyIdSchema,
   bindingSecretVersion: NonEmptyIdSchema,
-  provider: z.literal("github"),
+  provider: z.enum(["github", "slack"]),
   deliveryId: NonEmptyIdSchema,
   deliveryPayloadDigest: ReceiptDigestSchema,
   sourceIdentityDigest: ReceiptDigestSchema,
-  eventName: z.literal("issue_comment"),
+  eventName: z.enum(["issue_comment", "app_mention"]),
   action: z.literal("created"),
   repository: z
     .object({
-      providerRepositoryId: GitHubProviderIdV1Schema,
+      provider: NonEmptyIdSchema.optional(),
+      providerRepositoryId: NonEmptyIdSchema,
       owner: NonEmptyIdSchema,
       repo: NonEmptyIdSchema,
     })
     .strict(),
   sourceThread: z
     .object({
-      kind: z.enum(["issue", "pull_request"]),
-      providerThreadId: GitHubProviderIdV1Schema,
-      number: z.number().int().positive(),
+      kind: z.enum(["issue", "pull_request", "channel_thread"]),
+      providerThreadId: NonEmptyIdSchema,
+      number: z.number().int().positive().optional(),
+      channelId: NonEmptyIdSchema.optional(),
+      threadTs: NonEmptyIdSchema.optional(),
     })
     .strict(),
   sourceEvent: z
     .object({
-      providerEventId: GitHubProviderIdV1Schema,
-      kind: z.literal("issue_comment"),
+      providerEventId: NonEmptyIdSchema,
+      kind: z.enum(["issue_comment", "app_mention"]),
+      messageId: NonEmptyIdSchema.optional(),
     })
     .strict(),
   verifiedActor: z
     .object({
-      providerUserId: GitHubProviderIdV1Schema,
+      providerUserId: NonEmptyIdSchema,
       login: NonEmptyIdSchema,
       authorization: z
         .object({
@@ -1652,6 +2025,27 @@ const HostedAdmissionEnvelopeDigestInputV1Shape = {
     })
     .strict(),
   runnerId: NonEmptyIdSchema,
+  sourceContextEnvelope: z.object({
+    contentId: NonEmptyIdSchema,
+    sourceVersionRef: NonEmptyIdSchema,
+    aadDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    keyVersion: NonEmptyIdSchema,
+    envelopeDigest: ReceiptDigestSchema,
+    payloadDigest: ReceiptDigestSchema,
+  }).strict(),
+  queueClaimDeadline: ControlTimestampSchema,
+  permissionCeiling: z.object({
+    allowedActionDescriptors: sortedUniqueArray(PermissionActionDescriptorV1Schema),
+    digest: ReceiptDigestSchema,
+  }).strict(),
+  publicationPolicy: z.object({
+    mode: z.enum(["proposal_only", "pull_request"]),
+    digest: ReceiptDigestSchema,
+  }).strict(),
+  completionContract: z.object({
+    mode: z.enum(["proposal_ready", "pull_request_ready"]),
+    digest: ReceiptDigestSchema,
+  }).strict(),
   admissionPolicySnapshot: z
     .object({
       snapshotId: NonEmptyIdSchema,
@@ -1670,7 +2064,47 @@ export const HostedAdmissionEnvelopeV1Schema = z
     ...HostedAdmissionEnvelopeDigestInputV1Shape,
     envelopeDigest: ReceiptDigestSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((admission, ctx) => {
+    if (new Date(admission.queueClaimDeadline).getTime()
+      <= new Date(admission.receivedAt).getTime()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["queueClaimDeadline"],
+        message: "Hosted claim deadline must be finite and later than receipt." });
+    }
+    if ((admission.publicationPolicy.mode === "proposal_only"
+        && admission.completionContract.mode !== "proposal_ready")
+      || (admission.publicationPolicy.mode === "pull_request"
+        && admission.completionContract.mode !== "pull_request_ready")) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["completionContract", "mode"],
+        message: "Completion mode must match the Admission-frozen publication mode." });
+    }
+    if (admission.provider === "github") {
+      if (admission.eventName !== "issue_comment"
+        || !GitHubProviderIdV1Schema.safeParse(admission.repository.providerRepositoryId).success
+        || !["issue", "pull_request"].includes(admission.sourceThread.kind)
+        || !GitHubProviderIdV1Schema.safeParse(admission.sourceThread.providerThreadId).success
+        || admission.sourceThread.number === undefined
+        || admission.sourceThread.channelId !== undefined
+        || admission.sourceThread.threadTs !== undefined
+        || admission.sourceEvent.kind !== "issue_comment"
+        || !GitHubProviderIdV1Schema.safeParse(admission.sourceEvent.providerEventId).success
+        || admission.sourceEvent.messageId !== undefined
+        || !GitHubProviderIdV1Schema.safeParse(admission.verifiedActor.providerUserId).success) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["provider"],
+          message: "GitHub admission requires exact issue-comment source identity." });
+      }
+    } else if (admission.eventName !== "app_mention"
+      || admission.repository.provider === undefined
+      || admission.sourceThread.kind !== "channel_thread"
+      || admission.sourceThread.number !== undefined
+      || admission.sourceThread.channelId === undefined
+      || admission.sourceThread.threadTs === undefined
+      || admission.sourceEvent.kind !== "app_mention"
+      || admission.sourceEvent.messageId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["provider"],
+        message: "Slack admission requires exact channel-thread app-mention identity." });
+    }
+  });
 
 export const GitHubIssueCommentSourceIdentityDigestInputV1Schema = z
   .object({
@@ -1687,6 +2121,29 @@ export const GitHubIssueCommentSourceIdentityDigestInputV1Schema = z
     executionBearingCommentBody: z.string().min(1),
   })
   .strict();
+
+export const SlackAppMentionSourceIdentityDigestInputV1Schema = z
+  .object({
+    provider: z.literal("slack"),
+    repository: HostedAdmissionEnvelopeDigestInputV1Shape.repository,
+    sourceThread: HostedAdmissionEnvelopeDigestInputV1Shape.sourceThread,
+    sourceEvent: HostedAdmissionEnvelopeDigestInputV1Shape.sourceEvent,
+    actor: z.object({ providerUserId: NonEmptyIdSchema, login: NonEmptyIdSchema }).strict(),
+    executionBearingMessageBody: z.string().min(1),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.repository.provider === undefined
+      || value.sourceThread.kind !== "channel_thread"
+      || value.sourceThread.number !== undefined
+      || value.sourceThread.channelId === undefined
+      || value.sourceThread.threadTs === undefined
+      || value.sourceEvent.kind !== "app_mention"
+      || value.sourceEvent.messageId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceThread"],
+        message: "Slack source identity must bind repository, channel thread, event, and message." });
+    }
+  });
 
 export function buildHostedAdmissionEnvelopeDigestInputV1(
   envelope: z.input<typeof HostedAdmissionEnvelopeV1Schema>,
@@ -1725,6 +2182,14 @@ export function computeGitHubIssueCommentSourceIdentityDigestV1(
   );
 }
 
+export function computeSlackAppMentionSourceIdentityDigestV1(
+  input: z.input<typeof SlackAppMentionSourceIdentityDigestInputV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(
+    canonicalJsonStringify(SlackAppMentionSourceIdentityDigestInputV1Schema.parse(input)),
+  );
+}
+
 export const AdmissionPolicySnapshotPayloadV1Schema = z
   .object({
     snapshotId: NonEmptyIdSchema,
@@ -1733,7 +2198,7 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
     actor: z
       .object({
         provider: NonEmptyIdSchema,
-        providerUserId: GitHubProviderIdV1Schema,
+        providerUserId: NonEmptyIdSchema,
         login: NonEmptyIdSchema,
         authorizationRef: NonEmptyIdSchema,
       })
@@ -1742,8 +2207,12 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
       .object({
         projectTargetId: NonEmptyIdSchema,
         bindingId: NonEmptyIdSchema,
-        providerRepositoryId: GitHubProviderIdV1Schema,
+        repositoryProvider: NonEmptyIdSchema.optional(),
+        providerRepositoryId: NonEmptyIdSchema,
         defaultBranch: NonEmptyIdSchema,
+        authorizedPublicationModes: sortedUniqueArray(
+          z.enum(["proposal_only", "pull_request"]),
+        ),
       })
       .strict(),
     runner: z.object({ runnerId: NonEmptyIdSchema, readinessReceiptDigest: ReceiptDigestSchema }).strict(),
@@ -1758,7 +2227,19 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
       })
       .strict(),
   })
-  .strict();
+  .strict()
+  .superRefine((policy, ctx) => {
+    if (policy.actor.provider === "github"
+      && (!GitHubProviderIdV1Schema.safeParse(policy.actor.providerUserId).success
+        || !GitHubProviderIdV1Schema.safeParse(policy.target.providerRepositoryId).success)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["actor", "providerUserId"],
+        message: "GitHub policy snapshots require canonical provider IDs." });
+    }
+    if (policy.actor.provider === "slack" && policy.target.repositoryProvider === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["target", "repositoryProvider"],
+        message: "Slack policy snapshots require the bound repository provider." });
+    }
+  });
 
 export const AdmissionPolicySnapshotReceiptEnvelopeV1Schema = z
   .object({
@@ -1793,6 +2274,7 @@ const HostedClaimRequiredCapabilitiesV1Schema = z.tuple([
   z.literal("relay.hosted-claim.v1"),
   z.literal("relay.lifecycle.v1"),
   z.literal("relay.readiness.v1"),
+  z.literal("relay.source-content-redeem.v1"),
 ]);
 
 export const HostedClaimExpectedAuthorityV1Schema = z
@@ -1832,6 +2314,95 @@ const HostedClaimAttemptV1Schema = z
       });
     }
   });
+
+const HostedSourceContentGrantV1Schema = z.object({
+  grantId: NonEmptyIdSchema,
+  token: z.string().min(1).max(4096),
+  keyVersion: NonEmptyIdSchema,
+  fenceDigest: ReceiptDigestSchema,
+  contentIds: sortedUniqueArray(NonEmptyIdSchema).min(1),
+  purpose: z.literal("source_context"),
+  expiresAt: ControlTimestampSchema,
+}).strict();
+
+export const HostedSourceContentRedeemRequestV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.source-content-redeem.v1")]),
+  requestId: NonEmptyIdSchema,
+  operationId: NonEmptyIdSchema,
+  organizationId: NonEmptyIdSchema,
+  runnerId: NonEmptyIdSchema,
+  runId: NonEmptyIdSchema,
+  expectedAuthority: z.object({
+    credentialId: NonEmptyIdSchema,
+    registrationGeneration: z.number().int().positive(),
+    credentialGeneration: z.number().int().positive(),
+  }).strict(),
+  attempt: z.object({
+    attemptId: NonEmptyIdSchema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingTokenDigest: ReceiptDigestSchema,
+    leaseExpiresAt: ControlTimestampSchema,
+  }).strict(),
+  grant: HostedSourceContentGrantV1Schema,
+  admissionEnvelopeDigest: ReceiptDigestSchema,
+  contentEnvelope: HostedAdmissionEnvelopeV1Schema.shape.sourceContextEnvelope,
+}).strict().superRefine((request, ctx) => {
+  if (request.attempt.epoch !== request.attempt.attemptNumber) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["attempt", "epoch"],
+      message: "Attempt epoch must equal attempt number." });
+  }
+  if (request.grant.fenceDigest !== request.attempt.fencingTokenDigest) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["grant", "fenceDigest"],
+      message: "Grant fence must match the Attempt fence." });
+  }
+  if (request.grant.expiresAt !== request.attempt.leaseExpiresAt) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["grant", "expiresAt"],
+      message: "Grant expiry must match the Attempt lease." });
+  }
+  if (request.grant.contentIds.length !== 1
+    || request.grant.contentIds[0] !== request.contentEnvelope.contentId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["grant", "contentIds"],
+      message: "Grant content must match the Admission content envelope." });
+  }
+  if (request.grant.keyVersion !== request.contentEnvelope.keyVersion) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["grant", "keyVersion"],
+      message: "Grant key version must match the Admission content envelope." });
+  }
+});
+
+export const HostedSourceContentRedeemResponseV1Schema = z.object({
+  kind: z.literal("hosted_source_content_redeemed"),
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requestId: NonEmptyIdSchema,
+  operationId: NonEmptyIdSchema,
+  organizationId: NonEmptyIdSchema,
+  runnerId: NonEmptyIdSchema,
+  runId: NonEmptyIdSchema,
+  attempt: HostedSourceContentRedeemRequestV1Schema.shape.attempt,
+  admissionEnvelopeDigest: ReceiptDigestSchema,
+  contentEnvelope: HostedAdmissionEnvelopeV1Schema.shape.sourceContextEnvelope,
+  content: z.object({ contentId: NonEmptyIdSchema, payload: z.unknown() }).strict(),
+  payloadDigest: ReceiptDigestSchema,
+  redeemedAt: ControlTimestampSchema,
+}).strict().superRefine((response, ctx) => {
+  if (response.content.contentId !== response.contentEnvelope.contentId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["content", "contentId"],
+      message: "Redeemed content must match the content envelope." });
+  }
+});
+
+export async function verifyHostedSourceContentRedeemPayloadV1(
+  response: z.input<typeof HostedSourceContentRedeemResponseV1Schema>,
+): Promise<boolean> {
+  const parsed = HostedSourceContentRedeemResponseV1Schema.parse(response);
+  const computed = await computeControlPayloadDigestV1(parsed.content.payload);
+  return parsed.payloadDigest === computed
+    && parsed.contentEnvelope.payloadDigest === computed;
+}
 
 const HostedClaimAuthorityV1Schema = z
   .object({
@@ -1893,6 +2464,7 @@ export const HostedClaimV1Schema = z
     hostedAdmission: HostedAdmissionEnvelopeV1Schema,
     admissionPolicySnapshot: AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
     attempt: HostedClaimAttemptV1Schema,
+    sourceContentGrant: HostedSourceContentGrantV1Schema,
     authority: HostedClaimAuthorityV1Schema,
   })
   .strict()
@@ -1911,6 +2483,7 @@ export const HostedClaimV1Schema = z
       [["hostedAdmission", "bindingId"], admission.bindingId !== policy.payload.target.bindingId, "Admission binding must match the policy."],
       [["hostedAdmission", "projectTarget", "projectTargetId"], admission.projectTarget.projectTargetId !== policy.payload.target.projectTargetId, "Admission target must match the policy."],
       [["hostedAdmission", "repository", "providerRepositoryId"], admission.repository.providerRepositoryId !== policy.payload.target.providerRepositoryId, "Admission repository must match the policy."],
+      [["hostedAdmission", "repository", "provider"], admission.repository.provider !== undefined && admission.repository.provider !== policy.payload.target.repositoryProvider, "Admission repository provider must match the policy."],
       [["hostedAdmission", "verifiedActor", "providerUserId"], admission.verifiedActor.providerUserId !== policy.payload.actor.providerUserId, "Admission actor ID must match the policy."],
       [["hostedAdmission", "verifiedActor", "login"], admission.verifiedActor.login !== policy.payload.actor.login, "Admission actor login must match the policy."],
       [["admissionPolicySnapshot", "payload", "actor", "provider"], policy.payload.actor.provider !== admission.provider, "Policy actor provider must match the admission."],
@@ -1933,6 +2506,9 @@ export const HostedClaimV1Schema = z
       [["authority", "attemptNumber"], authority.attemptNumber !== claim.attempt.number, "Authority Attempt number must match the claim."],
       [["authority", "epoch"], authority.epoch !== claim.attempt.epoch, "Authority Attempt epoch must match the claim."],
       [["authority", "fencingTokenDigest"], authority.fencingTokenDigest !== claim.attempt.fencingTokenDigest, "Authority fence digest must match the claim."],
+      [["sourceContentGrant", "fenceDigest"], claim.sourceContentGrant.fenceDigest !== claim.attempt.fencingTokenDigest, "Source grant fence must match the Attempt."],
+      [["sourceContentGrant", "contentIds"], claim.sourceContentGrant.contentIds.length !== 1 || claim.sourceContentGrant.contentIds[0] !== admission.sourceContextEnvelope.contentId, "Source grant content must match the Admission."],
+      [["sourceContentGrant", "expiresAt"], claim.sourceContentGrant.expiresAt !== claim.attempt.leaseExpiresAt, "Source grant expiry must match the Attempt lease."],
     ];
     for (const [path, mismatch, message] of mismatches) {
       if (mismatch) ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
@@ -1975,6 +2551,28 @@ export function computeHostedClaimFencingTokenDigestV1(
   return sha256Utf8V1(rawFencingToken);
 }
 
+export const RunnerProposalSettlementV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.lifecycle.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attempt: MaterialActionAttemptRefV1Schema.extend({
+    fencingToken: z.string().min(1).max(4096),
+  }).strict(),
+  candidateId: MaterialActionStableIdV1Schema,
+  proposalArtifact: z.unknown(),
+}).strict();
+
+export const RunnerProposalSettlementResponseV1Schema = z.object({
+  outcome: z.enum(["settled", "replayed"]),
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  status: z.enum(["proposal_ready", "publication_pending"]),
+}).strict();
+
 export async function verifyHostedClaimFencingTokenDigestV1(
   claim: z.input<typeof HostedClaimV1Schema>,
 ): Promise<boolean> {
@@ -2000,6 +2598,34 @@ export const HostedLifecycleStableIdV1Schema = z
 export const HostedLifecycleRequiredCapabilitiesV1Schema = z.tuple([
   z.literal("relay.lifecycle.v1"),
 ]);
+export const AttemptWorkspaceAttestationV1Schema = z.object({
+  workspaceId: HostedLifecycleStableIdV1Schema,
+  workspacePathDigest: ReceiptDigestSchema,
+  repositoryPathDigest: ReceiptDigestSchema,
+  worktreeIdentityDigest: ReceiptDigestSchema,
+  baseRevision: z.string().regex(/^[a-f0-9]{40}$/u),
+  currentRevision: z.string().regex(/^[a-f0-9]{40}$/u),
+  currentTree: z.string().regex(/^[a-f0-9]{40}$/u),
+  workspaceStateDigest: ReceiptDigestSchema,
+  attemptId: HostedLifecycleStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  fencingTokenDigest: ReceiptDigestSchema,
+  credentialId: HostedLifecycleStableIdV1Schema,
+  leaseExpiresAt: ControlTimestampSchema,
+}).strict();
+export const AttemptInterruptionEvidenceV1Schema = z.object({
+  state: z.literal("interrupted_evidence"),
+  runId: HostedLifecycleStableIdV1Schema,
+  attemptId: HostedLifecycleStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  workspaceId: HostedLifecycleStableIdV1Schema,
+  workspacePathDigest: ReceiptDigestSchema,
+  fencingTokenDigest: ReceiptDigestSchema,
+  reason: z.enum(["lease_expired", "stale_fence", "cancelled", "credential_stale"]),
+  observedAt: ControlTimestampSchema,
+  processStop: z.enum(["observed", "unconfirmed"]),
+  materialOutcome: z.literal("outcome_unknown"),
+}).strict();
 export const HostedLifecycleAttemptV1Schema = z
   .object({
     attemptId: HostedLifecycleStableIdV1Schema,
@@ -2022,6 +2648,8 @@ const HostedLifecycleRequestBaseV1Schema = z.object({
   attempt: HostedLifecycleAttemptV1Schema,
   requestDigest: ReceiptDigestSchema,
   occurredAt: ControlTimestampSchema,
+  workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+  interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
 });
 export const HostedHeartbeatRequestV1Schema = HostedLifecycleRequestBaseV1Schema
   .extend({ expectedLeaseExpiresAt: ControlTimestampSchema })
@@ -2079,6 +2707,11 @@ export const HostedExecutorResultReasonCodeV1Schema = z.enum([
   "executor_timed_out",
   "executor_needs_human",
 ]);
+const HostedBlockedPermissionRefV1Schema = z.object({
+  permissionRequestId: PermissionStableIdV1Schema,
+  actionDescriptorDigest: ReceiptDigestSchema,
+  policySnapshotDigest: ReceiptDigestSchema,
+}).strict();
 const hostedExecutorResultReasonCodeV1 = (
   conclusion: z.infer<typeof HostedExecutorResultConclusionV1Schema>,
 ): z.infer<typeof HostedExecutorResultReasonCodeV1Schema> =>
@@ -2090,11 +2723,14 @@ export const HostedCompleteRequestV1Schema = HostedLifecycleRequestBaseV1Schema
     resultDigest: ReceiptDigestSchema,
     artifactDigests: HostedLifecycleSortedDigestsV1Schema,
     evidenceDigests: HostedLifecycleSortedDigestsV1Schema,
+    blockedPermission: HostedBlockedPermissionRefV1Schema.optional(),
   })
   .strict()
   .refine(
-    (value) =>
-      value.reasonCode === hostedExecutorResultReasonCodeV1(value.conclusion),
+    (value) => value.reasonCode === hostedExecutorResultReasonCodeV1(value.conclusion)
+      && (value.conclusion === "needs_human"
+        ? value.blockedPermission !== undefined
+        : value.blockedPermission === undefined),
     {
       path: ["reasonCode"],
       message: "Executor result reason code must match the conclusion.",
@@ -2115,6 +2751,8 @@ export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
       operation: z.literal("heartbeat"),
       occurredAt: ControlTimestampSchema,
       leaseExpiresAt: ControlTimestampSchema,
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
     z.object({
       operation: z.literal("running"),
@@ -2122,23 +2760,31 @@ export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
       executorId: HostedLifecycleStableIdV1Schema,
       executorCapabilityDigest: ReceiptDigestSchema,
       runTimeoutMs: z.number().int().positive().max(86_400_000).optional(),
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
     z.object({
       operation: z.literal("reject_start"),
       occurredAt: ControlTimestampSchema,
       executorId: HostedLifecycleStableIdV1Schema,
       reasonCode: HostedRejectStartReasonCodeV1Schema,
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
     z.object({
       operation: z.literal("progress"),
       occurredAt: ControlTimestampSchema,
       progressId: z.string().regex(/^progress_[0-9a-f]{64}$/u),
       progressDigest: ReceiptDigestSchema,
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
     z.object({
       operation: z.literal("cancel"),
       occurredAt: ControlTimestampSchema,
       reasonCode: HostedCancelReasonCodeV1Schema,
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
     z.object({
       operation: z.literal("executor_result"),
@@ -2148,12 +2794,18 @@ export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
       resultDigest: ReceiptDigestSchema,
       artifactDigests: HostedLifecycleSortedDigestsV1Schema,
       evidenceDigests: HostedLifecycleSortedDigestsV1Schema,
+      blockedPermission: HostedBlockedPermissionRefV1Schema.optional(),
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
   ],
 ).refine(
   (value) =>
     value.operation !== "executor_result"
-    || value.reasonCode === hostedExecutorResultReasonCodeV1(value.conclusion),
+    || (value.reasonCode === hostedExecutorResultReasonCodeV1(value.conclusion)
+      && (value.conclusion === "needs_human"
+        ? value.blockedPermission !== undefined
+        : value.blockedPermission === undefined)),
   {
     path: ["reasonCode"],
     message: "Executor result reason code must match the conclusion.",
@@ -2205,6 +2857,8 @@ export const HostedLifecycleReceiptEnvelopeV1Schema = z.object({
 }).strict();
 
 export type HostedHeartbeatRequestV1 = z.infer<typeof HostedHeartbeatRequestV1Schema>;
+export type AttemptWorkspaceAttestationV1 = z.infer<typeof AttemptWorkspaceAttestationV1Schema>;
+export type AttemptInterruptionEvidenceV1 = z.infer<typeof AttemptInterruptionEvidenceV1Schema>;
 export type HostedRunningRequestV1 = z.infer<typeof HostedRunningRequestV1Schema>;
 export type HostedRejectStartRequestV1 = z.infer<typeof HostedRejectStartRequestV1Schema>;
 export type HostedProgressRequestV1 = z.infer<typeof HostedProgressRequestV1Schema>;
@@ -2247,6 +2901,10 @@ export async function computeHostedLifecycleRequestDigestV1(input: {
       fencingTokenDigest: request.attempt.fencingTokenDigest,
     },
     occurredAt: request.occurredAt,
+    ...(request.workspaceAttestation
+      ? { workspaceAttestation: request.workspaceAttestation } : {}),
+    ...(request.interruptionEvidence
+      ? { interruptionEvidence: request.interruptionEvidence } : {}),
   };
   const actionFields = input.action === "heartbeat"
     ? {
@@ -2291,6 +2949,8 @@ export async function computeHostedLifecycleRequestDigestV1(input: {
                   resultDigest: complete.resultDigest,
                   artifactDigests: complete.artifactDigests,
                   evidenceDigests: complete.evidenceDigests,
+                  ...(complete.blockedPermission
+                    ? { blockedPermission: complete.blockedPermission } : {}),
                 };
               })();
   return sha256Utf8V1(canonicalJsonStringify({ ...common, ...actionFields }));
@@ -2327,6 +2987,8 @@ export async function buildHostedLifecycleRequestV1(input: {
   runId: string;
   attempt: z.input<typeof HostedLifecycleAttemptV1Schema>;
   occurredAt: string;
+  workspaceAttestation?: z.input<typeof AttemptWorkspaceAttestationV1Schema>;
+  interruptionEvidence?: z.input<typeof AttemptInterruptionEvidenceV1Schema>;
 } & (
   | { action: "heartbeat"; expectedLeaseExpiresAt: string }
   | {
@@ -2356,6 +3018,7 @@ export async function buildHostedLifecycleRequestV1(input: {
       resultDigest: string;
       artifactDigests: string[];
       evidenceDigests: string[];
+      blockedPermission?: z.input<typeof HostedBlockedPermissionRefV1Schema>;
     }
 )): Promise<HostedLifecycleRequestV1> {
   const common = {
@@ -2367,6 +3030,10 @@ export async function buildHostedLifecycleRequestV1(input: {
     attempt: HostedLifecycleAttemptV1Schema.parse(input.attempt),
     requestDigest: `sha256:${"0".repeat(64)}`,
     occurredAt: ControlTimestampSchema.parse(input.occurredAt),
+    ...(input.workspaceAttestation
+      ? { workspaceAttestation: AttemptWorkspaceAttestationV1Schema.parse(input.workspaceAttestation) } : {}),
+    ...(input.interruptionEvidence
+      ? { interruptionEvidence: AttemptInterruptionEvidenceV1Schema.parse(input.interruptionEvidence) } : {}),
   };
   const actionFields = input.action === "heartbeat"
     ? { expectedLeaseExpiresAt: input.expectedLeaseExpiresAt }
@@ -2391,6 +3058,9 @@ export async function buildHostedLifecycleRequestV1(input: {
                 resultDigest: input.resultDigest,
                 artifactDigests: input.artifactDigests,
                 evidenceDigests: input.evidenceDigests,
+                ...(input.blockedPermission
+                  ? { blockedPermission: input.blockedPermission }
+                  : {}),
               };
   const requestSeed = HostedLifecycleRequestV1Schema.parse({
     ...common,
@@ -2504,9 +3174,18 @@ export async function verifyHostedLifecycleReceiptV1(input: {
                   resultDigest: value.resultDigest,
                   artifactDigests: value.artifactDigests,
                   evidenceDigests: value.evidenceDigests,
+                  ...(value.blockedPermission
+                    ? { blockedPermission: value.blockedPermission } : {}),
                 };
               })();
   if (!expectedPayload) return false;
+  const expectedPayloadWithEvidence = {
+    ...expectedPayload,
+    ...(request.workspaceAttestation
+      ? { workspaceAttestation: request.workspaceAttestation } : {}),
+    ...(request.interruptionEvidence
+      ? { interruptionEvidence: request.interruptionEvidence } : {}),
+  };
   const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
   return request.requestDigest === expectedRequestDigest
     && request.requestId === expectedRequestId
@@ -2534,7 +3213,7 @@ export async function verifyHostedLifecycleReceiptV1(input: {
       ])
     && receipt.payload.operation === operation
     && canonicalJsonStringify(receipt.payload)
-      === canonicalJsonStringify(expectedPayload)
+      === canonicalJsonStringify(expectedPayloadWithEvidence)
     && receipt.payloadDigest
       === await computeControlPayloadDigestV1(receipt.payload)
     && receipt.receiptDigest
@@ -3439,12 +4118,39 @@ export type RunnerCredentialCurrentStateResponseV1 = z.infer<
 >;
 export type RunnerReadinessReceiptEnvelopeV1 = z.infer<typeof RunnerReadinessReceiptEnvelopeV1Schema>;
 export type RunnerControlContextResponseV1 = z.infer<typeof RunnerControlContextResponseV1Schema>;
+export type RunnerProposalSettlementV1 = z.infer<typeof RunnerProposalSettlementV1Schema>;
+export type RunnerProposalSettlementResponseV1 = z.infer<
+  typeof RunnerProposalSettlementResponseV1Schema
+>;
 export type MaterialActionAttemptRefV1 = z.infer<typeof MaterialActionAttemptRefV1Schema>;
+export type PublicationOperationStepV1 = z.infer<typeof PublicationOperationStepV1Schema>;
+export type PublicationRepositoryV1 = z.infer<typeof PublicationRepositoryV1Schema>;
+export type PublicationOperationCapabilityV1 = z.infer<typeof PublicationOperationCapabilityV1Schema>;
+export type RunnerPublicationClaimV1 = z.infer<typeof RunnerPublicationClaimV1Schema>;
+export type RunnerPublicationClaimNextV1 = z.infer<typeof RunnerPublicationClaimNextV1Schema>;
+export type RunnerBranchOwnershipAttestationV1 = z.infer<typeof RunnerBranchOwnershipAttestationV1Schema>;
+export type HumanPublicationApprovalV1 = z.infer<typeof HumanPublicationApprovalV1Schema>;
+export type RunnerPublicationBeginV1 = z.infer<typeof RunnerPublicationBeginV1Schema>;
+export type PublicationOperationReceiptV1 = z.infer<typeof PublicationOperationReceiptV1Schema>;
+export type RunnerPublicationCompletionPendingV1 = z.infer<typeof RunnerPublicationCompletionPendingV1Schema>;
+export type RunnerPublicationReconciliationPendingV1 = z.infer<typeof RunnerPublicationReconciliationPendingV1Schema>;
+export type RunnerPublicationReconcileV1 = z.infer<typeof RunnerPublicationReconcileV1Schema>;
+export type PublicationCompletionObservationV1 = z.infer<typeof PublicationCompletionObservationV1Schema>;
+export type RunnerPublicationCompletionV1 = z.infer<typeof RunnerPublicationCompletionV1Schema>;
 export type RunnerMaterialActionReconcileAttemptV1 = z.infer<
   typeof RunnerMaterialActionReconcileAttemptV1Schema
 >;
 export type RunnerMaterialActionReconcileRequestV1 = z.infer<
   typeof RunnerMaterialActionReconcileRequestV1Schema
+>;
+export type RunnerMaterialActionNonStartProofV1 = z.infer<
+  typeof RunnerMaterialActionNonStartProofV1Schema
+>;
+export type MaterialActionBeginAuthorityV1 = z.infer<
+  typeof MaterialActionBeginAuthorityV1Schema
+>;
+export type RunnerMaterialActionBeginV1 = z.infer<
+  typeof RunnerMaterialActionBeginV1Schema
 >;
 export type MaterialActionPayloadV1 = z.infer<typeof MaterialActionPayloadV1Schema>;
 export type MaterialActionReceiptDigestInputV1 = z.infer<
@@ -3484,6 +4190,12 @@ export type HostedClaimExpectedAuthorityV1 = z.infer<
   typeof HostedClaimExpectedAuthorityV1Schema
 >;
 export type HostedClaimV1 = z.infer<typeof HostedClaimV1Schema>;
+export type HostedSourceContentRedeemRequestV1 = z.infer<
+  typeof HostedSourceContentRedeemRequestV1Schema
+>;
+export type HostedSourceContentRedeemResponseV1 = z.infer<
+  typeof HostedSourceContentRedeemResponseV1Schema
+>;
 export type AdmissionPolicySnapshotReceiptEnvelopeV1 = z.infer<typeof AdmissionPolicySnapshotReceiptEnvelopeV1Schema>;
 export type GovernedProjectionAttemptRefV1 = z.infer<
   typeof GovernedProjectionAttemptRefV1Schema

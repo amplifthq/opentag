@@ -1,10 +1,52 @@
-import type { OpenTagRunResult, WorkContextMutationRequest } from "@opentag/core";
+import { canonicalJsonStringify, type OpenTagRunResult, type WorkContextMutationRequest } from "@opentag/core";
+import { createHash } from "node:crypto";
 import { EXECUTOR_REPORT_START, parseExecutorReport, renderExecutorReportSummary } from "./executor-report.js";
 
 const MAX_EXECUTOR_SUMMARY_LENGTH = 4000;
 const MAX_ARTIFACT_SUMMARY_LENGTH = 1200;
 
 type ResultArtifact = NonNullable<OpenTagRunResult["artifacts"]>[number];
+
+export function validateProposalEvidenceArtifact(artifact: ResultArtifact): void {
+  const metadata = artifact.metadata;
+  const proposalLike = artifact.id?.endsWith(":proposal-evidence")
+    || artifact.title === "Immutable proposal evidence"
+    || artifact.uri?.endsWith("/proposal-evidence")
+    || Boolean(metadata?.["proposalEvidence"] || metadata?.["evidenceDigest"]);
+  if (!proposalLike) return;
+  if (!metadata || metadata["readiness"] !== "not_assessed"
+    || typeof metadata["evidenceDigest"] !== "string"
+    || typeof metadata["artifactDigest"] !== "string"
+    || !metadata["proposalEvidence"] || typeof metadata["proposalEvidence"] !== "object") {
+    throw new Error("proposal_evidence_invalid");
+  }
+  if (!artifact.sourceRunId
+    || artifact.id !== `${artifact.sourceRunId}:proposal-evidence`
+    || artifact.type !== "patch_summary" || artifact.kind !== "patch"
+    || artifact.title !== "Immutable proposal evidence"
+    || artifact.uri !== `opentag://run/${encodeURIComponent(artifact.sourceRunId)}/proposal-evidence`
+    || canonicalJsonStringify(Object.keys(metadata).sort())
+      !== canonicalJsonStringify(["artifactDigest", "evidenceDigest", "proposalEvidence", "readiness"])) {
+    throw new Error("proposal_evidence_identity_mismatch");
+  }
+  const evidence = metadata["proposalEvidence"] as ProposalEvidence;
+  const { evidenceDigest, ...digestInput } = evidence;
+  const changedFilesDigest = `sha256:${createHash("sha256")
+    .update(canonicalJsonStringify(evidence.changedFiles)).digest("hex")}`;
+  const computedDigest = `sha256:${createHash("sha256")
+    .update(canonicalJsonStringify(digestInput)).digest("hex")}`;
+  const artifactDigestInput = { ...artifact, metadata: { ...metadata } };
+  delete (artifactDigestInput.metadata as Record<string, unknown>)["artifactDigest"];
+  const computedArtifactDigest = `sha256:${createHash("sha256")
+    .update(canonicalJsonStringify(artifactDigestInput)).digest("hex")}`;
+  if (evidence.schemaVersion !== 1 || evidence.kind !== "attempt_proposal_evidence"
+    || evidence.changedFilesDigest !== changedFilesDigest
+    || evidenceDigest !== computedDigest
+    || metadata["evidenceDigest"] !== evidenceDigest
+    || metadata["artifactDigest"] !== computedArtifactDigest) {
+    throw new Error("proposal_evidence_digest_mismatch");
+  }
+}
 
 const DIRECT_SOURCE_CONTROL_COMMAND_PATTERN = /^\s*(?:[-*]\s*)?(?:`{1,3})?\s*(?:git\s+(?:add|commit|push|checkout)|gh\s+pr\s+create)\b/i;
 
@@ -128,6 +170,7 @@ function createRunArtifacts(input: {
   changedFiles: string[];
   report?: NonNullable<ReturnType<typeof parseExecutorReport>>;
   extraArtifacts?: ResultArtifact[];
+  proposalEvidence?: ProposalEvidence;
 }): ResultArtifact[] {
   const generated: ResultArtifact[] = [];
   const createdAt = new Date().toISOString();
@@ -149,6 +192,45 @@ function createRunArtifacts(input: {
         changedFiles: input.changedFiles
       }
     });
+  }
+  if (input.proposalEvidence) {
+    const { evidenceDigest, ...digestInput } = input.proposalEvidence;
+    const computedDigest = `sha256:${createHash("sha256")
+      .update(canonicalJsonStringify(digestInput)).digest("hex")}`;
+    if (computedDigest !== evidenceDigest) {
+      throw new Error("proposal_evidence_digest_mismatch");
+    }
+    const immutableProposalEvidence = Object.freeze({
+      ...input.proposalEvidence,
+      changedFiles: Object.freeze([...input.proposalEvidence.changedFiles]),
+      verificationEvidenceDigests: Object.freeze([
+        ...input.proposalEvidence.verificationEvidenceDigests,
+      ]),
+      limitations: Object.freeze([...input.proposalEvidence.limitations]),
+    });
+    const proposalArtifact: ResultArtifact = {
+      id: `${input.runId}:proposal-evidence`,
+      type: "patch_summary",
+      kind: "patch",
+      title: "Immutable proposal evidence",
+      uri: runArtifactUri(input.runId, "proposal-evidence"),
+      summary: "Attempt-bound proposal evidence captured; completion readiness is not assessed here.",
+      sourceRunId: input.runId,
+      createdAt,
+      metadata: {
+        proposalEvidence: immutableProposalEvidence,
+        evidenceDigest,
+        readiness: "not_assessed",
+      },
+    };
+    const artifactDigest = `sha256:${createHash("sha256")
+      .update(canonicalJsonStringify(proposalArtifact)).digest("hex")}`;
+    proposalArtifact.metadata = Object.freeze({
+      ...proposalArtifact.metadata,
+      artifactDigest,
+    });
+    generated.push(proposalArtifact);
+    validateProposalEvidenceArtifact(generated.at(-1)!);
   }
   generated.push({
     id: `${input.runId}:diagnosis-report`,
@@ -186,6 +268,25 @@ function createRunArtifacts(input: {
   return dedupeArtifacts([...generated, ...(input.report?.artifacts ?? []), ...(input.extraArtifacts ?? [])]);
 }
 
+export type ProposalEvidence = {
+  schemaVersion: 1;
+  kind: "attempt_proposal_evidence";
+  attemptId: string;
+  attemptNumber: number;
+  workspaceId: string;
+  workspacePathDigest: string;
+  branch: string;
+  baseRevision: string;
+  finalRevision?: string;
+  finalTree: string;
+  diffDigest: string;
+  changedFilesDigest: string;
+  changedFiles: string[];
+  verificationEvidenceDigests: string[];
+  limitations: string[];
+  evidenceDigest: string;
+};
+
 export function createExecutorRunResult(input: {
   executorName: string;
   runId: string;
@@ -194,6 +295,8 @@ export function createExecutorRunResult(input: {
   output: string;
   changedFiles: string[];
   extraArtifacts?: NonNullable<OpenTagRunResult["artifacts"]>;
+  proposalEvidence?: ProposalEvidence;
+  verification?: NonNullable<OpenTagRunResult["verification"]>;
 }): OpenTagRunResult {
   const proposalId = `proposal_${input.runId}`;
   const report = parseExecutorReport(input.output);
@@ -238,6 +341,7 @@ export function createExecutorRunResult(input: {
     summary,
     changedFiles: input.changedFiles,
     artifacts,
+    ...(input.verification?.length ? { verification: input.verification } : {}),
     ...(suggestedChanges ? { suggestedChanges } : {}),
     nextAction:
       input.changedFiles.length > 0

@@ -93,6 +93,7 @@ export function normalizeSlackChannelMessage(input: SlackAppMentionInput): OpenT
       kind: "channel_message",
       channel,
       thread,
+      messageId: input.ts,
       actor: { provider: "slack", id: input.userId }
     },
     text,

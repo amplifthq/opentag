@@ -4,13 +4,11 @@
 
 OpenTag CLI 当前使用 **Repository Webhook** 接入 GitHub。这是最小正确的 MVP 路线：GitHub 把 issue 和 pull request 评论通过公网 tunnel 发到你本机的 OpenTag，OpenTag 再把这个 source thread 变成一个可治理的 agent 工作回路：有边界的 context、本地执行、audit ledger、产物、action receipt，以及简洁的 GitHub 回调。
 
-当 coding agent 修改了文件时，OpenTag 默认会走这个流程：
+当 coding agent 修改文件时，这个 local-direct GitHub ingress 会把结果和
+建议动作回写到 source thread，但不会自动 push branch 或创建 pull request。
 
-1. 先把这次 run 的代码改动推到一个临时 run branch。
-2. 在同一个 GitHub thread 里展示一个 `create_pull_request` 建议动作。
-3. 只有当你回复 `apply 1` 后，OpenTag 才会真正创建 pull request。
-
-这样用户始终有最后确认权。旧的“每次 run 结束立刻自动创建 PR”模式仍然保留为高级选项，但不是默认 setup 路线。
+Draft pull-request publication 是独立的精确操作，必须具备 verified Candidate、
+当前人工审批和 coordinator-issued capability；已退役的自动 PR 选项会被忽略。
 
 GitHub App 安装模式是长期产品路线，但还不是当前 CLI 的默认 setup 路线。
 
@@ -29,7 +27,7 @@ OpenTag setup 会处理本地能安全自动化的部分：
 - 尽量从当前项目的 `origin` remote 推断 GitHub 仓库。
 - 自动生成强随机 webhook secret。
 - 写入本地 dispatcher、GitHub webhook listener、runner 和仓库绑定配置。
-- 默认开启 run branch preparation，这样你后续回复 `apply 1` 时才能创建 PR。
+- 记录用于 source-thread 回复和显式授权发布的 GitHub 凭据。
 - 路由 `@opentag /status`、`@opentag /doctor`、`@opentag /stop [run_id]` 等 source-thread 控制命令，并且不会创建新的 run。
 - `opentag start` 会启动本地 GitHub webhook listener。
 
@@ -39,8 +37,8 @@ GitHub 访问不到你电脑上的 `localhost`。你仍然需要：
 
 - 一个公网 tunnel，把 GitHub 请求转发到本机 OpenTag。
 - 一个 GitHub repository webhook，Payload URL 指向这个公网 tunnel。
-- 一个 GitHub token，让 OpenTag 能回写评论，并在你回复 `apply 1` 后创建 PR。
-- 本机 git remote 凭据需要能往这个仓库 push branch。OpenTag 会使用当前项目的 `origin` remote 推送 run branch。
+- 一个能让 OpenTag 回写评论的 GitHub token。如果它还有 Pull requests 写权限，同一个凭据也可用于显式授权的 pull-request publication。
+- 使用 paired-relay publication 时，本机 git remote 凭据需要能够推送授权操作选定的精确 owned branch。
 
 ## 1. 运行 setup
 
@@ -60,7 +58,6 @@ OpenTag 会问：
 
 ```text
 GitHub 仓库（owner/repo）
-允许 OpenTag 在 run 结束后立刻自动创建 pull request 吗？
 本地 GitHub webhook 端口
 GitHub token（用于回写评论和创建 PR）
 ```
@@ -75,7 +72,7 @@ opentag setup --platform github --github-port 3051 --force
 
 ## 2. 创建 GitHub Token
 
-OpenTag 会用这个 token 回写 acknowledgement、progress 和 final result 评论。你在 GitHub thread 里回复 `apply 1` 后，它也会用这个 token 创建 pull request。
+OpenTag 会用这个 token 回写 acknowledgement、progress 和 final result 评论。paired-relay installation 只有在精确 Candidate、当前审批和 coordinator-issued capability 授权后，才会使用它创建 pull request。
 
 1. 打开 [GitHub token 创建页](https://github.com/settings/personal-access-tokens/new)。
 2. 如果 GitHub 询问 token 类型，选择 **Generate new token**。
@@ -84,8 +81,7 @@ OpenTag 会用这个 token 回写 acknowledgement、progress 和 final result �
 5. 在 **Repository permissions** 里设置：
    - **Issues**: Read and write
    - **Pull requests**: Read and write
-6. 默认的 `apply 1` 流程不需要 **Contents** 权限，因为 run branch 会用你本机的 git remote 凭据推送。如果你开启了旧的“run 结束立刻自动创建 PR”模式，还需要：
-   - **Contents**: Read and write
+6. 如果 owned branch 使用本机 git remote 凭据推送，这个 token 不需要 **Contents** 权限。
 7. 点击 **Generate token**。
 8. 立即复制 token。GitHub 只会显示一次。
 9. 把 token 粘贴到 `GitHub token（用于回写评论和创建 PR）` 这个输入项里。
@@ -156,8 +152,8 @@ setup 完成、OpenTag 已运行、GitHub webhook 创建完成后，在 issue �
 2. OpenTag 创建一次 run。
 3. 本地 runner 执行 coding agent。
 4. OpenTag 把 acknowledgement、progress 和 final result 回写到同一个 GitHub thread。
-5. 如果 agent 修改了文件，OpenTag 会推送 run branch，并展示 `create_pull_request` 建议动作。
-6. 你在 thread 里回复 `apply 1` 后，OpenTag 创建 pull request。
+5. 如果 agent 修改了文件，final result 会保留 proposal 和 evidence；local-direct GitHub ingress 不会自动创建 pull request。
+6. 配置了 paired-relay publication 时，发布仍必须具备 verified Candidate、当前审批和 coordinator-issued capability。
 
 run 进行中时，你可以在同一个 source thread 里检查或停止 runtime：
 
@@ -193,5 +189,5 @@ repository binding 上配置 `allowedActors`。配置了 `allowedActors` 后，
 - webhook secret 是否和 OpenTag 保存的完全一致。
 - webhook 是否订阅了 **Issue comments** 和 **Pull request review comments**。
 - GitHub token 是否有 Issues 和 Pull requests 写权限。
-- 如果你期待 `apply 1` 创建 PR，本机 `origin` remote 是否能 push branch。
+- 使用 paired-relay publication 时，本机 git remote 是否能推送授权操作指定的精确 owned branch。
 - `opentag start` 是否还在运行。

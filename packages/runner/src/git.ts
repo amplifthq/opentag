@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
+import { lstat, readFile, readlink, realpath } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { CommandRunner } from "./command.js";
 import { assertCommandSucceeded } from "./command.js";
@@ -11,6 +13,139 @@ export type GitStatusEntry = {
 
 const INTERNAL_ARTIFACT_ROOTS = [".omx", ".codex", ".claude"];
 
+const sha256 = (value: string | Buffer) => `sha256:${createHash("sha256")
+  .update(value).digest("hex")}`;
+
+export type AttemptWorkspaceAttestation = Readonly<{
+  workspaceId: string;
+  workspacePathDigest: string;
+  repositoryPathDigest: string;
+  worktreeIdentityDigest: string;
+  baseRevision: string;
+  currentRevision: string;
+  currentTree: string;
+  workspaceStateDigest: string;
+  attemptId: string;
+  attemptNumber: number;
+  fencingTokenDigest: string;
+  credentialId: string;
+  leaseExpiresAt: string;
+}>;
+
+type AttemptWorkspaceAttestationInput = {
+  runner: CommandRunner;
+  workspacePath: string;
+  repositoryPath: string;
+  workspaceId: string;
+  baseRevision: string;
+  attemptId: string;
+  attemptNumber: number;
+  fencingTokenDigest: string;
+  credentialId: string;
+  leaseExpiresAt: string;
+};
+
+async function gitValue(runner: CommandRunner, cwd: string, args: string[], label: string) {
+  const result = await runner.run("git", args, { cwd });
+  await assertCommandSucceeded(result, label);
+  return result.stdout.trim();
+}
+
+async function workspaceStateDigest(input: { runner: CommandRunner; workspacePath: string }) {
+  const status = await input.runner.run("git", STATUS_PORCELAIN_Z_ARGS, {
+    cwd: input.workspacePath,
+  });
+  await assertCommandSucceeded(status, "read workspace state");
+  const diff = await input.runner.run("git", ["diff", "--binary", "HEAD"], {
+    cwd: input.workspacePath,
+  });
+  await assertCommandSucceeded(diff, "read workspace diff");
+  const fileDigests: Array<[string, string, number, string]> = [];
+  for (const path of parseChangedFiles(status.stdout).sort()) {
+    const absolute = `${input.workspacePath.replace(/\/$/u, "")}/${path}`;
+    const metadata = await lstat(absolute).catch(() => null);
+    if (!metadata) continue;
+    const mode = metadata.mode & 0o7777;
+    if (metadata.isFile()) {
+      fileDigests.push([path, "file", mode, sha256(await readFile(absolute))]);
+    } else if (metadata.isSymbolicLink()) {
+      fileDigests.push([path, "symlink", mode, sha256(await readlink(absolute))]);
+    } else if (metadata.isDirectory()) {
+      fileDigests.push([path, "directory", mode, sha256("")]);
+    }
+  }
+  return sha256(JSON.stringify({ status: status.stdout, diff: diff.stdout, fileDigests }));
+}
+
+export async function attestAttemptWorkspace(
+  input: AttemptWorkspaceAttestationInput,
+): Promise<AttemptWorkspaceAttestation> {
+  const workspacePath = await realpath(input.workspacePath);
+  const repositoryPath = await realpath(input.repositoryPath);
+  const gitDir = await gitValue(input.runner, workspacePath,
+    ["rev-parse", "--absolute-git-dir"], "read worktree identity");
+  const baseRevision = await gitValue(input.runner, repositoryPath,
+    ["rev-parse", `${input.baseRevision}^{commit}`], "read frozen base revision");
+  const currentRevision = await gitValue(input.runner, workspacePath,
+    ["rev-parse", "HEAD^{commit}"], "read current revision");
+  const currentTree = await gitValue(input.runner, workspacePath,
+    ["rev-parse", "HEAD^{tree}"], "read current tree");
+  return Object.freeze({
+    workspaceId: input.workspaceId,
+    workspacePathDigest: sha256(workspacePath),
+    repositoryPathDigest: sha256(repositoryPath),
+    worktreeIdentityDigest: sha256(await realpath(gitDir)),
+    baseRevision,
+    currentRevision,
+    currentTree,
+    workspaceStateDigest: await workspaceStateDigest(input),
+    attemptId: input.attemptId,
+    attemptNumber: input.attemptNumber,
+    fencingTokenDigest: input.fencingTokenDigest,
+    credentialId: input.credentialId,
+    leaseExpiresAt: input.leaseExpiresAt,
+  });
+}
+
+export async function verifyAttemptWorkspaceAttestation(input:
+  AttemptWorkspaceAttestationInput & { attestation: AttemptWorkspaceAttestation; now: Date },
+): Promise<boolean> {
+  if (Date.parse(input.attestation.leaseExpiresAt) <= input.now.getTime()
+    || input.attestation.workspaceId !== input.workspaceId
+    || input.attestation.attemptId !== input.attemptId
+    || input.attestation.attemptNumber !== input.attemptNumber
+    || input.attestation.fencingTokenDigest !== input.fencingTokenDigest
+    || input.attestation.credentialId !== input.credentialId
+    || input.attestation.leaseExpiresAt !== input.leaseExpiresAt) return false;
+  try {
+    const current = await attestAttemptWorkspace(input);
+    return JSON.stringify(current) === JSON.stringify(input.attestation);
+  } catch {
+    return false;
+  }
+}
+
+export function recoverInterruptedAttemptWorkspace(input: {
+  runId: string;
+  oldAttemptId: string;
+  oldWorkspaceId: string;
+  oldWorkspacePathDigest: string;
+  replacementAttemptId: string;
+  replacementFenceDigest: string;
+}) {
+  if (input.oldAttemptId === input.replacementAttemptId) {
+    throw new Error("replacement_attempt_must_be_new");
+  }
+  return Object.freeze({
+    oldWorkspace: Object.freeze({ id: input.oldWorkspaceId,
+      attemptId: input.oldAttemptId, pathDigest: input.oldWorkspacePathDigest,
+      state: "interrupted_evidence" as const }),
+    newWorkspace: Object.freeze({ id: `workspace_${input.replacementAttemptId}`,
+      attemptId: input.replacementAttemptId,
+      fenceDigest: input.replacementFenceDigest, reuseOldWorkspace: false as const }),
+  });
+}
+
 export function branchNameForRun(runId: string): string {
   const safeRunId = runId.replace(/[^a-zA-Z0-9._-]/g, "-");
   return `opentag/${safeRunId}`;
@@ -21,7 +156,7 @@ export function branchNameForRun(runId: string): string {
 // spaces, quotes, newlines, or unicode survive parsing intact. `-z` also
 // disables the quoting/escaping that the default newline form applies, and
 // `core.quotePath=false` keeps unicode bytes verbatim rather than \NNN escapes.
-export const STATUS_PORCELAIN_Z_ARGS = ["-c", "core.quotePath=false", "status", "--porcelain", "-z"];
+export const STATUS_PORCELAIN_Z_ARGS = ["-c", "core.quotePath=false", "status", "--porcelain", "-z", "--untracked-files=all"];
 
 // Parses `git status --porcelain -z` output (NUL-delimited records).
 //
@@ -108,6 +243,11 @@ export async function createRunWorktree(input: {
   branchName: string;
   baseBranch: string;
 }): Promise<void> {
+  const existing = await lstat(input.worktreePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (existing) throw new Error("attempt_workspace_already_exists");
   mkdirSync(dirname(input.worktreePath), { recursive: true });
   const result = await input.runner.run(
     "git",

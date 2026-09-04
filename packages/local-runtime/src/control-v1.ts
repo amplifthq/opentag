@@ -23,6 +23,7 @@ import type {
 import {
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
+  compareCanonicalUnicodeStrings,
   buildHostedLifecycleRequestV1,
   HostedCompleteRequestV1Schema,
   HostedHeartbeatRequestV1Schema,
@@ -32,15 +33,36 @@ import {
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
   computePermissionRequestDigestV1,
+  computeGitHubIssueCommentSourceIdentityDigestV1,
+  computeSlackAppMentionSourceIdentityDigestV1,
   verifyHostedAdmissionEnvelopeDigestV1,
+  HostedSourceContentRedeemRequestV1Schema,
+  verifyHostedSourceContentRedeemPayloadV1,
+  OpenTagEventSchema,
   RunnerReadinessReceiptEnvelopeV1Schema,
+  sortCanonicalUnicodeStrings,
 } from "@opentag/core";
 import { openDispatcherGovernanceStore } from "@opentag/dispatcher";
 import {
+  createExactDraftPullRequest,
+  createGitHubCompletionApi,
+  reconcileGitHubCompletionEvidence,
   refetchGitHubIssueCommentForHostedAdmission,
+  type PublicationProviderObservation,
   type GitHubIssueCommentRefetchReceipt,
 } from "@opentag/github";
-import type { ExecutorAdapter, RunnerSecurityPolicy } from "@opentag/runner";
+import type {
+  PublicationCompletionObservationV1,
+  PublicationOperationCapabilityV1,
+  PublicationOperationReceiptV1,
+} from "@opentag/control-protocol";
+import {
+  assertCommandSucceeded,
+  nodeCommandRunner,
+  pushBranch,
+  type ExecutorAdapter,
+  type RunnerSecurityPolicy,
+} from "@opentag/runner";
 import {
   canonicalRepositoryIdentity,
   type OpenTagDaemonConfig,
@@ -51,7 +73,7 @@ import {
   type ClaimedRun,
   type ClaimedRunExecutionClient,
 } from "./daemon.js";
-import type { PullRequestOptions } from "./pr.js";
+import { executePublicationControlV1 } from "./pr.js";
 
 const require = createRequire(import.meta.url);
 const LOCAL_RUNTIME_VERSION = (require("../package.json") as { version: string }).version;
@@ -67,6 +89,7 @@ const HOSTED_CLAIM_CAPABILITIES = [
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 
 type CallbackObservationReceiptEnvelopeV1 = Parameters<
@@ -210,11 +233,6 @@ function retryAfterMs(error: unknown): number {
   return typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0
     ? seconds * 1_000
     : 0;
-}
-
-function retryableControlContextError(error: unknown): boolean {
-  const status = httpStatus(error);
-  return status !== undefined && retryable(status);
 }
 
 async function deliverProjection(client: ControlProjectionClient, envelope: ControlPlaneProjectionEnvelope): Promise<number> {
@@ -483,11 +501,11 @@ function canonicalReadinessAuthority(
       registrationGeneration: readiness.producer.registrationGeneration,
     },
     registrationGeneration: readiness.payload.registrationGeneration,
-    capabilities: [...readiness.payload.capabilities].sort(),
+    capabilities: sortCanonicalUnicodeStrings(readiness.payload.capabilities),
     executors: [...readiness.payload.executors]
-      .sort((left, right) => left.executorId.localeCompare(right.executorId)),
+      .sort((left, right) => compareCanonicalUnicodeStrings(left.executorId, right.executorId)),
     targets: [...readiness.payload.targets]
-      .sort((left, right) => left.projectTargetId.localeCompare(right.projectTargetId)),
+      .sort((left, right) => compareCanonicalUnicodeStrings(left.projectTargetId, right.projectTargetId)),
   };
 }
 
@@ -579,10 +597,10 @@ export async function assertHostedClaimCurrentAuthorityV1(input: {
   ) {
     throw new Error("hosted_claim_current_context_mismatch");
   }
-  const contextCapabilities = [...new Set(context.capabilities)].sort();
-  const readinessCapabilities = [
+  const contextCapabilities = sortCanonicalUnicodeStrings([...new Set(context.capabilities)]);
+  const readinessCapabilities = sortCanonicalUnicodeStrings([
     ...new Set(readiness.payload.capabilities),
-  ].sort();
+  ]);
   if (
     request.requiredCapabilities.some(
       (capability) => !contextCapabilities.includes(capability),
@@ -599,7 +617,7 @@ export async function assertHostedClaimCurrentAuthorityV1(input: {
     ? canonicalRepositoryIdentity(target)
     : null;
   const admissionIdentity = canonicalRepositoryIdentity({
-    provider: claim.hostedAdmission.provider,
+    provider: claim.hostedAdmission.repository.provider ?? claim.hostedAdmission.provider,
     owner: claim.hostedAdmission.repository.owner,
     repo: claim.hostedAdmission.repository.repo,
   });
@@ -744,7 +762,7 @@ export async function buildRunnerReadinessReceipt(input: {
         };
   });
   const executors = await Promise.all(Object.values(input.executors)
-    .sort((left, right) => left.id.localeCompare(right.id))
+    .sort((left, right) => compareCanonicalUnicodeStrings(left.id, right.id))
     .map(async (executor) => {
       const base = {
         executorId: executor.id,
@@ -861,6 +879,276 @@ export type HostedControlLoop = {
   close(): Promise<void>;
 };
 
+type PublicationControlClient = Pick<OpenTagClient,
+  "claimNextPublicationOperationControlV1" | "beginPublicationOperationControlV1"
+  | "recordPublicationOperationReceiptControlV1" | "reconcilePublicationOperationControlV1"
+  | "completePublicationControlV1">;
+
+export async function runPublicationControlV1Iteration(input: {
+  organizationId: string;
+  runnerId: string;
+  runnerGeneration: number;
+  now: () => Date;
+  client: PublicationControlClient;
+  getLocalAuthority(capability: PublicationOperationCapabilityV1): Promise<{
+    fencingToken: string;
+    attemptNumber: number;
+  } | null>;
+  pushOwnedBranch(capability: PublicationOperationCapabilityV1): Promise<PublicationProviderObservation>;
+  createDraftPullRequest(capability: PublicationOperationCapabilityV1): Promise<PublicationProviderObservation>;
+  reconcileOperation(capability: PublicationOperationCapabilityV1): Promise<PublicationProviderObservation>;
+  observeCompletion(capability: PublicationOperationCapabilityV1,
+    receipt: PublicationOperationReceiptV1): Promise<PublicationCompletionObservationV1>;
+}): Promise<boolean> {
+  const claimed = await input.client.claimNextPublicationOperationControlV1({
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.publication.v1"],
+    requestId: `request_publication_poll_${randomUUID()}`,
+    organizationId: input.organizationId,
+    runnerId: input.runnerId,
+  });
+  if (!claimed) return false;
+  const capability = claimed.capability;
+  const authority = await input.getLocalAuthority(capability);
+  if (!authority || authority.attemptNumber !== capability.attemptNumber) return false;
+  if ("reconciliationPending" in claimed && claimed.reconciliationPending) {
+    const provider = await input.reconcileOperation(capability);
+    const observation = publicationReconciliationObservation(provider);
+    const reconciliationDigest = await computeControlPayloadDigestV1({
+      capabilityId: capability.capabilityId, operationId: capability.operationId, observation,
+    });
+    await input.client.reconcilePublicationOperationControlV1({
+      schemaVersion: 1, protocolVersion: "1.0", requiredCapabilities: ["relay.publication.v1"],
+      requestId: `request_publication_reconcile_${reconciliationDigest.slice("sha256:".length,
+        "sha256:".length + 48)}`,
+      organizationId: capability.organizationId, runnerId: capability.runnerId, runId: capability.runId,
+      capabilityId: capability.capabilityId, operationId: capability.operationId,
+      observation,
+      observedAt: input.now().toISOString(),
+    });
+    return true;
+  }
+  if ("completionPending" in claimed && claimed.completionPending) {
+    const observation = await input.observeCompletion(capability, claimed.completionReceipt);
+    await input.client.completePublicationControlV1({
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: ["relay.publication.v1"],
+      requestId: `request_publication_complete_${randomUUID()}`,
+      organizationId: capability.organizationId,
+      runnerId: capability.runnerId,
+      runnerGeneration: capability.runnerGeneration,
+      runId: capability.runId,
+      attemptId: capability.attemptId,
+      attemptNumber: authority.attemptNumber,
+      fencingToken: authority.fencingToken,
+      candidateId: capability.candidateId,
+      candidateDigest: capability.candidateDigest,
+      observation,
+    });
+    return true;
+  }
+  const receipt = await executePublicationControlV1({
+    client: input.client,
+    capability,
+    fencingToken: authority.fencingToken,
+    now: () => input.now().toISOString(),
+    pushOwnedBranch: () => input.pushOwnedBranch(capability),
+    createDraftPullRequest: () => input.createDraftPullRequest(capability),
+  });
+  if (receipt.outcome === "outcome_unknown") {
+    const provider = await input.reconcileOperation(capability);
+    const observation = publicationReconciliationObservation(provider);
+    const reconciliationDigest = await computeControlPayloadDigestV1({
+      capabilityId: capability.capabilityId, operationId: capability.operationId, observation,
+    });
+    await input.client.reconcilePublicationOperationControlV1({
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: ["relay.publication.v1"],
+      requestId: `request_publication_reconcile_${reconciliationDigest.slice("sha256:".length,
+        "sha256:".length + 48)}`,
+      organizationId: capability.organizationId,
+      runnerId: capability.runnerId,
+      runId: capability.runId,
+      capabilityId: capability.capabilityId,
+      operationId: capability.operationId,
+      observation,
+      observedAt: input.now().toISOString(),
+    });
+  }
+  return true;
+}
+
+function publicationReconciliationObservation(provider: PublicationProviderObservation) {
+  if (provider.kind !== "present") return provider;
+  return { kind: "present" as const, headSha: provider.headSha,
+    ...("pullRequestNumber" in provider ? {
+      externalId: `github_pr_${provider.pullRequestNumber}`,
+      externalUri: provider.pullRequestUrl, draft: provider.draft,
+      ...(provider.provider && provider.repository && provider.baseBranch && provider.state ? {
+        provider: provider.provider, repository: provider.repository,
+        baseBranch: provider.baseBranch, state: provider.state,
+        ...(provider.headBranch && provider.headRepository ? {
+          headBranch: provider.headBranch, headRepository: provider.headRepository,
+        } : {}),
+      } : {}),
+    } : {}),
+  };
+}
+
+function publicationBinding(input: {
+  capability: PublicationOperationCapabilityV1;
+  repositories: RepositoryBindingConfig[];
+}): RepositoryBindingConfig | null {
+  const expected = canonicalRepositoryIdentity(input.capability.repository);
+  return input.repositories.find((candidate) => {
+    const actual = canonicalRepositoryIdentity(candidate);
+    return actual.provider === expected.provider && actual.owner === expected.owner
+      && actual.repo === expected.repo && candidate.pushRemote === input.capability.repository.remote
+      && candidate.baseBranch === input.capability.repository.baseBranch;
+  }) ?? null;
+}
+
+async function localBranchHead(input: {
+  binding: RepositoryBindingConfig;
+  capability: PublicationOperationCapabilityV1;
+}): Promise<string | null> {
+  const result = await nodeCommandRunner.run("git", ["rev-parse", `${input.capability.branch}^{commit}`], {
+    cwd: input.binding.checkoutPath,
+  });
+  if (result.exitCode !== 0) return null;
+  const head = result.stdout.trim();
+  return /^[a-f0-9]{40,64}$/u.test(head) ? head : null;
+}
+
+async function observeRemoteBranch(input: {
+  binding: RepositoryBindingConfig;
+  capability: PublicationOperationCapabilityV1;
+}): Promise<PublicationProviderObservation> {
+  try {
+    const result = await nodeCommandRunner.run("git", ["ls-remote", "--heads",
+      input.capability.repository.remote, `refs/heads/${input.capability.branch}`], {
+      cwd: input.binding.checkoutPath,
+    });
+    await assertCommandSucceeded(result, "observe owned publication branch");
+    if (!result.stdout.trim()) return { kind: "absent" };
+    const headSha = result.stdout.trim().split(/\s+/u)[0];
+    return headSha === input.capability.expectedHeadSha
+      ? { kind: "present", headSha }
+      : { kind: "ambiguous" };
+  } catch {
+    return { kind: "ambiguous" };
+  }
+}
+
+function githubPublicationApi(input: {
+  token: string;
+  fetchImpl?: typeof fetch;
+  apiOrigin?: string;
+}) {
+  return createGitHubCompletionApi({ token: input.token,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    ...(input.apiOrigin ? { apiBaseUrl: input.apiOrigin } : {}) });
+}
+
+function providerRepository(fullName: string | undefined): { owner: string; repo: string } | null {
+  const parts = fullName?.split("/");
+  return parts?.length === 2 && parts[0] && parts[1]
+    ? { owner: parts[0], repo: parts[1] }
+    : null;
+}
+
+export async function observeDraftPullRequest(input: {
+  capability: PublicationOperationCapabilityV1;
+  token: string;
+  fetchImpl?: typeof fetch;
+  apiOrigin?: string;
+}): Promise<PublicationProviderObservation> {
+  try {
+    const api = githubPublicationApi(input);
+    const candidates = await api.listPullRequestsForCommit({
+      owner: input.capability.repository.owner, repo: input.capability.repository.repo,
+      ref: input.capability.expectedHeadSha,
+    });
+    let sawCandidate = false;
+    for (const candidate of candidates) {
+      sawCandidate = true;
+      const pullRequest = await api.getPullRequest({ owner: input.capability.repository.owner,
+        repo: input.capability.repository.repo, pullRequestNumber: candidate.number });
+      const expectedRepository = `${input.capability.repository.owner}/${input.capability.repository.repo}`.toLowerCase();
+      const observedHeadRepository = pullRequest.head.repo?.full_name?.toLowerCase();
+      const providerHeadRepository = providerRepository(pullRequest.head.repo?.full_name);
+      const exactUrl = `https://github.com/${input.capability.repository.owner}/${input.capability.repository.repo}/pull/${pullRequest.number}`;
+      if (pullRequest.state === "open" && pullRequest.head.sha === input.capability.expectedHeadSha
+        && pullRequest.head.ref === input.capability.branch && observedHeadRepository === expectedRepository
+        && providerHeadRepository
+        && pullRequest.base.ref === input.capability.repository.baseBranch
+        && pullRequest.base.repo?.full_name?.toLowerCase() === expectedRepository
+        && pullRequest.draft === true && pullRequest.htmlUrl === exactUrl) {
+        return { kind: "present", pullRequestNumber: pullRequest.number,
+          pullRequestUrl: pullRequest.htmlUrl, headSha: pullRequest.head.sha, draft: true,
+          provider: "github", repository: { owner: input.capability.repository.owner,
+            repo: input.capability.repository.repo }, baseBranch: pullRequest.base.ref, state: "open",
+          headBranch: pullRequest.head.ref, headRepository: providerHeadRepository };
+      }
+    }
+    return sawCandidate ? { kind: "ambiguous" } : { kind: "absent" };
+  } catch {
+    return { kind: "ambiguous" };
+  }
+}
+
+async function observePublicationCompletion(input: {
+  capability: PublicationOperationCapabilityV1;
+  receipt: PublicationOperationReceiptV1;
+  token: string;
+  now: () => Date;
+  fetchImpl?: typeof fetch;
+  apiOrigin?: string;
+}): Promise<PublicationCompletionObservationV1> {
+  if (input.receipt.observation.kind !== "present"
+    || !input.receipt.observation.externalId || !input.receipt.observation.externalUri
+    || input.receipt.observation.draft !== true) throw new Error("publication_completion_receipt_invalid");
+  const pullRequestNumber = Number(input.receipt.observation.externalId.match(/(\d+)$/u)?.[1]);
+  if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber <= 0) {
+    throw new Error("publication_completion_receipt_invalid");
+  }
+  const api = githubPublicationApi(input);
+  const current = await api.getPullRequest({ owner: input.capability.repository.owner,
+    repo: input.capability.repository.repo, pullRequestNumber });
+  const providerHeadRepository = providerRepository(current.head.repo?.full_name);
+  if (current.number !== pullRequestNumber || current.head.sha !== input.capability.expectedHeadSha
+    || current.base.ref !== input.capability.repository.baseBranch || current.draft !== true
+    || current.htmlUrl !== input.receipt.observation.externalUri
+    || current.head.ref !== input.capability.branch || !providerHeadRepository
+    || current.head.repo?.full_name?.toLowerCase() !== `${input.capability.repository.owner}/${input.capability.repository.repo}`.toLowerCase()) {
+    throw new Error("publication_completion_observation_mismatch");
+  }
+  const snapshots = await reconcileGitHubCompletionEvidence({
+    eventName: "pull_request", deliveryId: `runner:${input.capability.capabilityId}`,
+    payload: { number: pullRequestNumber, repository: { name: input.capability.repository.repo,
+      owner: { login: input.capability.repository.owner } } }, api,
+    now: () => input.now().toISOString(),
+  });
+  const snapshot = snapshots.find((candidate) => candidate.pullRequest.number === pullRequestNumber);
+  if (!snapshot || snapshot.pullRequest.headSha !== input.capability.expectedHeadSha) {
+    throw new Error("publication_completion_observation_mismatch");
+  }
+  return {
+    provider: "github", repository: snapshot.repository,
+    remote: input.capability.repository.remote, branch: input.capability.branch,
+    baseBranch: snapshot.pullRequest.baseBranch, pullRequestNumber,
+    pullRequestResourceRef: snapshot.pullRequest.resourceRef,
+    pullRequestUrl: input.receipt.observation.externalUri, draft: true,
+    state: snapshot.pullRequest.state, headSha: snapshot.pullRequest.headSha,
+    headBranch: current.head.ref, headRepository: providerHeadRepository,
+    baseSha: snapshot.pullRequest.baseSha, checks: snapshot.checks,
+    checksComplete: snapshot.checksComplete, observedAt: snapshot.observedAt,
+  };
+}
+
 type HostedExecutionRepository = Omit<
   ReturnType<typeof openDispatcherGovernanceStore>["repo"],
   "getHostedAssignedRunForRecovery" | "isHostedExecutionCurrent"
@@ -933,7 +1221,7 @@ type HostedExecutionRepository = Omit<
   importHostedAssignedRun(input: {
     event: import("@opentag/core").OpenTagEvent;
     claim: HostedClaimV1;
-    sourceReceipt: GitHubIssueCommentRefetchReceipt;
+    sourceReceipt: Awaited<ReturnType<typeof redeemHostedClaimSourceContentV1>>["receipt"];
   }): Promise<{
     outcome: "created" | "replayed";
     executionState: "ready_to_start" | "already_started" | "terminal" | "superseded";
@@ -965,6 +1253,34 @@ type HostedExecutionRepository = Omit<
       importedAt: string;
     };
   } | null>;
+  getHostedSucceededPublicationAuthority(input: {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+    runId: string;
+    attemptId: string;
+    fencingTokenDigest: string;
+  }): Promise<{ fencingToken: string; attemptNumber: number } | null>;
+  getHostedProposalSettlementForRetry?(input: {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+  }): Promise<{
+    runId: string;
+    attemptId: string;
+    attemptNumber: number;
+    fencingToken: string;
+    fencingTokenDigest: string;
+    runnerGeneration: number;
+    projectTargetId: string;
+    targetBindingDigest: string;
+    candidateId: string;
+    branch: string;
+    baseRevision: string;
+    finalRevision: string;
+    finalTree: string;
+    proposalArtifact: NonNullable<import("@opentag/core").OpenTagRunResult["artifacts"]>[number];
+  } | null>;
   isHostedExecutionCurrent(input: {
     runId: string;
     attemptId: string;
@@ -992,9 +1308,9 @@ function permissionResolutionFromReceipt(input: {
       id: receipt.payload.actionId,
       runId: receipt.runId,
       attemptId: receipt.attempt.attemptId,
-      actionFamily: receipt.payload.actionFamily,
-      capability: request.operation,
-      scope: { permissionScopes: receipt.payload.permissionScopes },
+      actionFamily: receipt.payload.actionDescriptor,
+      capability: receipt.payload.actionDescriptor,
+      scope: { permissionScopes: request.permissionScopes },
       target: { fingerprint: receipt.payload.targetFingerprint },
       riskTier: receipt.payload.riskTier,
       status: state === "waiting"
@@ -1049,16 +1365,122 @@ export async function buildHostedCompletionMetadataForControlV1(
     conclusion: result.conclusion,
     reasonCode: reasonCodes[result.conclusion],
     resultDigest: await computeControlPayloadDigestV1(result),
-    artifactDigests: [...new Set(await Promise.all(
+    artifactDigests: sortCanonicalUnicodeStrings([...new Set(await Promise.all(
       (result.artifacts ?? []).map((artifact) =>
         computeControlPayloadDigestV1(artifact)
       ),
-    ))].sort(),
-    evidenceDigests: [...new Set(await Promise.all(
+    ))]),
+    evidenceDigests: sortCanonicalUnicodeStrings([...new Set(await Promise.all(
       (result.verification ?? []).map((evidence) =>
         computeControlPayloadDigestV1(evidence)
       ),
-    ))].sort(),
+    ))]),
+  };
+}
+
+export async function redeemHostedClaimSourceContentV1(input: {
+  claim: HostedClaimV1;
+  client: Pick<OpenTagClient, "redeemHostedSourceContentControlV1">;
+  requestId: string;
+  operationId: string;
+  now?: () => Date;
+}): Promise<{
+  event: import("@opentag/core").OpenTagEvent;
+  receipt: GitHubIssueCommentRefetchReceipt | {
+    provider: "slack";
+    providerRepositoryId: string;
+    owner: string;
+    repo: string;
+    sourceThread: HostedClaimV1["hostedAdmission"]["sourceThread"];
+    sourceEvent: HostedClaimV1["hostedAdmission"]["sourceEvent"];
+    actor: { providerUserId: string; login: string };
+    sourceIdentityDigest: string;
+    eventDigest: string;
+    refetchedAt: string;
+  };
+}> {
+  const { claim } = input;
+  if (!(await verifyHostedAdmissionEnvelopeDigestV1(claim.hostedAdmission))) {
+    throw new Error("hosted_source_admission_digest_invalid");
+  }
+  const request = HostedSourceContentRedeemRequestV1Schema.parse({
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.source-content-redeem.v1"],
+    requestId: input.requestId,
+    operationId: input.operationId,
+    organizationId: claim.organizationId,
+    runnerId: claim.runnerId,
+    runId: claim.runId,
+    expectedAuthority: {
+      credentialId: claim.authority.credentialId,
+      registrationGeneration: claim.authority.registrationGeneration,
+      credentialGeneration: claim.authority.credentialGeneration,
+    },
+    attempt: {
+      attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number,
+      epoch: claim.attempt.epoch,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      leaseExpiresAt: claim.attempt.leaseExpiresAt,
+    },
+    grant: claim.sourceContentGrant,
+    admissionEnvelopeDigest: claim.hostedAdmission.envelopeDigest,
+    contentEnvelope: claim.hostedAdmission.sourceContextEnvelope,
+  });
+  const response = await input.client.redeemHostedSourceContentControlV1({
+    runnerId: claim.runnerId,
+    request,
+  });
+  if (!(await verifyHostedSourceContentRedeemPayloadV1(response))) {
+    throw new Error("hosted_source_payload_digest_mismatch");
+  }
+  const payload = response.content.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("hosted_source_content_invalid");
+  }
+  const executionBearingCommentBody = (payload as Record<string, unknown>)
+    .executionBearingCommentBody;
+  const event = OpenTagEventSchema.parse((payload as Record<string, unknown>).event);
+  if (typeof executionBearingCommentBody !== "string"
+    || executionBearingCommentBody.length === 0) {
+    throw new Error("hosted_source_content_invalid");
+  }
+  const admission = claim.hostedAdmission;
+  const sourceIdentityDigest = admission.provider === "github"
+    ? await computeGitHubIssueCommentSourceIdentityDigestV1({
+        provider: "github", repository: admission.repository,
+        sourceThread: admission.sourceThread, sourceEvent: admission.sourceEvent,
+        actor: { providerUserId: admission.verifiedActor.providerUserId,
+          login: admission.verifiedActor.login }, executionBearingCommentBody,
+      })
+    : await computeSlackAppMentionSourceIdentityDigestV1({
+        provider: "slack", repository: admission.repository,
+        sourceThread: admission.sourceThread, sourceEvent: admission.sourceEvent,
+        actor: { providerUserId: admission.verifiedActor.providerUserId,
+          login: admission.verifiedActor.login },
+        executionBearingMessageBody: executionBearingCommentBody,
+      });
+  if (sourceIdentityDigest !== admission.sourceIdentityDigest) {
+    throw new Error("hosted_source_identity_mismatch");
+  }
+  return {
+    event,
+    receipt: {
+      provider: admission.provider,
+      providerRepositoryId: admission.repository.providerRepositoryId,
+      owner: admission.repository.owner,
+      repo: admission.repository.repo,
+      sourceThread: admission.sourceThread,
+      sourceEvent: admission.sourceEvent,
+      actor: {
+        providerUserId: admission.verifiedActor.providerUserId,
+        login: admission.verifiedActor.login,
+      },
+      sourceIdentityDigest,
+      eventDigest: await computeControlPayloadDigestV1(event),
+      refetchedAt: (input.now?.() ?? new Date()).toISOString(),
+    },
   };
 }
 
@@ -1095,6 +1517,14 @@ async function createHostedExecutionClient(input: {
     request: ActionPermissionRequest;
     permissionRequestId: string;
     permissionRequestDigest: string;
+    actionDescriptor: "workspace.read" | "workspace.write" | "command.execute"
+      | "git.read" | "git.push" | "git.force_push" | "git.target_write"
+      | "github.pull_request.create" | "github.pull_request.update"
+      | "github.pull_request.merge" | "github.release.create" | "github.branch.delete";
+    actionDescriptorDigest: string;
+    targetFingerprint: string;
+    materialIdempotencyKey: string;
+    workspaceAttestationDigest?: string;
   }>();
   const attempt = {
     attemptId: authority.attemptId,
@@ -1269,6 +1699,10 @@ async function createHostedExecutionClient(input: {
         attempt,
         occurredAt: progress.at,
         ...progressMetadata,
+        ...(progress.workspaceAttestation
+          ? { workspaceAttestation: progress.workspaceAttestation } : {}),
+        ...(progress.interruptionEvidence
+          ? { interruptionEvidence: progress.interruptionEvidence } : {}),
         }),
       );
       assertNotCancelled();
@@ -1291,7 +1725,7 @@ async function createHostedExecutionClient(input: {
       if (local.operation.state !== "acknowledged") await pumpLifecycle();
       assertNotCancelled();
     },
-    async complete(runId, lease, result) {
+    async complete(runId, lease, result, evidence) {
       assertNotCancelled();
       if (!executionStarted) {
         const request = HostedRejectStartRequestV1Schema.parse(
@@ -1328,6 +1762,26 @@ async function createHostedExecutionClient(input: {
       }
       const completionMetadata =
         await buildHostedCompletionMetadataForControlV1(result);
+      let blockedPermission: { permissionRequestId: string;
+        actionDescriptorDigest: string; policySnapshotDigest: string } | undefined;
+      if (completionMetadata.conclusion === "needs_human") {
+        const waiting: Array<(typeof permissionRequests extends Map<string, infer T> ? T : never)> = [];
+        for (const [actionId, pending] of permissionRequests) {
+          const current = await client.getActionPermissionCurrentControlV1({
+            organizationId: authority.organizationId, runnerId: authority.runnerId,
+            runId, actionId, attempt: { attemptId: attempt.attemptId,
+              attemptNumber: attempt.attemptNumber, epoch: attempt.epoch,
+              fencingTokenDigest: attempt.fencingTokenDigest },
+            permissionRequestId: pending.permissionRequestId,
+            permissionRequestDigest: pending.permissionRequestDigest,
+          });
+          if (current.receipt.payload.state === "waiting") waiting.push(pending);
+        }
+        if (waiting.length !== 1) throw new Error("hosted_needs_human_permission_link_missing");
+        blockedPermission = { permissionRequestId: waiting[0]!.permissionRequestId,
+          actionDescriptorDigest: waiting[0]!.actionDescriptorDigest,
+          policySnapshotDigest: authority.policySnapshotDigest };
+      }
       assertNotCancelled();
       const request = HostedCompleteRequestV1Schema.parse(
         await buildLifecycleRequest({
@@ -1338,6 +1792,11 @@ async function createHostedExecutionClient(input: {
           attempt,
           occurredAt: executionOccurredAt,
           ...completionMetadata,
+          ...(blockedPermission ? { blockedPermission } : {}),
+          ...(evidence?.workspaceAttestation
+            ? { workspaceAttestation: evidence.workspaceAttestation } : {}),
+          ...(evidence?.interruptionEvidence
+            ? { interruptionEvidence: evidence.interruptionEvidence } : {}),
         }),
       );
       assertNotCancelled();
@@ -1371,6 +1830,35 @@ async function createHostedExecutionClient(input: {
       assertNotCancelled();
       const requestedAt = new Date().toISOString();
       const actionFamily = request.operation.toLowerCase().replace(/[^a-z0-9._-]/gu, "_").slice(0, 64) || "tool";
+      const actionDescriptor = (() => {
+        const normalized = actionFamily.replaceAll("_", ".");
+        const exact = new Map<string, "workspace.read" | "workspace.write" | "command.execute"
+          | "git.read" | "git.push" | "git.force_push" | "git.target_write"
+          | "github.pull_request.create" | "github.pull_request.update"
+          | "github.pull_request.merge" | "github.release.create" | "github.branch.delete">([
+          ["read", "workspace.read"], ["list", "workspace.read"], ["search", "workspace.read"],
+          ["write", "workspace.write"], ["edit", "workspace.write"], ["patch", "workspace.write"],
+          ["execute", "command.execute"], ["command", "command.execute"], ["shell", "command.execute"],
+          ["git.read", "git.read"], ["git.push", "git.push"],
+          ["git.force.push", "git.force_push"], ["git.target.write", "git.target_write"],
+          ["publish", "github.pull_request.create"],
+          ["github.pull.request.create", "github.pull_request.create"],
+          ["github.pull.request.update", "github.pull_request.update"],
+          ["merge", "github.pull_request.merge"],
+          ["github.pull.request.merge", "github.pull_request.merge"],
+          ["release", "github.release.create"],
+          ["github.release.create", "github.release.create"],
+          ["branch.delete", "github.branch.delete"],
+          ["github.branch.delete", "github.branch.delete"],
+        ]);
+        const capability = exact.get(normalized);
+        if (!capability) throw new Error("permission_action_capability_unknown");
+        return capability;
+      })();
+      const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
+      const materialIdempotencyKey = `material_begin_${(await computeControlPayloadDigestV1({
+        runId, actionId, permissionRequestId,
+      })).slice("sha256:".length, "sha256:".length + 32)}`;
       const targetFingerprint = request.targetFingerprint
         ?? await computeControlPayloadDigestV1({
           connectionId: request.connectionId,
@@ -1394,12 +1882,14 @@ async function createHostedExecutionClient(input: {
         },
         permissionRequestId,
         actionId,
-        actionFamily,
+        actionDescriptor,
+        actionDescriptorDigest,
         riskTier: "high" as const,
         targetFingerprint,
-        permissionScopes: [...request.permissionScopes].sort(),
         policySnapshotRef: authority.policySnapshotRef,
         policySnapshotDigest: authority.policySnapshotDigest,
+        ...(request.workspaceAttestationDigest
+          ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}),
         requestedAt,
       };
       const permissionRequestDigest = await computePermissionRequestDigestV1(digestInput);
@@ -1412,7 +1902,12 @@ async function createHostedExecutionClient(input: {
         permissionRequestDigest,
       });
       assertNotCancelled();
-      permissionRequests.set(actionId, { request, permissionRequestId, permissionRequestDigest });
+      const pending = { request, permissionRequestId, permissionRequestDigest,
+        actionDescriptor, actionDescriptorDigest, targetFingerprint,
+        materialIdempotencyKey,
+        ...(request.workspaceAttestationDigest
+          ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}) };
+      permissionRequests.set(actionId, pending);
       return permissionResolutionFromReceipt({ receipt: result.receipt, request });
     },
     async resolveActionPermission(runId, _lease, actionId) {
@@ -1436,19 +1931,62 @@ async function createHostedExecutionClient(input: {
       assertNotCancelled();
       return permissionResolutionFromReceipt({ receipt: result.receipt, request: pending.request });
     },
+    async confirmActionPermission(runId, _lease, actionId) {
+      assertNotCancelled();
+      const pending = permissionRequests.get(actionId);
+      if (!pending) throw new Error("hosted_permission_request_unknown");
+      const result = await client.getActionPermissionCurrentControlV1({
+        organizationId: authority.organizationId, runnerId: authority.runnerId,
+        runId, actionId, attempt: { attemptId: attempt.attemptId,
+          attemptNumber: attempt.attemptNumber, epoch: attempt.epoch,
+          fencingTokenDigest: attempt.fencingTokenDigest },
+        permissionRequestId: pending.permissionRequestId,
+        permissionRequestDigest: pending.permissionRequestDigest,
+      });
+      assertNotCancelled();
+      if (result.receipt.payload.state === "authorized") {
+        await client.beginMaterialActionControlV1({ schemaVersion: 1,
+          protocolVersion: "1.0", requiredCapabilities: ["relay.material-receipt.v1"],
+          requestId: pending.materialIdempotencyKey,
+          operationId: pending.materialIdempotencyKey,
+          organizationId: authority.organizationId, runnerId: authority.runnerId,
+          runId, attempt, actionId, actionDescriptor: pending.actionDescriptor,
+          actionDescriptorDigest: pending.actionDescriptorDigest,
+          targetFingerprint: pending.targetFingerprint,
+          policySnapshotRef: authority.policySnapshotRef,
+          policySnapshotDigest: authority.policySnapshotDigest,
+          ...(pending.workspaceAttestationDigest
+            ? { workspaceAttestationDigest: pending.workspaceAttestationDigest } : {}),
+          authority: { kind: "permission_resolution",
+            permissionRequestId: pending.permissionRequestId,
+            permissionRequestDigest: pending.permissionRequestDigest,
+            resolutionReceiptId: result.receipt.receiptId,
+            resolutionReceiptDigest: result.receipt.receiptDigest,
+            ...(pending.workspaceAttestationDigest
+              ? { workspaceAttestationDigest: pending.workspaceAttestationDigest } : {}) },
+          idempotencyKey: pending.materialIdempotencyKey, begunAt: clock().toISOString() });
+      }
+      return permissionResolutionFromReceipt({ receipt: result.receipt,
+        request: pending.request });
+    },
     async recordMaterialActionReceipt(runId, _lease, actionId, receipt: MaterialActionReceipt) {
       assertNotCancelled();
       const pending = permissionRequests.get(actionId);
       if (!pending) throw new Error("hosted_material_action_permission_unknown");
+      if (receipt.targetFingerprint !== undefined
+        && receipt.targetFingerprint !== pending.targetFingerprint) {
+        throw new Error("hosted_material_action_target_mismatch");
+      }
       const observedAt = receipt.observedAt;
       const operationId = `material_${receipt.id}`;
       const payload = {
         actionId,
-        actionFamily: pending.request.operation.toLowerCase().replace(/[^a-z0-9._-]/gu, "_").slice(0, 64) || "tool",
+        actionDescriptor: pending.actionDescriptor,
+        actionDescriptorDigest: pending.actionDescriptorDigest,
+        idempotencyKey: pending.materialIdempotencyKey,
         provider: receipt.provider,
         connectionRef: receipt.connectionId ?? pending.request.connectionId,
-        targetFingerprint: receipt.targetFingerprint ?? pending.request.targetFingerprint
-          ?? await computeControlPayloadDigestV1({ resource: pending.request.resource ?? null }),
+        targetFingerprint: pending.targetFingerprint,
         operationId,
         requestDigest: pending.permissionRequestDigest,
         actionPayloadDigest: await computeControlPayloadDigestV1(receipt.metadata ?? {}),
@@ -1527,7 +2065,6 @@ export function createHostedControlLoop(input: {
   config: OpenTagDaemonConfig;
   databasePath: string;
   executors: Record<string, ExecutorAdapter>;
-  pullRequestOptions?: PullRequestOptions;
   security?: RunnerSecurityPolicy;
   githubApiOrigin?: string;
   now?: () => Date;
@@ -1561,6 +2098,7 @@ export function createHostedControlLoop(input: {
   }>();
   let inFlight: Promise<unknown> | undefined;
   let closed = false;
+  const settledProposalCandidates = new Set<string>();
   const pump = async () => {
     if (!context) return;
     await pumpHostedLifecycleOperations({
@@ -1606,6 +2144,132 @@ export function createHostedControlLoop(input: {
           throw new Error("runner_control_context_stale");
         }
         context = nextContext;
+        const proposalSettlement = await repo.getHostedProposalSettlementForRetry?.({
+          destinationId: "cloud", organizationId: context.organizationId,
+          runnerId: context.runnerId,
+        }) ?? null;
+        if (closed) return false;
+        if (proposalSettlement
+          && !settledProposalCandidates.has(proposalSettlement.candidateId)) {
+          const settled = await client.settleProposalCandidateControlV1({
+            schemaVersion: 1, protocolVersion: "1.0",
+            requiredCapabilities: ["relay.lifecycle.v1"],
+            requestId: `request_settle_${proposalSettlement.candidateId}`,
+            organizationId: context.organizationId, runnerId: context.runnerId,
+            runId: proposalSettlement.runId,
+            attempt: { attemptId: proposalSettlement.attemptId,
+              attemptNumber: proposalSettlement.attemptNumber,
+              epoch: proposalSettlement.attemptNumber,
+              fencingToken: proposalSettlement.fencingToken,
+              fencingTokenDigest: proposalSettlement.fencingTokenDigest },
+            candidateId: proposalSettlement.candidateId,
+            proposalArtifact: proposalSettlement.proposalArtifact,
+          });
+          if (settled.candidateId !== proposalSettlement.candidateId) {
+            throw new Error("proposal_settlement_identity_mismatch");
+          }
+          if (settled.status === "publication_pending") {
+            const target = context.targets.find((candidate) =>
+              candidate.projectTargetId === proposalSettlement.projectTargetId
+                && candidate.bindingDigest === proposalSettlement.targetBindingDigest);
+            const binding = target ? input.config.repositories.find((candidate) => {
+              const actual = canonicalRepositoryIdentity(candidate);
+              return actual.provider === target.provider && actual.owner === target.owner
+                && actual.repo === target.repo;
+            }) : null;
+            if (!target || !binding || proposalSettlement.branch !== `opentag/${proposalSettlement.runId}`
+              || proposalSettlement.baseRevision.length < 40
+              || proposalSettlement.finalRevision.length < 40
+              || proposalSettlement.finalTree.length < 40) {
+              throw new Error("proposal_ownership_local_authority_missing");
+            }
+            await client.attestPublicationBranchOwnershipControlV1({
+              schemaVersion: 1, protocolVersion: "1.0",
+              requiredCapabilities: ["relay.publication.v1"],
+              requestId: `request_ownership_${proposalSettlement.candidateId}`,
+              organizationId: context.organizationId, runnerId: context.runnerId,
+              runnerGeneration: proposalSettlement.runnerGeneration,
+              runId: proposalSettlement.runId, attemptId: proposalSettlement.attemptId,
+              attemptNumber: proposalSettlement.attemptNumber,
+              fencingToken: proposalSettlement.fencingToken,
+              candidateId: proposalSettlement.candidateId,
+              candidateDigest: settled.candidateDigest,
+              projectTargetId: proposalSettlement.projectTargetId,
+              targetBindingDigest: proposalSettlement.targetBindingDigest,
+              remote: binding.pushRemote, baseBranch: binding.baseBranch,
+              frozenBaseRevision: proposalSettlement.baseRevision,
+              workspaceTreeDigest: proposalSettlement.finalTree,
+              branch: proposalSettlement.branch,
+              expectedHeadSha: proposalSettlement.finalRevision,
+              attestedAt: clock().toISOString(),
+            });
+          }
+          settledProposalCandidates.add(proposalSettlement.candidateId);
+          return true;
+        }
+        const publicationDidWork = typeof client.claimNextPublicationOperationControlV1 === "function"
+          ? await runPublicationControlV1Iteration({
+          organizationId: context.organizationId,
+          runnerId: context.runnerId,
+          runnerGeneration: context.credentialGeneration,
+          now: clock,
+          client,
+          getLocalAuthority: async (capability) => {
+            const binding = publicationBinding({ capability,
+              repositories: input.config.repositories });
+            if (!binding || (capability.step === "create_draft_pull_request"
+              && !input.config.githubToken)) return null;
+            return repo.getHostedSucceededPublicationAuthority({
+              destinationId: "cloud", organizationId: capability.organizationId,
+              runnerId: capability.runnerId, runId: capability.runId,
+              attemptId: capability.attemptId,
+              fencingTokenDigest: capability.fencingTokenDigest,
+            });
+          },
+          pushOwnedBranch: async (capability) => {
+            const binding = publicationBinding({ capability,
+              repositories: input.config.repositories });
+            if (!binding || await localBranchHead({ binding, capability })
+              !== capability.expectedHeadSha) return { kind: "absent" };
+            try {
+              await pushBranch({ runner: nodeCommandRunner, workspacePath: binding.checkoutPath,
+                remote: capability.repository.remote, branchName: capability.branch });
+            } catch {
+              return { kind: "ambiguous" };
+            }
+            return observeRemoteBranch({ binding, capability });
+          },
+          createDraftPullRequest: async (capability) => {
+            if (!input.config.githubToken) return { kind: "ambiguous" };
+            return createExactDraftPullRequest({ token: input.config.githubToken,
+              owner: capability.repository.owner, repo: capability.repository.repo,
+              title: `OpenTag run ${capability.runId}`,
+              body: `Approved OpenTag publication candidate ${capability.candidateId}.`,
+              head: capability.branch, base: capability.repository.baseBranch,
+              expectedHeadSha: capability.expectedHeadSha,
+              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
+          },
+          reconcileOperation: async (capability) => {
+            const binding = publicationBinding({ capability,
+              repositories: input.config.repositories });
+            if (!binding) return { kind: "ambiguous" };
+            if (capability.step === "push_owned_branch") {
+              return observeRemoteBranch({ binding, capability });
+            }
+            if (!input.config.githubToken) return { kind: "ambiguous" };
+            return observeDraftPullRequest({ capability, token: input.config.githubToken,
+              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+              ...(input.githubApiOrigin ? { apiOrigin: input.githubApiOrigin } : {}) });
+          },
+          observeCompletion: (capability, receipt) => {
+            if (!input.config.githubToken) throw new Error("publication_github_credential_unavailable");
+            return observePublicationCompletion({ capability, receipt,
+              token: input.config.githubToken, now: clock,
+              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+              ...(input.githubApiOrigin ? { apiOrigin: input.githubApiOrigin } : {}) });
+          },
+          }) : false;
+        if (closed || publicationDidWork) return publicationDidWork;
         const preImportRecovery =
           await repo.getHostedPreImportAuthorityRecovery({
             destinationId: "cloud",
@@ -1718,7 +2382,6 @@ export function createHostedControlLoop(input: {
             keepScratch: input.config.keepScratch,
             approvalMode: input.config.approvalMode,
             ...(input.security ? { security: input.security } : {}),
-            ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
             ...(input.config.heartbeatIntervalMs ? { heartbeatIntervalMs: input.config.heartbeatIntervalMs } : {}),
             ...(input.config.runTimeoutMs ? { runTimeoutMs: input.config.runTimeoutMs } : {}),
             ...(input.config.agentSessionProfile ? { agentSessionProfile: input.config.agentSessionProfile } : {}),
@@ -1902,17 +2565,14 @@ export function createHostedControlLoop(input: {
             now: clock(),
           });
           if (closed) return false;
-          if (!input.config.githubToken) {
-            throw new Error("hosted_github_token_unavailable");
+          if (typeof client.redeemHostedSourceContentControlV1 !== "function") {
+            throw new Error("hosted_source_content_redeem_unavailable");
           }
-          const refetched = await (input.refetchGitHubIssueCommentImpl
-            ?? refetchGitHubIssueCommentForHostedAdmission)({
-            admission: claim.hostedAdmission,
-            token: input.config.githubToken,
-            ...(input.githubApiOrigin !== undefined
-              ? { apiOrigin: input.githubApiOrigin }
-              : {}),
-            ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+          const refetched = await redeemHostedClaimSourceContentV1({
+            claim,
+            client,
+            requestId: `request_redeem_${randomUUID()}`,
+            operationId: `operation_redeem_${randomUUID()}`,
             now: clock,
           });
           if (closed) return false;
@@ -2021,7 +2681,6 @@ export function createHostedControlLoop(input: {
           keepScratch: input.config.keepScratch,
           approvalMode: input.config.approvalMode,
           ...(input.security ? { security: input.security } : {}),
-          ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
           ...(input.config.heartbeatIntervalMs ? { heartbeatIntervalMs: input.config.heartbeatIntervalMs } : {}),
           ...(input.config.runTimeoutMs ? { runTimeoutMs: input.config.runTimeoutMs } : {}),
           ...(input.config.agentSessionProfile ? { agentSessionProfile: input.config.agentSessionProfile } : {}),
@@ -2029,6 +2688,9 @@ export function createHostedControlLoop(input: {
           claimed: imported.claimed,
           hostedExecutionAuthority: {
             leaseExpiresAt: claim.attempt.leaseExpiresAt,
+            credentialId: claim.authority.credentialId,
+            attemptNumber: claim.attempt.number,
+            fencingTokenDigest: claim.attempt.fencingTokenDigest,
             now: clock,
             assertCurrent: async () => {
               if (closed) return false;

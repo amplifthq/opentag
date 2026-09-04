@@ -38,6 +38,27 @@ importers:
       '@opentag/control-protocol':
         specifier: workspace:*
         version: link:../../packages/control-protocol
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@opentag/delivery-contract':
+        specifier: workspace:*
+        version: link:../../packages/delivery-contract
+      '@opentag/delivery-runtime':
+        specifier: workspace:*
+        version: link:../../packages/delivery-runtime
+      '@opentag/github':
+        specifier: workspace:*
+        version: link:../../packages/github
+      '@opentag/governance':
+        specifier: workspace:*
+        version: link:../../packages/governance
+      '@opentag/slack':
+        specifier: workspace:*
+        version: link:../../packages/slack
+      '@opentag/source-app-runtime':
+        specifier: workspace:*
+        version: link:../../packages/source-app-runtime
       '@tanstack/react-query':
         specifier: ^5.101.4
         version: 5.101.4(react@19.2.8)
@@ -425,6 +446,25 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  packages/delivery-runtime:
+    dependencies:
+      '@opentag/delivery-contract':
+        specifier: workspace:*
+        version: link:../delivery-contract
+      '@opentag/source-app-runtime':
+        specifier: workspace:*
+        version: link:../source-app-runtime
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.20.0
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.18)(tsx@4.23.1)(typescript@5.9.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
   packages/discord:
     dependencies:
       '@opentag/core':
@@ -449,6 +489,9 @@ importers:
       '@opentag/delivery-contract':
         specifier: workspace:*
         version: link:../delivery-contract
+      '@opentag/delivery-runtime':
+        specifier: workspace:*
+        version: link:../delivery-runtime
       '@opentag/github':
         specifier: workspace:*
         version: link:../github
@@ -467,6 +510,9 @@ importers:
       '@opentag/slack':
         specifier: workspace:*
         version: link:../slack
+      '@opentag/source-app-runtime':
+        specifier: workspace:*
+        version: link:../source-app-runtime
       '@opentag/store':
         specifier: workspace:*
         version: link:../store
@@ -605,6 +651,9 @@ importers:
       '@opentag/client':
         specifier: workspace:*
         version: link:../client
+      '@opentag/control-protocol':
+        specifier: workspace:*
+        version: link:../control-protocol
       '@opentag/core':
         specifier: workspace:*
         version: link:../core
@@ -685,6 +734,9 @@ importers:
       '@opentag/delivery-contract':
         specifier: workspace:*
         version: link:../delivery-contract
+      '@opentag/source-app-runtime':
+        specifier: workspace:*
+        version: link:../source-app-runtime
       hono:
         specifier: ^4.6.15
         version: 4.12.34
@@ -700,6 +752,22 @@ importers:
         version: 8.5.1(postcss@8.5.18)(tsx@4.23.1)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/source-app-runtime:
+    dependencies:
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../core
+      '@opentag/delivery-contract':
+        specifier: workspace:*
+        version: link:../delivery-contract
+    devDependencies:
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.18)(tsx@4.23.1)(typescript@5.9.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.7.2
         version: 5.9.3
 
   packages/store:
@@ -2994,6 +3062,7 @@ snapshots:
   '@types/node@26.1.2':
     dependencies:
       undici-types: 8.3.0
+    optional: true
 
   '@types/pg@8.21.0':
     dependencies:
@@ -3622,7 +3691,7 @@ snapshots:
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.2
-      '@types/node': 26.1.2
+      '@types/node': 22.20.0
       long: 5.3.2
 
   proxy-from-env@2.1.0: {}
@@ -3861,7 +3930,8 @@ snapshots:
 
   undici-types@6.21.0: {}
 
-  undici-types@8.3.0: {}
+  undici-types@8.3.0:
+    optional: true
 
   universal-github-app-jwt@2.2.2: {}
 

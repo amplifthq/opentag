@@ -10,6 +10,7 @@ import {
   MaterialActionReceiptSchema,
   HumanEscalationSchema,
   VerificationEvidenceSchema,
+  WellFormedNonEmptyStringSchema,
   capabilityForMutationIntent,
   channelProgressVisibility,
   conversationKeysFromCallback,
@@ -33,7 +34,6 @@ import {
   type OpenTagEvent,
   type OpenTagRunResult,
   type OpenTagRun,
-  type ReassessmentObligation,
   type PermissionGrant,
   type SuggestedChangesSnapshot,
   type SuggestedActionCandidate,
@@ -346,7 +346,6 @@ import { sha256Digest } from "./digest.js";
 import { createDefaultProviderPresentation, type PresentedProviderBody, type ProviderPresentation, type LarkRenderLocale } from "./presentation.js";
 import {
   createDispatcherCompletionGovernance,
-  currentWorkThreadRun,
   type GitHubCompletionPolicy,
   type GitHubDefaultCompletionMode
 } from "./completion-governance.js";
@@ -424,10 +423,6 @@ function linearAccessTokenExpiresAt(input: { token: LinearOAuthTokenResponse; no
   return typeof input.token.expiresIn === "number" && Number.isFinite(input.token.expiresIn)
     ? new Date(input.now.getTime() + input.token.expiresIn * 1000).toISOString()
     : undefined;
-}
-
-function isTerminalRun(run: OpenTagRun): boolean {
-  return ["succeeded", "failed", "cancelled", "interrupted", "timed_out"].includes(run.status);
 }
 
 function safeExecutorLabel(executor: string | undefined): string {
@@ -707,7 +702,7 @@ const RecordControlPlaneEventSchema = z.object({
 
 const GitHubCompletionEvidenceSchema = z.object({
   provider: z.literal("github"),
-  deliveryId: z.string().min(1).max(256),
+  deliveryId: WellFormedNonEmptyStringSchema.max(256),
   eventName: z.enum(["pull_request", "check_run", "check_suite", "status"]),
   repository: z.object({ owner: z.string().min(1), repo: z.string().min(1) }).strict(),
   pullRequest: z.object({
@@ -733,7 +728,7 @@ const CompletionWaiverInputSchema = z.object({
   reason: z.string().min(1).max(2_000),
   scope: z.literal("selected_gates"),
   policyScope: PolicyScopeSchema,
-  gateIds: z.array(z.string().min(1)).min(1).max(50),
+  gateIds: z.array(WellFormedNonEmptyStringSchema).min(1).max(50),
   waivedAt: z.string().datetime(),
   expiresAt: z.string().datetime().optional()
 }).strict();
@@ -985,10 +980,6 @@ function mappingsForAdapterPlan(adapterPlan: unknown, defaults: AdapterMutationM
   if (planMappings.length === 0) return defaults;
   const planMappingIds = new Set(planMappings.map((mapping) => mapping.id));
   return [...planMappings, ...defaults.filter((mapping) => !planMappingIds.has(mapping.id))];
-}
-
-function conversationKeyFromCallback(input: { provider: string; uri: string; threadKey?: string | undefined }): string {
-  return `${input.provider}:${input.threadKey ?? input.uri}`;
 }
 
 function metadataIssueNumber(metadata: Record<string, unknown> | undefined): string | undefined {

@@ -30,6 +30,7 @@ import {
   relayUrlFromConfig,
   runnerDispatcherToken,
   runtimeModeFromConfig,
+  runtimeModeProfileFromConfig,
   writeCliConfigAtomic,
   writeHostedControlConfigAtomic,
   type CliConfigFilesystemOps,
@@ -581,7 +582,7 @@ describe("OpenTag CLI config", () => {
     expect(() => writeHostedControlConfigAtomic(path, hostedPatch(), filesystem))
       .toThrow(CliConfigWriteOutcomeUnknownError);
     expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({
-      runtime: { mode: "relay", relayUrl: "https://control.example" },
+      runtime: { mode: "paired_relay", relayUrl: "https://control.example" },
       daemon: {
         dispatcherUrl: "https://control.example",
         controlRegistration: { operationId: "operation_transaction_test" }
@@ -962,7 +963,7 @@ describe("OpenTag CLI config", () => {
     const parsed = parseCliConfig({
       ...source,
       runtime: {
-        mode: "relay",
+        mode: "paired_relay",
         relayUrl: "https://example.up.railway.app",
         relayProvider: "railway"
       },
@@ -972,10 +973,81 @@ describe("OpenTag CLI config", () => {
       }
     });
 
-    expect(runtimeModeFromConfig(parsed)).toBe("relay");
+    expect(runtimeModeFromConfig(parsed)).toBe("paired_relay");
     expect(relayUrlFromConfig(parsed)).toBe("https://example.up.railway.app");
     expect(parsed.daemon.runnerId).toBe(source.daemon.runnerId);
     expect(parsed.daemon.repositories).toEqual(source.daemon.repositories);
+  });
+
+  it("normalizes schemaVersion-1 legacy runtime names into canonical modes", () => {
+    const source = config();
+    const local = parseCliConfig({ ...source, runtime: { mode: "local" } });
+    const relay = parseCliConfig({
+      ...source,
+      runtime: { mode: "relay", relayUrl: "https://relay.example" },
+      daemon: { ...source.daemon, dispatcherUrl: "https://relay.example" }
+    });
+
+    expect(local.runtime).toEqual({ mode: "local_direct" });
+    expect(relay.runtime).toEqual({ mode: "paired_relay", relayUrl: "https://relay.example" });
+  });
+
+  it("derives truthful runtime profiles without claiming offline safety", () => {
+    const local = config();
+    expect(runtimeModeProfileFromConfig(local)).toEqual({
+      offlineSafe: false,
+      executionLocality: "local"
+    });
+    const relay = parseCliConfig({
+      ...local,
+      runtime: { mode: "paired_relay", relayUrl: "https://relay.example" },
+      daemon: { ...local.daemon, dispatcherUrl: "https://relay.example" }
+    });
+    expect(runtimeModeProfileFromConfig(relay)).toEqual({
+      offlineSafe: false,
+      executionLocality: "paired_runner"
+    });
+  });
+
+  it.each([
+    "http://127.0.0.1:3030",
+    "http://localhost:3030",
+    "http://0.0.0.0:3030",
+    "http://[::]:3030",
+    "http://[::1]:3030"
+  ])("rejects paired_relay on a local-process relay before secret resolution: %s", (relayUrl) => {
+    const source = config() as unknown as Record<string, unknown>;
+    const daemon = source.daemon as Record<string, unknown>;
+    daemon.pairingToken = { kind: "file", path: "/definitely/not-read/private-relay-token" };
+    daemon.dispatcherUrl = relayUrl;
+    source.runtime = { mode: "paired_relay", relayUrl };
+    expect(() => parseCliConfig(source)).toThrow("requires a distinct relay process");
+  });
+
+  it.each(["https://10.0.0.4", "https://172.16.1.2", "https://192.168.1.2", "https://[fd00::1]"])(
+    "allows a separately hosted private-network relay but does not certify it: %s",
+    (relayUrl) => {
+      const source = config();
+      source.runtime = { mode: "paired_relay", relayUrl };
+      source.daemon.dispatcherUrl = relayUrl;
+      expect(runtimeModeProfileFromConfig(parseCliConfig(source))).toEqual({
+        offlineSafe: false,
+        executionLocality: "paired_runner"
+      });
+    }
+  );
+
+  it("rejects a paired relay origin equal to the explicitly declared local process endpoint", () => {
+    const source = config();
+    expect(() => parseCliConfig({
+      ...source,
+      runtime: {
+        mode: "paired_relay",
+        relayUrl: "https://relay.example",
+        localProcessEndpoint: "https://relay.example/local-runner"
+      },
+      daemon: { ...source.daemon, dispatcherUrl: "https://relay.example" }
+    })).toThrow("must not equal runtime.localProcessEndpoint");
   });
 
   it("treats legacy configs without runtime as local mode", () => {
@@ -985,7 +1057,7 @@ describe("OpenTag CLI config", () => {
       runtime: undefined
     });
 
-    expect(runtimeModeFromConfig(parsed)).toBe("local");
+    expect(runtimeModeFromConfig(parsed)).toBe("local_direct");
     expect(relayUrlFromConfig(parsed)).toBeUndefined();
   });
 
@@ -997,7 +1069,7 @@ describe("OpenTag CLI config", () => {
 
   it("accepts a paired Hosted Control V1 relay and uses only its runner credential", () => {
     const source = config();
-    source.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    source.runtime = { mode: "paired_relay", relayUrl: "https://relay.example", relayProvider: "custom" };
     source.daemon.dispatcherUrl = "https://relay.example";
     source.daemon.runnerToken = "runtime_runner_token";
     source.daemon.trustedRelay = hostedTrust();
@@ -1033,9 +1105,9 @@ describe("OpenTag CLI config", () => {
       reason: "pending"
     };
     source.daemon.trustedRelay = hostedTrust("http://localhost:3030");
-    expect(() => parseCliConfig(source)).toThrow("runtime.mode=relay");
+    expect(() => parseCliConfig(source)).toThrow("runtime.mode=paired_relay");
 
-    source.runtime = { mode: "relay", relayUrl: "https://other.example", relayProvider: "custom" };
+    source.runtime = { mode: "paired_relay", relayUrl: "https://other.example", relayProvider: "custom" };
     source.daemon.dispatcherUrl = "https://relay.example";
     source.daemon.trustedRelay = hostedTrust();
     expect(() => parseCliConfig(source)).toThrow("relay origin does not match dispatcher origin");
@@ -1044,7 +1116,7 @@ describe("OpenTag CLI config", () => {
   it("fails closed on hosted trust before resolving SecretRefs", () => {
     const source = config() as unknown as Record<string, unknown>;
     const daemon = source.daemon as Record<string, unknown>;
-    source.runtime = { mode: "relay", relayUrl: "https://relay.example" };
+    source.runtime = { mode: "paired_relay", relayUrl: "https://relay.example" };
     daemon.dispatcherUrl = "https://relay.example";
     daemon.runnerToken = { kind: "file", path: "/definitely/not/read/hosted-token" };
     delete daemon.pairingToken;
@@ -1094,7 +1166,7 @@ describe("OpenTag CLI config", () => {
     ["userinfo", "https://user@relay.example", "https://relay.example"]
   ])("enforces hosted relay origin: %s", (_name, dispatcherUrl, trustedOrigin) => {
     const source = config();
-    source.runtime = { mode: "relay", relayUrl: dispatcherUrl };
+    source.runtime = { mode: "paired_relay", relayUrl: dispatcherUrl };
     source.daemon.dispatcherUrl = dispatcherUrl;
     source.daemon.runnerToken = "runtime_runner_token";
     source.daemon.trustedRelay = hostedTrust(trustedOrigin);

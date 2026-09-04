@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createSlackDeliveryAdapter, createSlackEventProcessor } from '@opentag/slack';
+import { createSlackEventProcessor, createSlackSourceApp } from '@opentag/slack';
+import { SourceAppRegistry } from '@opentag/source-app-runtime';
 import { bootstrapDeliveryJournal, createDeliveryKernelRepository, createEncryptedFileDeliveryPayloadCustody, createSlackInstallationRegistry, type DeliveryPayloadCustody } from '@opentag/store';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -12,7 +13,7 @@ import { createSlackLifecycleComposition, createSlackSelfServiceAuthorityResolve
 
 const digest = (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
 const stable = digest('stable');
-const owner = { providerId: 'slack', providerInstanceId: 'install-1', providerBindingDigest: stable,
+const owner = { organizationId: 'org_test', providerId: 'slack', providerInstanceId: 'install-1', providerBindingDigest: stable,
   providerConfigGeneration: 7, providerConfigGenerationDigest: stable, runtimeOwnerId: 'runtime-1',
   runtimeGeneration: 3, schemaGeneration: 1 } as const;
 const authority = () => ({ providerBinding: {
@@ -50,21 +51,109 @@ function open(path: string, requests: Array<{ method: string; body: Record<strin
   const database = drizzle(sqlite);
   const payloadCustody = path === ':memory:' ? createTestPayloadCustody() :
     createEncryptedFileDeliveryPayloadCustody({ directory: `${path}.payloads`, trustedBoundary: dirname(path), key: Buffer.alloc(32, 9) });
-  const repository = createDeliveryKernelRepository({ database, payloadCustody, owner: expectedOwner, leaseOwner: 'worker', leaseSeconds: 30 });
+  const repository = createDeliveryKernelRepository({ database, payloadCustody, owner: expectedOwner,
+    leaseOwner: 'worker', leaseSeconds: 30, now: () => new Date('2026-04-09T00:00:01.000Z') });
+  const sourceApps = new SourceAppRegistry().register(createSlackSourceApp({ installation: {
+    organizationId: expectedOwner.organizationId,
+    appInstanceId: expectedOwner.providerInstanceId, bindingDigest: expectedOwner.providerBindingDigest,
+    credentialGeneration: 7, credentialGenerationDigest: stable }, signingSecret: 'test-signing',
+    botUserId: 'stable', resolveCredential: async () => 'test-token', fetchImpl: async (url, init) => {
+      const method = String(url).split('/').at(-1)!; const body = JSON.parse(String(init?.body));
+      requests.push({ method, body }); return Response.json({ ok: true, ts: body.ts ?? '171.002' });
+    } }));
   const composition = createSlackLifecycleComposition({
     repository: lookupOverride ? { ...repository, findAcceptedExternalResource: (input) => lookupOverride.current ?? repository.findAcceptedExternalResource(input) } : repository,
-    resolveAuthority,
-    adapter: createSlackDeliveryAdapter({ providerInstanceId: expectedOwner.providerInstanceId, bindingDigest: expectedOwner.providerBindingDigest,
-      providerPrincipalDigest: stable, providerConfigGeneration: 7, providerConfigGenerationDigest: stable,
-      resolveCredential: async () => 'test-token', fetchImpl: async (url, init) => {
-        const method = String(url).split('/').at(-1)!; const body = JSON.parse(String(init?.body));
-        requests.push({ method, body }); return Response.json({ ok: true, ts: body.ts ?? '171.002' });
-      } }),
+    resolveAuthority, sourceApps, deliveryOwner: expectedOwner,
   });
   return { sqlite, composition };
 }
 
 describe('Slack lifecycle composition', () => {
+  it('derives durable IDs across tenant and binding authority without collisions', async () => {
+    const presentation = { kind: 'business', runId: 'run-identity', phase: 'acknowledgement',
+      provider: 'slack', uri: 'ignored', body: 'started', threadKey: 'T1|C1|170.001',
+      statusMessageKey: 'run-identity:status' } as const;
+    const identities: Array<{ intent_id: string; idempotency_key: string }> = [];
+    for (const [organizationId, binding] of [['org_a', stable], ['org_b', stable],
+      ['org_a', digest('binding-other')]] as const) {
+      const selectedOwner = { ...owner, organizationId, providerBindingDigest: binding };
+      const selectedAuthority = async () => ({ ...authority(), providerBinding: {
+        ...authority().providerBinding, bindingDigest: binding } });
+      const runtime = open(':memory:', [], selectedAuthority, selectedOwner);
+      await runtime.composition.producer.enqueue(presentation);
+      identities.push(runtime.sqlite.prepare(
+        'SELECT intent_id,idempotency_key FROM delivery_attempts').get() as typeof identities[number]);
+      runtime.sqlite.close();
+    }
+    expect(new Set(identities.map((value) => value.intent_id)).size).toBe(3);
+    expect(new Set(identities.map((value) => value.idempotency_key)).size).toBe(3);
+  });
+
+  it('binds authority snapshot identity into both durable ID domains', async () => {
+    const presentation = { kind: 'business', runId: 'run-identity', phase: 'acknowledgement',
+      provider: 'slack', uri: 'ignored', body: 'started', threadKey: 'T1|C1|170.001',
+      statusMessageKey: 'run-identity:status' } as const;
+    const identities: Array<{ intent_id: string; idempotency_key: string }> = [];
+    for (const authoritySnapshotIdentity of ['authority-v1', 'authority-v2']) {
+      const runtime = open(':memory:', [], async () => ({ ...authority(), authoritySnapshotIdentity }));
+      await runtime.composition.producer.enqueue(presentation);
+      identities.push(runtime.sqlite.prepare(
+        'SELECT intent_id,idempotency_key FROM delivery_attempts').get() as typeof identities[number]);
+      runtime.sqlite.close();
+    }
+    expect(new Set(identities.map((value) => value.intent_id)).size).toBe(2);
+    expect(new Set(identities.map((value) => value.idempotency_key)).size).toBe(2);
+  });
+
+  it('changes both durable IDs for every persisted authority descriptor field and replays exactly', async () => {
+    const basePresentation = { kind: 'business', runId: 'run-identity', phase: 'acknowledgement',
+      provider: 'slack', uri: 'ignored', body: 'started', threadKey: 'T1|C1|170.001',
+      statusMessageKey: 'run-identity:status' } as const;
+    const derive = async (caseName: string, selectedOwner = owner,
+      selectedAuthority = authority(), presentation: typeof basePresentation = basePresentation) => {
+      const runtime = open(':memory:', [], async () => selectedAuthority, selectedOwner);
+      await runtime.composition.producer.enqueue(presentation);
+      const value = runtime.sqlite.prepare('SELECT intent_id,idempotency_key FROM delivery_attempts')
+        .get() as { intent_id: string; idempotency_key: string };
+      runtime.sqlite.close();
+      return [caseName, value] as const;
+    };
+    const base = await derive('base');
+    expect(await derive('exact-replay')).toEqual(['exact-replay', base[1]]);
+    expect(base[1].intent_id.replace(/^intent_/u, ''))
+      .not.toBe(base[1].idempotency_key.replace(/^delivery_/u, ''));
+    const cases = await Promise.all([
+      derive('organization', { ...owner, organizationId: 'org_other' }),
+      derive('provider-instance', { ...owner, providerInstanceId: 'install-2' },
+        { ...authority(), providerBinding: { ...authority().providerBinding, providerInstanceId: 'install-2' } }),
+      derive('binding', { ...owner, providerBindingDigest: digest('binding-2') },
+        { ...authority(), providerBinding: { ...authority().providerBinding, bindingDigest: digest('binding-2') } }),
+      derive('principal', owner, { ...authority(), providerBinding: {
+        ...authority().providerBinding, providerPrincipalDigest: digest('principal-2') } }),
+      derive('config-generation', { ...owner, providerConfigGeneration: 8 }, { ...authority(), providerBinding: {
+        ...authority().providerBinding, providerConfigGeneration: 8 } }),
+      derive('config-digest', { ...owner, providerConfigGenerationDigest: digest('config-2') },
+        { ...authority(), providerBinding: { ...authority().providerBinding,
+          providerConfigGenerationDigest: digest('config-2') } }),
+      derive('scope', owner, { ...authority(), provenance: { ...authority().provenance,
+        scopeId: 'repo-2' } }),
+      derive('target', owner, authority(), { ...basePresentation, threadKey: 'T1|C2|170.002' }),
+      derive('status', owner, authority(), { ...basePresentation, statusMessageKey: 'run-identity:other' }),
+      derive('repository', owner, { ...authority(), provenance: { ...authority().provenance,
+        repositoryIdentity: 'github:acme/other' } }),
+      derive('authority-lineage', owner, { ...authority(), provenance: { ...authority().provenance,
+        authorityLineageIdentity: 'run-authority-2' } }),
+      derive('authority-snapshot', owner, { ...authority(), authoritySnapshotIdentity: 'authority-2' }),
+      derive('runtime-owner', { ...owner, runtimeOwnerId: 'runtime-2' }),
+      derive('runtime-generation', { ...owner, runtimeGeneration: 4 }),
+      derive('schema-generation', { ...owner, schemaGeneration: 2 }),
+    ]);
+    for (const [caseName, value] of cases) {
+      expect(value.intent_id, caseName).not.toBe(base[1].intent_id);
+      expect(value.idempotency_key, caseName).not.toBe(base[1].idempotency_key);
+    }
+  });
+
   it('authorizes self-service only through exact installation team, app, and channel scope', async () => {
     const registry = createSlackInstallationRegistry([{ recordVersion: 1, installationId: 'installation-record-1', teamId: 'T1', appId: 'A1', channelIds: ['C1'],
       providerInstanceId: 'provider-instance-1', bindingDigest: stable, principalDigest: stable, principalAssurance: 'provider_verified', lifecycle: 'active',

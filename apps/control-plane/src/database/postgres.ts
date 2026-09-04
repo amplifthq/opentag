@@ -22,13 +22,14 @@ export function createPoolConfig(input: PostgresPoolInput): PoolConfig {
   };
 }
 
-type TransactionClient = {
+export type PostgresTransactionClient = {
   query<Row extends QueryResultRow = QueryResultRow>(
     text: string,
     values?: readonly unknown[],
   ): Promise<Pick<QueryResult<Row>, "rowCount" | "rows">>;
-  release(): void;
 };
+
+type TransactionClient = PostgresTransactionClient & { release(): void };
 
 type TransactionPool = {
   connect(): Promise<TransactionClient>;
@@ -36,7 +37,7 @@ type TransactionPool = {
 
 export async function withPostgresTransaction<T>(
   pool: TransactionPool,
-  operation: (client: TransactionClient) => Promise<T>,
+  operation: (client: PostgresTransactionClient) => Promise<T>,
 ): Promise<T> {
   const client = await pool.connect();
   try {

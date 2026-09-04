@@ -64,6 +64,14 @@ const RawConfigSchema = z
     OPENTAG_PUBLIC_URL: z.string().min(1),
     OPENTAG_DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
     OPENTAG_RELEASE_SHA: ReleaseShaSchema.default("local"),
+    OPENTAG_RELAY_CONTENT_KEK_FILE: z.preprocess(
+      (value) => value === "" ? undefined : value,
+      z.string().min(1).max(4096).refine((value) => value === value.trim()).optional(),
+    ),
+    OPENTAG_RELAY_CONTENT_KEY_VERSION: z.preprocess(
+      (value) => value === "" ? undefined : value,
+      z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u).optional(),
+    ),
   })
   .passthrough();
 
@@ -92,6 +100,7 @@ export type ControlPlaneConfig = {
   publicOrigin: string;
   recoveryPairingToken: string | null;
   releaseSha: "local" | string;
+  relayContentKey?: { file: string; keyVersion: string } | null;
 };
 
 const AdminBootstrapConfigSchema = z
@@ -111,6 +120,129 @@ const AdminBootstrapConfigSchema = z
       .max(1024),
   })
   .passthrough();
+
+const SlackBootstrapIdentifierSchema = z.string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+const SlackBootstrapSecretReferenceSchema = z.string()
+  .regex(/^file:\/run\/secrets\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u);
+const SlackBootstrapConfigSchema = z.object({
+  OPENTAG_SLACK_INSTALLATION_ID: SlackBootstrapIdentifierSchema,
+  OPENTAG_SLACK_BINDING_ID: SlackBootstrapIdentifierSchema,
+  OPENTAG_SLACK_ROUTE_IDENTITY: SlackBootstrapIdentifierSchema.min(16),
+  OPENTAG_SLACK_PROJECT_TARGET_ID: SlackBootstrapIdentifierSchema,
+  OPENTAG_SLACK_PUBLICATION_MODE: z.enum(["proposal_only", "pull_request"])
+    .default("proposal_only"),
+  OPENTAG_SLACK_TEAM_ID: SlackBootstrapIdentifierSchema,
+  OPENTAG_SLACK_APP_ID: SlackBootstrapIdentifierSchema,
+  OPENTAG_SLACK_CHANNEL_ID: SlackBootstrapIdentifierSchema,
+  OPENTAG_SLACK_BOT_USER_ID: SlackBootstrapIdentifierSchema,
+  OPENTAG_SLACK_MEMBER_USER_IDS: z.string().min(1).max(4096),
+  OPENTAG_SLACK_OPERATOR_USER_IDS: z.string().max(4096).default(""),
+  OPENTAG_SLACK_APPROVER_USER_ID: z.preprocess(
+    (value) => value === "" ? undefined : value,
+    SlackBootstrapIdentifierSchema.optional(),
+  ),
+  OPENTAG_SLACK_ADMIN_USER_IDS: z.string().max(4096).default(""),
+  OPENTAG_SLACK_SIGNING_SECRET_REF: SlackBootstrapSecretReferenceSchema
+    .default("file:/run/secrets/opentag_slack_signing_secret"),
+  OPENTAG_SLACK_BOT_TOKEN_REF: SlackBootstrapSecretReferenceSchema
+    .default("file:/run/secrets/opentag_slack_bot_token"),
+}).passthrough();
+
+export type SlackBootstrapConfig = {
+  installationId: string;
+  bindingId: string;
+  routeIdentity: string;
+  projectTargetId: string;
+  publicationMode: "proposal_only" | "pull_request";
+  teamId: string;
+  appId: string;
+  channelId: string;
+  botUserId: string;
+  memberUserIds: string[];
+  operatorUserIds: string[];
+  approverUserId: string | null;
+  adminUserIds: string[];
+  signingSecretRef: string;
+  botTokenRef: string;
+};
+
+function parseSlackUserIds(value: string, required: boolean): string[] {
+  if (value === "") {
+    if (required) throw new Error("Slack member identities are required");
+    return [];
+  }
+  const values = value.split(",");
+  if (values.some((candidate) => candidate !== candidate.trim()
+    || candidate.startsWith(PLACEHOLDER_SECRET_PREFIX)
+    || !SlackBootstrapIdentifierSchema.safeParse(candidate).success)) {
+    throw new Error("Slack user identity list is invalid");
+  }
+  if (new Set(values).size !== values.length) {
+    throw new Error("Slack user identity list contains duplicates");
+  }
+  return values.sort();
+}
+
+export function parseSlackBootstrapConfig(
+  input: Record<string, string | undefined>,
+): SlackBootstrapConfig {
+  try {
+    if (input.OPENTAG_SLACK_SIGNING_SECRET !== undefined
+      || input.OPENTAG_SLACK_BOT_TOKEN !== undefined) {
+      throw new Error("inline Slack secrets are forbidden");
+    }
+    const parsed = SlackBootstrapConfigSchema.parse(input);
+    const memberUserIds = parseSlackUserIds(parsed.OPENTAG_SLACK_MEMBER_USER_IDS, true);
+    const operatorUserIds = parseSlackUserIds(parsed.OPENTAG_SLACK_OPERATOR_USER_IDS, false);
+    const adminUserIds = parseSlackUserIds(parsed.OPENTAG_SLACK_ADMIN_USER_IDS, false);
+    const approverUserId = parsed.OPENTAG_SLACK_APPROVER_USER_ID ?? null;
+    const members = new Set(memberUserIds);
+    if (!operatorUserIds.every((id) => members.has(id))
+      || !adminUserIds.every((id) => members.has(id))
+      || (approverUserId !== null && !members.has(approverUserId))
+      || (parsed.OPENTAG_SLACK_PUBLICATION_MODE === "pull_request"
+        && approverUserId === null)) {
+      throw new Error("Slack role assignment is invalid");
+    }
+    for (const value of [
+      parsed.OPENTAG_SLACK_INSTALLATION_ID,
+      parsed.OPENTAG_SLACK_BINDING_ID,
+      parsed.OPENTAG_SLACK_ROUTE_IDENTITY,
+      parsed.OPENTAG_SLACK_PROJECT_TARGET_ID,
+      parsed.OPENTAG_SLACK_TEAM_ID,
+      parsed.OPENTAG_SLACK_APP_ID,
+      parsed.OPENTAG_SLACK_CHANNEL_ID,
+      parsed.OPENTAG_SLACK_BOT_USER_ID,
+      ...(approverUserId ? [approverUserId] : []),
+    ]) {
+      if (value.startsWith(PLACEHOLDER_SECRET_PREFIX)) {
+        throw new Error("example placeholder Slack configuration must be replaced");
+      }
+    }
+    return {
+      installationId: parsed.OPENTAG_SLACK_INSTALLATION_ID,
+      bindingId: parsed.OPENTAG_SLACK_BINDING_ID,
+      routeIdentity: parsed.OPENTAG_SLACK_ROUTE_IDENTITY,
+      projectTargetId: parsed.OPENTAG_SLACK_PROJECT_TARGET_ID,
+      publicationMode: parsed.OPENTAG_SLACK_PUBLICATION_MODE,
+      teamId: parsed.OPENTAG_SLACK_TEAM_ID,
+      appId: parsed.OPENTAG_SLACK_APP_ID,
+      channelId: parsed.OPENTAG_SLACK_CHANNEL_ID,
+      botUserId: parsed.OPENTAG_SLACK_BOT_USER_ID,
+      memberUserIds,
+      operatorUserIds,
+      approverUserId,
+      adminUserIds,
+      signingSecretRef: parsed.OPENTAG_SLACK_SIGNING_SECRET_REF,
+      botTokenRef: parsed.OPENTAG_SLACK_BOT_TOKEN_REF,
+    };
+  } catch {
+    throw new Error("configuration_invalid");
+  }
+}
 
 export function parseAdminBootstrapConfig(
   input: Record<string, string | undefined>,
@@ -170,6 +302,9 @@ export function parseControlPlaneConfig(
   input: Record<string, string | undefined>,
 ): ControlPlaneConfig {
   try {
+    if (input.OPENTAG_RELAY_CONTENT_KEK !== undefined) {
+      throw new Error("inline relay content KEK is forbidden");
+    }
     const parsed = RawConfigSchema.parse(input);
     for (const secret of [
       parsed.OPENTAG_BOOTSTRAP_PAIRING_TOKEN,
@@ -177,6 +312,7 @@ export function parseControlPlaneConfig(
       parsed.OPENTAG_FENCING_TOKEN_SECRET,
       parsed.OPENTAG_LOGIN_THROTTLE_SECRET,
       parsed.OPENTAG_GITHUB_INGRESS_MASTER_SECRET,
+      parsed.OPENTAG_RELAY_CONTENT_KEK_FILE,
     ]) {
       if (secret?.startsWith(PLACEHOLDER_SECRET_PREFIX)) {
         throw new Error("example placeholder secrets must be replaced");
@@ -184,6 +320,12 @@ export function parseControlPlaneConfig(
     }
     if (parsed.OPENTAG_ENVIRONMENT !== "local" && parsed.OPENTAG_RELEASE_SHA === "local") {
       throw new Error("non-local deployments require an immutable release identity");
+    }
+    if (
+      (parsed.OPENTAG_RELAY_CONTENT_KEK_FILE === undefined)
+      !== (parsed.OPENTAG_RELAY_CONTENT_KEY_VERSION === undefined)
+    ) {
+      throw new Error("relay content key reference is incomplete");
     }
     if (
       parsed.OPENTAG_RECOVERY_PAIRING_TOKEN !== undefined
@@ -259,6 +401,13 @@ export function parseControlPlaneConfig(
         parsed.OPENTAG_ENVIRONMENT,
       ),
       recoveryPairingToken: parsed.OPENTAG_RECOVERY_PAIRING_TOKEN ?? null,
+      relayContentKey: parsed.OPENTAG_RELAY_CONTENT_KEK_FILE
+        && parsed.OPENTAG_RELAY_CONTENT_KEY_VERSION
+        ? {
+            file: parsed.OPENTAG_RELAY_CONTENT_KEK_FILE,
+            keyVersion: parsed.OPENTAG_RELAY_CONTENT_KEY_VERSION,
+          }
+        : null,
       releaseSha: parsed.OPENTAG_RELEASE_SHA,
     };
   } catch {

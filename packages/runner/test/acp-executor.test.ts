@@ -254,6 +254,32 @@ describe("ACP executor", () => {
     expect(prompt.text).not.toContain("Read the selected repository");
   }, 15_000);
 
+  it("produces proposal evidence in canonical Unicode code-point order", async () => {
+    const repo = initRepo();
+    const executor = createAcpExecutor({ manifest: manifest("unicode-order") });
+    const result = await executor.run({
+      ...input({ kind: "repository", path: repo }, "run_unicode_order"),
+      attemptId: "attempt_unicode_order",
+      attemptAuthority: {
+        attemptNumber: 1,
+        fencingTokenDigest: `sha256:${"a".repeat(64)}`,
+        credentialId: "credential_unicode_order",
+        leaseExpiresAt: "2099-01-01T00:00:00.000Z",
+      },
+    }, { emit: async () => undefined });
+
+    const proposal = result.artifacts?.find((artifact) => artifact.id.endsWith(":proposal-evidence"));
+    expect((proposal?.metadata?.proposalEvidence as { changedFiles?: string[] } | undefined)?.changedFiles).toEqual([
+      "B.ts",
+      "a.ts",
+      "acp-output.txt",
+      "acp-prompt.json",
+      "acp-session.json",
+      "é.ts",
+      "😀.ts",
+    ]);
+  }, 15_000);
+
   it.skipIf(process.platform === "win32")("does not signal a foreign process group after the ACP child exits", async () => {
     const scratch = tempDir("foreign-process-group");
     const executor = createAcpExecutor({ manifest: manifest(), cancelGraceMs: 100 });
@@ -344,6 +370,7 @@ describe("ACP executor", () => {
   it("pauses on the governed resolver and records an unverified ACP material outcome as unknown", async () => {
     const scratch = tempDir("governed");
     const reports: Array<{ actionId: string; outcome: string; receiptRef: string }> = [];
+    let confirmations = 0;
     const executor = createAcpExecutor({ manifest: manifest("permission") });
 
     await executor.run({
@@ -356,7 +383,8 @@ describe("ACP executor", () => {
           targetFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u)
         });
         expect(JSON.stringify(request)).not.toContain("fixture-secret-token");
-        return { actionId: "action_publish", decision: "allow_once", material: true };
+        return { actionId: "action_publish", decision: "allow_once", material: true,
+          confirmMaterialAuthorization: async () => { confirmations += 1; return true; } };
       },
       materialActionReporter: async (report) => void reports.push(report)
     }, { emit: async () => undefined });
@@ -367,6 +395,7 @@ describe("ACP executor", () => {
     expect(reports).toEqual([
       expect.objectContaining({ actionId: "action_publish", outcome: "unknown", receiptRef: expect.stringContaining("material-1") })
     ]);
+    expect(confirmations).toBe(1);
   }, 15_000);
 
   it("removes credential values from ACP target identity while retaining structured resource changes", async () => {

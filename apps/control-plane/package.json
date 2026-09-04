@@ -20,6 +20,13 @@
   "dependencies": {
     "@hono/node-server": "^2.0.11",
     "@opentag/control-protocol": "workspace:*",
+    "@opentag/core": "workspace:*",
+    "@opentag/delivery-contract": "workspace:*",
+    "@opentag/delivery-runtime": "workspace:*",
+    "@opentag/github": "workspace:*",
+    "@opentag/governance": "workspace:*",
+    "@opentag/source-app-runtime": "workspace:*",
+    "@opentag/slack": "workspace:*",
     "@tanstack/react-query": "^5.101.4",
     "@tanstack/react-router": "^1.170.29",
     "drizzle-orm": "^0.45.2",

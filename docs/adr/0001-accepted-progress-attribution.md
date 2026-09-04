@@ -1,10 +1,16 @@
 # ADR 0001: Attribute accepted progress from completion evidence
 
-- Status: Accepted
+- Status: Accepted; current team-relay scope note added 2026-09-02
 - Date: 2026-08-04
 - Decision owners: OpenTag maintainers
 
 ## Context
+
+This ADR remains about completion attribution, not provider delivery. In the
+current self-hosted `paired_relay` profile, a Slack projection or provider
+receipt cannot create accepted progress, settle a Run, or substitute for the
+gate-to-artifact-to-Run provenance defined below. A delivery observation that
+cannot be reconciled remains `outcome_unknown`; it is not retried blindly.
 
 OpenTag keeps execution outcome separate from accepted work completion. A Run
 and its fenced Attempts describe what executed and what it cost. A

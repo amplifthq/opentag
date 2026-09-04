@@ -61,12 +61,11 @@ function githubRelayConfig() {
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false,
       port: 3050
     }
   });
   built.runtime = {
-    mode: "relay",
+    mode: "paired_relay",
     relayUrl: "https://relay.example",
     relayProvider: "custom"
   };
@@ -91,7 +90,7 @@ function gitlabRelayConfig() {
     }
   });
   built.runtime = {
-    mode: "relay",
+    mode: "paired_relay",
     relayUrl: "https://relay.example",
     relayProvider: "custom"
   };
@@ -114,7 +113,7 @@ function linearRelayConfig() {
     }
   });
   built.runtime = {
-    mode: "relay",
+    mode: "paired_relay",
     relayUrl: "https://relay.example",
     relayProvider: "custom"
   };
@@ -137,7 +136,7 @@ function discordWebhookRelayConfig() {
     }
   });
   built.runtime = {
-    mode: "relay",
+    mode: "paired_relay",
     relayUrl: "https://relay.example",
     relayProvider: "custom"
   };
@@ -475,7 +474,7 @@ function completionStatusFetch(input: {
 describe("OpenTag CLI status", () => {
   it("rejects invalid hosted auth before any status fetch", async () => {
     const configured = config();
-    configured.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    configured.runtime = { mode: "paired_relay", relayUrl: "https://relay.example", relayProvider: "custom" };
     configured.daemon.dispatcherUrl = "https://relay.example";
     configured.daemon.controlRegistration = {
       kind: "hosted_control_v1",
@@ -536,7 +535,7 @@ describe("OpenTag CLI status", () => {
   it("uses only the runtime runner credential for Hosted Control run status reads", async () => {
     const configured = config();
     configured.runtime = {
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "https://relay.example",
       relayProvider: "custom"
     };
@@ -677,6 +676,15 @@ describe("OpenTag CLI status", () => {
     const formatted = formatStatus(summary);
     expect(summary.dispatcher).toBe("offline");
     expect(formatted).toContain("Dispatcher: offline");
+    expect(formatted).toContain("Runtime: local_direct");
+    expect(formatted).toContain("Mode Profile: offlineSafe=false; executionLocality=local");
+    expect(formatted).toContain("Relay deployment identity: unknown");
+    expect(formatted).toContain("Runner readiness: unknown");
+    expect(formatted).toContain("ACP executor/harness: declared:echo; harness=unverified");
+    expect(formatted).toContain("Queue deadline policy: disabled");
+    expect(formatted).toContain("Execution isolation: declared_by_executor_configuration; verification=unavailable");
+    expect(formatted).toContain("Delivery health: unknown");
+    expect(formatted).toContain("Certification: unsupported");
     expect(formatted).toContain("Runner Directory:\n  unavailable (dispatcher offline)");
     expect(formatted).toContain("Accepted Progress:\n  unavailable (dispatcher offline)");
     expect(formatted).toContain("Run Timeout: disabled");
@@ -789,7 +797,12 @@ describe("OpenTag CLI status", () => {
     });
 
     const formatted = formatStatus(summary);
-    expect(formatted).toContain("Runtime: relay");
+    expect(formatted).toContain("Runtime: paired_relay");
+    expect(formatted).toContain("Mode Profile: offlineSafe=false; executionLocality=paired_runner");
+    expect(formatted).toContain("Slack installation digest: unsupported");
+    expect(formatted).toContain("Runner credential: legacy_pairing_fallback");
+    expect(formatted).toContain("Runner readiness: dispatcher_reachable_readiness_unverified");
+    expect(formatted).toContain("Certification: unverified");
     expect(formatted).toContain("Relay: https://relay.example");
     expect(formatted).toContain("Relay Security:");
     expect(formatted).toContain("OK relay transport: HTTPS is enabled.");
@@ -806,7 +819,7 @@ describe("OpenTag CLI status", () => {
     });
 
     const formatted = formatStatus(summary);
-    expect(formatted).toContain("Runtime: relay");
+    expect(formatted).toContain("Runtime: paired_relay");
     expect(formatted).toContain("OK GitLab webhook secret: Configured locally; the relay /gitlab/webhooks endpoint must verify X-Gitlab-Token before creating runs.");
     expect(formatted).not.toContain("GitLab relay mode is not supported");
   });
@@ -837,7 +850,7 @@ describe("OpenTag CLI status", () => {
     });
 
     const formatted = formatStatus(summary);
-    expect(formatted).toContain("Runtime: relay");
+    expect(formatted).toContain("Runtime: paired_relay");
     expect(formatted).toContain(
       "OK Linear webhook secret: Configured locally; the relay /linear/webhooks endpoint must verify Linear-Signature and webhook timestamp before creating runs."
     );
@@ -852,7 +865,7 @@ describe("OpenTag CLI status", () => {
     });
 
     const formatted = formatStatus(summary);
-    expect(formatted).toContain("Runtime: relay");
+    expect(formatted).toContain("Runtime: paired_relay");
     expect(formatted).toContain("OK Discord interaction signature: Configured locally; the relay /discord/interactions endpoint must verify the Ed25519 signature before creating runs.");
   });
 

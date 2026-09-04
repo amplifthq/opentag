@@ -25,7 +25,6 @@ function configPath(): string {
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false,
       port: 3050
     }
   });

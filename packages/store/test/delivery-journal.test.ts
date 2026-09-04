@@ -2,22 +2,24 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DeliveryIntentV2Schema } from '@opentag/delivery-contract';
+import { DeliveryIntentV2Schema, deliveryExternalResourceLookupDescriptor } from '@opentag/delivery-contract';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { describe, expect, it } from 'vitest';
+import { verifyDeliveryRepositoryContract, verifyExtendedDeliveryRepositoryContract } from '../../delivery-runtime/test/repository-contract.js';
 import {
   createDeliveryKernelRepository,
   type DeliveryClaim,
   type DeliveryPayloadCustody,
 } from '../src/delivery-repository.js';
 import { createEncryptedFileDeliveryPayloadCustody } from '../src/delivery-payload-custody.js';
-import { bootstrapDeliveryJournal } from '../src/delivery-schema.js';
+import { bootstrapDeliveryJournal, deliveryAttempts } from '../src/delivery-schema.js';
 
 const digest = (value: string) =>
   `sha256:${createHash('sha256').update(value).digest('hex')}`;
 const stable = digest('stable');
 const owner = {
+  organizationId: 'org_test',
   providerId: 'slack', providerInstanceId: 'instance_1',
   providerBindingDigest: stable, providerConfigGeneration: 7,
   providerConfigGenerationDigest: stable, runtimeOwnerId: 'installation_1',
@@ -58,7 +60,7 @@ function setup(path = ':memory:') {
 
 function intent(overrides: Record<string, unknown> = {}) {
   return DeliveryIntentV2Schema.parse({
-    contractVersion: 2, sideEffectIntentId: 'intent_1', causalId: 'cause_1',
+    contractVersion: 2, organizationId: "org_test", sideEffectIntentId: 'intent_1', causalId: 'cause_1',
     intentKind: 'delivery', operation: 'create', deliveryKind: 'message',
     presentationDigest: stable,
     provenance: { kind: 'business', repositoryIdentityDigest: stable,
@@ -93,6 +95,45 @@ function row(sqlite: Database.Database) {
 }
 
 describe('fresh delivery journal', () => {
+  it('satisfies the shared delivery repository contract', async () => {
+    const { repository } = setup();
+    const shared = intent({ sideEffectIntentId: 'intent_shared', idempotencyKey: 'delivery_shared',
+      statusMessageId: 'shared:status' });
+    await verifyDeliveryRepositoryContract({ repository,
+      intent: shared, payload: {}, digest: stable,
+      lookup: deliveryExternalResourceLookupDescriptor({ intent: shared,
+        statusMessageId: 'shared:status', owner }) });
+  });
+  it('satisfies extended deadline, restart, and authority-isolation repository behavior', async () => {
+    let now = '2026-08-30T00:00:00.000Z';
+    const sqlite = new Database(':memory:'); bootstrapDeliveryJournal(sqlite);
+    const repository = createDeliveryKernelRepository({ database: drizzle(sqlite),
+      payloadCustody: custody(), owner, leaseOwner: 'worker', leaseSeconds: 30,
+      now: () => new Date(now) });
+    const createCase = (name: string, deadline: string, binding: 'healthy' | 'broken' = 'healthy') => {
+      const selectedOwner = binding === 'healthy' ? owner : { ...owner,
+        providerInstanceId: 'broken-instance', providerBindingDigest: digest('broken-binding'),
+        providerConfigGeneration: 9, providerConfigGenerationDigest: digest('broken-generation') };
+      const statusMessageId = name.startsWith('lookup-') ? 'lookup:status' : `${name}:status`;
+      const value = intent({ sideEffectIntentId: `intent-${name}`, idempotencyKey: `key-${name}`,
+        statusMessageId,
+        createdAt: '2026-08-30T00:00:00.000Z', providerBinding: { ...intent().providerBinding,
+          providerInstanceId: selectedOwner.providerInstanceId,
+          bindingDigest: selectedOwner.providerBindingDigest,
+          providerConfigGeneration: selectedOwner.providerConfigGeneration,
+          providerConfigGenerationDigest: selectedOwner.providerConfigGenerationDigest } });
+      const payload = { envelopeVersion: 1, providerRequest: {}, phase: 'running', frozenDeadline: deadline,
+        currentTruth: {} };
+      return { intent: value, payload, lookup: deliveryExternalResourceLookupDescriptor({ intent: value,
+        statusMessageId, owner: selectedOwner }) };
+    };
+    await verifyExtendedDeliveryRepositoryContract({ repository, createCase,
+      setNow: (value) => { now = value; }, digest: stable,
+      healthyAuthority: { organizationId: owner.organizationId, appId: owner.providerId,
+        appInstanceId: owner.providerInstanceId, bindingDigest: owner.providerBindingDigest,
+        credentialGeneration: owner.providerConfigGeneration,
+        credentialGenerationDigest: owner.providerConfigGenerationDigest } });
+  });
   it('bootstraps one fresh-only journal table with no raw payload columns', () => {
     const { sqlite } = setup();
     expect(sqlite.prepare(
@@ -103,6 +144,67 @@ describe('fresh delivery journal', () => {
     expect(columns).not.toEqual(expect.arrayContaining([
       'canonical_intent_json', 'persisted_payload_json', 'persisted_payload_digest',
     ]));
+  });
+
+  it('rolls back a failed tenant-qualified legacy upgrade to the usable original table', () => {
+    const sqlite = new Database(':memory:');
+    sqlite.exec(`CREATE TABLE delivery_attempts (
+      id TEXT PRIMARY KEY, scope_kind TEXT NOT NULL, scope_id TEXT NOT NULL,
+      provider_id TEXT NOT NULL, provider_instance_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      UNIQUE (scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key));
+      INSERT INTO delivery_attempts VALUES ('legacy-1','local_repository','repo-1','slack','A1','key-1');`);
+    expect(() => bootstrapDeliveryJournal(sqlite)).toThrow();
+    expect(sqlite.prepare("SELECT * FROM delivery_attempts").all()).toEqual([{
+      id: 'legacy-1', scope_kind: 'local_repository', scope_id: 'repo-1',
+      provider_id: 'slack', provider_instance_id: 'A1', idempotency_key: 'key-1',
+    }]);
+    expect(sqlite.prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name").all())
+      .toEqual([{ name: 'delivery_attempts' }]);
+    sqlite.close();
+  });
+
+  it('atomically upgrades a real legacy journal, preserves rows and states, and reopens', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'opentag-delivery-migration-'));
+    const path = join(directory, 'journal.sqlite');
+    try {
+      const current = setup(path);
+      current.repository.recordIntent(intent(), {});
+      current.repository.recordIntent(intent({ sideEffectIntentId: 'intent_2',
+        idempotencyKey: 'delivery_2' }), {});
+      const claim = current.repository.claimNext(); if (!claim) throw new Error('missing claim');
+      const begin = current.repository.markBegin(markers(claim)); if (!begin) throw new Error('missing begin');
+      current.repository.settleOrReadTerminal({ ...begin, outcome: 'accepted',
+        evidenceDigest: digest('accepted') });
+      const createSql = (current.sqlite.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='delivery_attempts'")
+        .get() as { sql: string }).sql;
+      current.sqlite.exec(`DROP TRIGGER delivery_attempts_identity_immutable;
+        DROP TRIGGER delivery_attempts_transition_guard;
+        DROP TRIGGER delivery_attempts_immutable_delete;
+        DROP INDEX delivery_attempts_claim_idx;
+        DROP INDEX delivery_attempts_idempotency_idx;
+        ALTER TABLE delivery_attempts RENAME TO delivery_attempts_current;`);
+      const legacySql = createSql
+        .replace('organization_id TEXT NOT NULL, ', '')
+        .replace('deadline_at TEXT NOT NULL, ', '')
+        .replace(/\)\s*$/u, ', UNIQUE (scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key))');
+      current.sqlite.exec(legacySql);
+      const columns = (current.sqlite.prepare('PRAGMA table_info(delivery_attempts)').all() as Array<{ name: string }>)
+        .map(({ name }) => name);
+      current.sqlite.exec(`INSERT INTO delivery_attempts (${columns.map((name) => `"${name}"`).join(',')})
+        SELECT ${columns.map((name) => `"${name}"`).join(',')} FROM delivery_attempts_current;
+        DROP TABLE delivery_attempts_current;`);
+      bootstrapDeliveryJournal(current.sqlite);
+      expect(current.sqlite.prepare('SELECT organization_id,state FROM delivery_attempts ORDER BY state').all())
+        .toEqual([{ organization_id: 'local_direct', state: 'accepted' },
+          { organization_id: 'local_direct', state: 'pending' }]);
+      expect((current.sqlite.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='delivery_attempts'")
+        .get() as { sql: string }).sql).not.toContain('UNIQUE (scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key)');
+      current.sqlite.close();
+      const reopened = new Database(path); bootstrapDeliveryJournal(reopened);
+      expect(reopened.prepare('SELECT count(*) count FROM delivery_attempts').get()).toEqual({ count: 2 });
+      reopened.close();
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
   it('records exact replay idempotently and rejects conflicting identities', () => {
@@ -228,28 +330,55 @@ describe('fresh delivery journal', () => {
       ...begun, outcome: 'accepted', evidenceDigest: digest('accepted'),
       externalResourceDigest: digest('resource'), externalResourceId: '171.002',
     })).toMatchObject({ externalResourceId: '171.002' });
-    expect(repository.findAcceptedExternalResource({
-      intent: accepted, statusMessageId: 'run_1:status',
-    })).toEqual({ outcome: 'exact', externalResourceId: '171.002',
+    const descriptor = deliveryExternalResourceLookupDescriptor({
+      intent: accepted, statusMessageId: 'run_1:status', owner,
+    });
+    expect(repository.findAcceptedExternalResource(descriptor)).toEqual({ outcome: 'exact', externalResourceId: '171.002',
       externalResourceDigest: digest('resource') });
+    for (const drifted of [{ ...descriptor, organizationId: 'org_other' },
+      { ...descriptor, runId: 'run_other' },
+      { ...descriptor, providerId: 'teams' },
+      { ...descriptor, providerBindingDigest: digest('binding-drift') },
+      { ...descriptor, providerPrincipalDigest: digest('principal-drift') },
+      { ...descriptor, authoritySnapshotDigest: digest('authority-drift') },
+      { ...descriptor, repositoryIdentityDigest: digest('repo-drift') }]) {
+      expect(repository.findAcceptedExternalResource(drifted)).toEqual({ outcome: 'none' });
+    }
+    const duplicate = intent({ sideEffectIntentId: 'intent_2', idempotencyKey: 'delivery_2',
+      presentationDigest: digest('presentation_2'), statusMessageId: 'run_1:status' });
+    repository.recordIntent(duplicate, {});
+    const duplicateClaim = repository.claimNext(); if (!duplicateClaim) throw new Error('missing duplicate claim');
+    const duplicateBegin = repository.markBegin(markers(duplicateClaim));
+    if (!duplicateBegin) throw new Error('missing duplicate begin');
+    repository.settleOrReadTerminal({ ...duplicateBegin, outcome: 'accepted',
+      evidenceDigest: digest('accepted_2'), externalResourceId: '172.003',
+      externalResourceDigest: digest('resource_2') });
+    expect(repository.findAcceptedExternalResource(descriptor)).toEqual({ outcome: 'ambiguous' });
   });
 
-  it.each([
-    ['URI', 'https://hooks.slack.test/171.002'],
-    ['token', 'xoxb-secret'],
-    ['arbitrary', 'message-171'],
-    ['unbounded', `${'1'.repeat(21)}.002`],
-  ])('rejects %s external resource identifiers atomically', (_case, value) => {
+  it('scopes idempotency independently by organization', () => {
+    const first = setup();
+    first.repository.recordIntent(intent(), {});
+    const secondOwner = { ...owner, organizationId: 'org_other' };
+    const database = drizzle(first.sqlite);
+    const second = createDeliveryKernelRepository({ database,
+      payloadCustody: custody(), owner: secondOwner, leaseOwner: 'worker-2', leaseSeconds: 30 });
+    expect(() => second.recordIntent(intent({ organizationId: 'org_other',
+      sideEffectIntentId: 'intent_other' }), {})).not.toThrow();
+    expect(database.select().from(deliveryAttempts).all()).toHaveLength(2);
+  });
+
+  it('persists provider-neutral canonical external resource identities', () => {
     const { repository, sqlite } = setup(); repository.recordIntent(intent(), {});
     const claim = repository.claimNext(); if (!claim) throw new Error('missing claim');
     const begun = repository.markBegin(markers(claim));
     if (!begun) throw new Error('missing begin');
-    expect(() => repository.settleOrReadTerminal({
+    expect(repository.settleOrReadTerminal({
       ...begun, outcome: 'accepted', evidenceDigest: digest('accepted'),
-      externalResourceDigest: digest('resource'), externalResourceId: value,
-    })).toThrow(/Slack timestamp/u);
-    expect(row(sqlite)).toMatchObject({ state: 'provider_io_begun',
-      external_resource_id: null });
+      externalResourceDigest: digest('resource'), externalResourceId: 'native:message-171',
+    })).toMatchObject({ outcome: 'accepted', externalResourceId: 'native:message-171' });
+    expect(row(sqlite)).toMatchObject({ state: 'accepted',
+      external_resource_id: 'native:message-171' });
   });
 
   it('rejects unsafe owner identifiers before persistence or claim', () => {

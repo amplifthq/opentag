@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildPullRequestBody, createPullRequestViaFetch } from "../src/pull-request.js";
+import { createExactDraftPullRequest } from "../src/publisher.js";
 
 describe("pull request helpers", () => {
   it("builds a verification-oriented PR body", () => {
@@ -23,7 +24,8 @@ describe("pull request helpers", () => {
         title: "OpenTag run run_1",
         body: "body",
         head: "opentag/run_1",
-        base: "main"
+        base: "main",
+        draft: true,
       },
       (async (url, init) => {
         requests.push({
@@ -44,9 +46,52 @@ describe("pull request helpers", () => {
           title: "OpenTag run run_1",
           body: "body",
           head: "opentag/run_1",
-          base: "main"
+          base: "main",
+          draft: true,
         }
       }
     ]);
+  });
+
+  it("rejects non-draft pull request creation", async () => {
+    await expect(createPullRequestViaFetch({
+      token: "ghs_test", owner: "acme", repo: "demo", title: "title",
+      body: "body", head: "opentag/run_1", base: "main", draft: false,
+    }, async () => { throw new Error("provider must not be called"); }))
+      .rejects.toThrow("draft_pull_request_required");
+  });
+
+  it("refetches an exact provider PR when create response omits head provenance", async () => {
+    const requests: string[] = [];
+    const observation = await createExactDraftPullRequest({
+      token: "ghs_test", owner: "acme", repo: "demo", title: "title", body: "body",
+      head: "opentag/run_1", base: "main", expectedHeadSha: "a".repeat(40),
+      fetchImpl: (async (url, init) => {
+        requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+        if (init?.method === "POST") return Response.json({ html_url: "https://github.com/acme/demo/pull/7" });
+        return Response.json({ number: 7, html_url: "https://github.com/acme/demo/pull/7", draft: true,
+          state: "open", merged: false, head: { sha: "a".repeat(40), ref: "opentag/run_1",
+            repo: { full_name: "AcMe/DeMo" } },
+          base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/demo" } } });
+      }) as typeof fetch,
+    });
+    expect(requests).toEqual([
+      "POST https://api.github.com/repos/acme/demo/pulls",
+      "GET https://api.github.com/repos/acme/demo/pulls/7",
+    ]);
+    expect(observation).toEqual(expect.objectContaining({ kind: "present", headBranch: "opentag/run_1",
+      headRepository: { owner: "AcMe", repo: "DeMo" } }));
+  });
+
+  it.each(["acme/demo/extra", "/demo", "acme/", ""])("keeps malformed provider head repository %j ambiguous", async (fullName) => {
+    await expect(createExactDraftPullRequest({ token: "ghs_test", owner: "acme", repo: "demo",
+      title: "title", body: "body", head: "opentag/run_1", base: "main", expectedHeadSha: "a".repeat(40),
+      fetchImpl: (async (_url, init) => init?.method === "POST"
+        ? Response.json({ html_url: "https://github.com/acme/demo/pull/7" })
+        : Response.json({ number: 7, html_url: "https://github.com/acme/demo/pull/7", draft: true,
+          state: "open", merged: false, head: { sha: "a".repeat(40), ref: "opentag/run_1",
+            repo: { full_name: fullName } },
+          base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/demo" } } })) as typeof fetch,
+    })).resolves.toEqual({ kind: "ambiguous" });
   });
 });

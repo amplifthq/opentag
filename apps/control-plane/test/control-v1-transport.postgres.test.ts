@@ -1,19 +1,24 @@
 import {
   buildHostedLifecycleRequestV1,
   computePermissionRequestDigestV1,
+  computeControlPayloadDigestV1,
+  computeHostedAdmissionEnvelopeDigestV1,
   HumanPermissionDecisionRequestV1Schema,
   RunnerPermissionRequestV1Schema,
 } from "@opentag/control-protocol";
 import { createOpenTagClient } from "@opentag/client";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { randomBytes } from "node:crypto";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createControlPlaneApplication } from "../src/application.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createPermissionCoordinator } from "../src/modules/hosted-runs/permissions.js";
 import { createRunnerDirectory } from "../src/modules/runners/index.js";
+import { createRelayContentCustody } from "../src/modules/source-content/index.js";
 import {
   HOSTED_CAPABILITIES,
   hostedAdmissionFixture,
   hostedClaimRequest,
+  hostedGrantIssuerFixture,
   recordHostedReadiness,
 } from "./control-fixtures.js";
 import {
@@ -48,13 +53,14 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       leaseDurationMs: 60_000,
       idFactory: (kind) => `${kind}_http_${++identity}`,
       tokenFactory: () => `fence_http_${identity}`,
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     const application = createControlPlaneApplication({
       capabilities: {
         schemaVersion: 1,
         protocolVersion: "1.0",
         registryVersion: "opentag.control.capabilities/v1",
-        capabilities: [...HOSTED_CAPABILITIES, "relay.registration.v1"],
+        capabilities: [...HOSTED_CAPABILITIES, "relay.registration.v1"].sort(),
         minimumClient: { schemaVersion: 1, protocolVersion: "1.0" },
         deployment: { environment: "local", releaseSha: "local" },
       },
@@ -306,6 +312,78 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
     });
   });
 
+  it("redeems one-time source content only across the exact authenticated Attempt boundary", async () => {
+    const runners = createRunnerDirectory({ pool: fixture.pool, clock: { now: () => now },
+      tokenFactory: () => "runtime_redeem_secret", idFactory: () => "credential_redeem" });
+    const registered = await runners.register({ organizationId: "org_redeem",
+      organizationName: "Redeem", request: { schemaVersion: 1, protocolVersion: "1.0",
+        requiredCapabilities: ["relay.registration.v1"], requestId: "request_register_redeem",
+        operationId: "operation_register_redeem", runnerId: "runner_redeem",
+        capabilities: [...HOSTED_CAPABILITIES] } });
+    if (registered.kind !== "created") throw new Error("registration failed");
+    await recordHostedReadiness({ pool: fixture.pool, organizationId: "org_redeem",
+      runnerId: "runner_redeem" });
+    const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
+      key: { key: randomBytes(32), keyVersion: "relay-v1" } });
+    const admitted = await hostedAdmissionFixture({ runId: "run_redeem", suffix: "91",
+      organizationId: "org_redeem", runnerId: "runner_redeem", contentId: "content_redeem" });
+    const contentRef = await custody.store({ organizationId: "org_redeem", installationId: "install_redeem",
+      sourceAppId: "github", sourceDeliveryId: admitted.admission.deliveryId,
+      sourceMessageId: admitted.admission.sourceEvent.providerEventId,
+      sourceVersionRef: admitted.admission.sourceContextEnvelope.sourceVersionRef,
+      purpose: "source_context", contentId: "content_redeem",
+      payload: { text: "private source" }, expiresAt: new Date("2026-09-01T00:00:00.000Z") });
+    const admissionSeed = { ...admitted.admission,
+      sourceContextEnvelope: { ...admitted.admission.sourceContextEnvelope,
+        payloadDigest: contentRef.payloadDigest },
+      envelopeDigest: `sha256:${"0".repeat(64)}` };
+    const admission = { ...admissionSeed,
+      envelopeDigest: await computeHostedAdmissionEnvelopeDigestV1(admissionSeed) };
+    const hosted = createHostedRunCoordinator({ pool: fixture.pool, clock: { now: () => now },
+      leaseDurationMs: 60_000, idFactory: () => "attempt_redeem",
+      tokenFactory: () => "fence_redeem", issueSourceContentGrantInTransaction:
+        custody.issueReadGrantInTransaction });
+    await hosted.admit({ runId: "run_redeem", admission, policy: admitted.policy });
+    const application = createControlPlaneApplication({ capabilities: {
+      schemaVersion: 1, protocolVersion: "1.0", registryVersion: "opentag.control.capabilities/v1",
+      capabilities: [...HOSTED_CAPABILITIES, "relay.registration.v1"].sort() as any,
+      minimumClient: { schemaVersion: 1, protocolVersion: "1.0" },
+      deployment: { environment: "local", releaseSha: "local" } },
+      readiness: { check: async () => ({ ready: true }) },
+      control: { bootstrap: { authenticate: () => null }, runners, hosted, sourceContent: custody } });
+    const fetchImpl: typeof fetch = async (url, init) => { const response = await application.fetch(
+      new Request(String(url), init)); Object.defineProperty(response, "url", { value: String(url) });
+      return response; };
+    const client = createOpenTagClient({ dispatcherUrl: "http://control.test",
+      controlCredential: { kind: "runtime", token: "runtime_redeem_secret" }, fetchImpl });
+    const claim = await client.claimHostedRunControlV1({ runnerId: "runner_redeem",
+      request: hostedClaimRequest({ operationId: "operation_claim_redeem",
+        requestId: "request_claim_redeem", credentialId: "credential_redeem" }) });
+    if (!claim) throw new Error("claim missing");
+    const request = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.source-content-redeem.v1"] as const,
+      requestId: "request_redeem", operationId: "operation_redeem",
+      organizationId: claim.organizationId, runnerId: claim.runnerId, runId: claim.runId,
+      expectedAuthority: { credentialId: claim.authority.credentialId,
+        registrationGeneration: claim.authority.registrationGeneration,
+        credentialGeneration: claim.authority.credentialGeneration },
+      attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+        epoch: claim.attempt.epoch, fencingTokenDigest: claim.attempt.fencingTokenDigest,
+        leaseExpiresAt: claim.attempt.leaseExpiresAt }, grant: claim.sourceContentGrant,
+      admissionEnvelopeDigest: claim.hostedAdmission.envelopeDigest,
+      contentEnvelope: claim.hostedAdmission.sourceContextEnvelope };
+    await expect(client.redeemHostedSourceContentControlV1({ runnerId: claim.runnerId, request }))
+      .resolves.toMatchObject({ content: { contentId: "content_redeem",
+        payload: { text: "private source" } } });
+    await expect(client.redeemHostedSourceContentControlV1({ runnerId: claim.runnerId, request }))
+      .rejects.toMatchObject({ status: 409 });
+    const wrongCredential = createOpenTagClient({ dispatcherUrl: "http://control.test",
+      controlCredential: { kind: "runtime", token: "wrong" }, fetchImpl });
+    await expect(wrongCredential.redeemHostedSourceContentControlV1({ runnerId: claim.runnerId,
+      request: { ...request, operationId: "operation_wrong_credential" } }))
+      .rejects.toMatchObject({ status: 401 });
+  });
+
   it("conceals runtime routes from invalid credentials", async () => {
     const application = createControlPlaneApplication({
       capabilities: {
@@ -323,6 +401,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
           pool: fixture.pool,
           clock: { now: () => now },
           tokenFactory: () => "unused",
+          issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
           idFactory: () => "unused",
         }),
         hosted: createHostedRunCoordinator({
@@ -358,6 +437,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       leaseDurationMs: 60_000,
       idFactory: () => "unused_reprovision_attempt",
       tokenFactory: () => "unused_reprovision_fence",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     const application = createControlPlaneApplication({
       capabilities: {
@@ -501,12 +581,14 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       leaseDurationMs: 60_000,
       idFactory: () => "attempt_permission_http",
       tokenFactory: () => "fence_permission_http",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     const admission = await hostedAdmissionFixture({
       runId: "run_permission_http",
       suffix: "93",
       organizationId: "org_permission_http",
       runnerId: "runner_permission_http",
+      permissionActions: ["workspace.write"],
     });
     await hosted.admit({
       runId: "run_permission_http",
@@ -563,6 +645,17 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       Object.defineProperty(response, "url", { value: String(url) });
       return response;
     };
+    const workspaceAttestation = { workspaceId: "workspace_permission_http",
+      workspacePathDigest: `sha256:${"1".repeat(64)}`,
+      repositoryPathDigest: `sha256:${"2".repeat(64)}`,
+      worktreeIdentityDigest: `sha256:${"3".repeat(64)}`, baseRevision: "a".repeat(40),
+      currentRevision: "a".repeat(40), currentTree: "b".repeat(40),
+      workspaceStateDigest: `sha256:${"4".repeat(64)}`, attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number, fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      credentialId: claim.authority.credentialId, leaseExpiresAt: claim.attempt.leaseExpiresAt };
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET workspace_attestation=$4::jsonb WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+      [claim.organizationId, claim.runId, claim.attempt.id, JSON.stringify(workspaceAttestation)]);
     const digestInput = {
       schemaVersion: 1 as const,
       protocolVersion: "1.0" as const,
@@ -578,12 +671,13 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       },
       permissionRequestId: "permission_request_http",
       actionId: "action_permission_http",
-      actionFamily: "github.merge",
+      actionDescriptor: "workspace.write" as const,
+      actionDescriptorDigest: await computeControlPayloadDigestV1("workspace.write"),
       riskTier: "high" as const,
       targetFingerprint: `sha256:${"3".repeat(64)}`,
-      permissionScopes: ["github:merge"],
       policySnapshotRef: admission.policy.payload.snapshotId,
       policySnapshotDigest: admission.policy.receiptDigest,
+      workspaceAttestationDigest: await computeControlPayloadDigestV1(workspaceAttestation),
       requestedAt: now.toISOString(),
     };
     const request = RunnerPermissionRequestV1Schema.parse({
@@ -677,5 +771,49 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
     await expect(
       runtime.getActionPermissionCurrentControlV1(query),
     ).resolves.toMatchObject({ status: 200, outcome: "resolved" });
+  });
+
+  it("settles proposal evidence through the authenticated Control V1 transport", async () => {
+    const settleProposalCandidate = vi.fn(async (input) => ({ kind: "created" as const,
+      candidate: { candidateId: input.candidateId },
+      view: { status: "proposal_ready" as const } }));
+    const application = createControlPlaneApplication({
+      capabilities: { schemaVersion: 1, protocolVersion: "1.0",
+        registryVersion: "opentag.control.capabilities/v1",
+        capabilities: ["relay.lifecycle.v1"],
+        minimumClient: { schemaVersion: 1, protocolVersion: "1.0" },
+        deployment: { environment: "local", releaseSha: "local" } },
+      readiness: { check: async () => ({ ready: true }) },
+      control: { bootstrap: { authenticate: () => null },
+        runners: { authenticate: async (token: string) => token === "runtime_proposal_http"
+          ? { kind: "authenticated" as const, principal: { organizationId: "org_proposal_http",
+            runnerId: "runner_proposal_http", credentialId: "credential_proposal_http",
+            registrationGeneration: 1, credentialGeneration: 1 } }
+          : { kind: "invalid_credential" as const } } as never,
+        hosted: { settleProposalCandidate } as never },
+    });
+    const fetchImpl: typeof fetch = async (url, init) => {
+      const response = await application.fetch(new Request(String(url), init));
+      Object.defineProperty(response, "url", { value: String(url) });
+      return response;
+    };
+    const client = createOpenTagClient({ dispatcherUrl: "http://control.test",
+      controlCredential: { kind: "runtime", token: "runtime_proposal_http" }, fetchImpl });
+    const proposalArtifact = { id: "run_proposal_http:proposal-evidence",
+      metadata: { artifactDigest: `sha256:${"a".repeat(64)}` } };
+    await expect(client.settleProposalCandidateControlV1({
+      schemaVersion: 1, protocolVersion: "1.0", requiredCapabilities: ["relay.lifecycle.v1"],
+      requestId: "request_settle_proposal_http", organizationId: "org_proposal_http",
+      runnerId: "runner_proposal_http", runId: "run_proposal_http",
+      attempt: { attemptId: "attempt_proposal_http", attemptNumber: 1, epoch: 1,
+        fencingToken: "fence_proposal_http", fencingTokenDigest: `sha256:${"b".repeat(64)}` },
+      candidateId: `candidate_${"a".repeat(48)}`, proposalArtifact,
+    })).resolves.toEqual({ outcome: "settled", candidateId: `candidate_${"a".repeat(48)}`,
+      candidateDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      status: "proposal_ready" });
+    expect(settleProposalCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "run_proposal_http", candidateId: `candidate_${"a".repeat(48)}`,
+      proposalArtifact,
+    }));
   });
 });

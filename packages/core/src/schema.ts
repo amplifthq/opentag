@@ -1,20 +1,33 @@
 import { z } from "zod";
 import {
+  CanonicalUtcMillisTimestampSchema,
+  compareWellFormedUnicodeStrings,
   COMPLETION_REASON_ALLOWED_GATE_STATES,
   CompletionAssessmentStateSchema,
   CompletionGateResultStateSchema,
   CompletionReasonCodeSchema,
+  isCanonicalUtcMillisTimestamp,
+  ProposalReadinessAssessmentSchema as ControlProposalReadinessAssessmentSchema,
   reduceCompletionGateStates,
+  sortWellFormedUnicodeStrings,
+  WellFormedNonEmptyUnicodeStringSchema,
+  WellFormedUnicodeStringSchema,
 } from "@opentag/control-protocol";
 import { isCredentialSafeDisplayResource, isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
 import { FrozenRoutingPolicySchema } from "./routing.js";
+import { canonicalJsonStringify } from "./canonical-json.js";
 
 export {
+  CanonicalUtcMillisTimestampSchema,
   COMPLETION_REASON_ALLOWED_GATE_STATES,
   CompletionGateResultStateSchema,
   CompletionReasonCodeSchema,
+  compareWellFormedUnicodeStrings,
   reduceCompletionGateStates,
+  sortWellFormedUnicodeStrings,
 };
+
+export const WellFormedNonEmptyStringSchema = WellFormedNonEmptyUnicodeStringSchema;
 
 export const ProviderSchema = z.string().min(1);
 export const SourceSchema = ProviderSchema;
@@ -164,7 +177,7 @@ export const ConnectionRefSchema = z
 
 export const VerificationEvidenceSchema = z
   .object({
-    id: z.string().min(1),
+    id: WellFormedNonEmptyStringSchema,
     kind: z.string().min(1),
     assurance: z.enum(["verified", "reported", "unverifiable"]),
     subjectRef: z.string().min(1),
@@ -241,11 +254,12 @@ export const NormalizedMaterialActionSchema = z
 
 export const MaterialActionReceiptSchema = z
   .object({
-    id: z.string().min(1),
+    id: WellFormedNonEmptyStringSchema,
     actionId: z.string().min(1),
     provider: ProviderSchema,
     connectionId: z.string().min(1).max(128).optional(),
     targetFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
+    workspaceAttestationDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
     receiptRef: z.string().min(1),
     outcome: z.enum(["succeeded", "failed", "unknown"]),
     externalId: z.string().min(1).optional(),
@@ -288,6 +302,7 @@ export const ActionPermissionRequestSchema = z
     resource: z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/u).refine(isCredentialSafeDisplayResource).optional(),
     resourceVersion: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).refine(isCredentialSafeText).optional(),
     targetFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
+    workspaceAttestationDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
     targetConstraints: CredentialSafeRecordSchema.optional(),
     grantScope: CredentialSafeRecordSchema.optional(),
     permissionScopes: z.array(z.string().min(1)).default([]),
@@ -639,8 +654,9 @@ export const CompletionGateKindSchema = z.enum([
 
 export const CompletionEvidenceAssuranceSchema = VerificationEvidenceSchema.shape.assurance.exclude(["unverifiable"]);
 
-const CompletionGateIdSchema = z.string().min(1);
-const CompletionTargetKeySchema = z.string().min(1);
+const WellFormedCompletionStringSchema = WellFormedNonEmptyStringSchema;
+const CompletionGateIdSchema = WellFormedCompletionStringSchema;
+const CompletionTargetKeySchema = WellFormedCompletionStringSchema;
 
 export const CompletionTargetSelectorSchema = z
   .object({
@@ -796,7 +812,6 @@ export const CompletionContractSchema = z
   });
 
 type CompletionGateResultStateValue = z.infer<typeof CompletionGateResultStateSchema>;
-type CompletionAssessmentStateValue = z.infer<typeof CompletionStateSchema>;
 type CompletionReasonCodeValue = z.infer<typeof CompletionReasonCodeSchema>;
 
 const COMPLETION_REASON_REQUIRES_GATE_EVIDENCE = Object.freeze({
@@ -839,16 +854,20 @@ export function completionReasonRequiresGateEvidence(reasonCode: CompletionReaso
   return COMPLETION_REASON_REQUIRES_GATE_EVIDENCE[reasonCode];
 }
 
-export function compareCompletionGateIds(left: string, right: string): number {
-  const leftPoints = Array.from(left, (value) => value.codePointAt(0) ?? 0);
-  const rightPoints = Array.from(right, (value) => value.codePointAt(0) ?? 0);
-  const length = Math.min(leftPoints.length, rightPoints.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = leftPoints[index]! - rightPoints[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftPoints.length - rightPoints.length;
+/**
+ * Locale-independent Unicode scalar-value ordering.  UTF-8 byte order under
+ * PostgreSQL's C collation preserves this order, so this is the shared
+ * TypeScript counterpart of `COLLATE "C"` for persisted identity arrays.
+ */
+export function compareCanonicalUnicodeStrings(left: string, right: string): number {
+  return compareWellFormedUnicodeStrings(left, right);
 }
+
+export function sortCanonicalUnicodeStrings(values: readonly string[]): string[] {
+  return sortWellFormedUnicodeStrings(values);
+}
+
+export const compareCompletionGateIds = compareCanonicalUnicodeStrings;
 
 const RFC3339_INSTANT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/u;
 
@@ -949,7 +968,7 @@ export const CompletionGateResultSchema = z
     gateId: CompletionGateIdSchema,
     targetKey: CompletionTargetKeySchema.optional(),
     state: CompletionGateResultStateSchema,
-    evidenceIds: z.array(z.string().min(1)),
+    evidenceIds: z.array(WellFormedNonEmptyStringSchema),
     reasonCode: CompletionReasonCodeSchema,
     reason: z.string().min(1),
     evaluatedAt: CompletionTimestampSchema
@@ -974,7 +993,7 @@ export const CompletionGateResultSchema = z
 
 export const CompletionWaiverSchema = z
   .object({
-    id: z.string().min(1),
+    id: WellFormedNonEmptyStringSchema,
     runId: z.string().min(1).optional(),
     contractId: z.string().min(1),
     contractVersion: z.number().int().positive(),
@@ -1189,6 +1208,117 @@ export const CompletionAssessmentSchema = z
     }
   });
 
+export { isCanonicalUtcMillisTimestamp };
+
+const WellFormedPublicationCandidateDigestSchema = z.string()
+  .regex(/^sha256:[a-f0-9]{64}$/u)
+  .refine((value) => WellFormedUnicodeStringSchema.safeParse(value).success);
+const WellFormedPublicationCandidateRevisionSchema = z.string()
+  .regex(/^[a-f0-9]{40,64}$/u)
+  .refine((value) => WellFormedUnicodeStringSchema.safeParse(value).success);
+
+export const PublicationCandidateSchema = z.object({
+  candidateId: WellFormedNonEmptyStringSchema,
+  runId: WellFormedNonEmptyStringSchema,
+  attemptId: WellFormedNonEmptyStringSchema,
+  projectTargetId: WellFormedNonEmptyStringSchema,
+  frozenBaseRevision: WellFormedPublicationCandidateRevisionSchema,
+  workspaceTreeDigest: WellFormedPublicationCandidateRevisionSchema,
+  patchDigest: WellFormedPublicationCandidateDigestSchema,
+  changedFiles: z.array(WellFormedNonEmptyStringSchema).min(1),
+  verificationEvidenceIds: z.array(WellFormedPublicationCandidateDigestSchema),
+  publicationPolicyDigest: WellFormedPublicationCandidateDigestSchema,
+  createdAt: CanonicalUtcMillisTimestampSchema,
+}).strict().superRefine((candidate, ctx) => {
+  for (const [key, values] of [
+    ["changedFiles", candidate.changedFiles],
+    ["verificationEvidenceIds", candidate.verificationEvidenceIds],
+  ] as const) {
+    for (let index = 1; index < values.length; index += 1) {
+      if (compareCanonicalUnicodeStrings(values[index - 1]!, values[index]!) >= 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, index],
+          message: "PublicationCandidate identity arrays must be sorted and unique." });
+      }
+    }
+  }
+});
+
+const ProposalReadinessAssessmentSchema = ControlProposalReadinessAssessmentSchema;
+
+export const AttemptProposalEvidenceSchema = z.object({
+  schemaVersion: z.literal(1),
+  kind: z.literal("attempt_proposal_evidence"),
+  attemptId: WellFormedNonEmptyStringSchema,
+  attemptNumber: z.number().int().positive(),
+  workspaceId: WellFormedNonEmptyStringSchema,
+  workspacePathDigest: WellFormedPublicationCandidateDigestSchema,
+  branch: WellFormedNonEmptyStringSchema,
+  baseRevision: WellFormedPublicationCandidateRevisionSchema,
+  finalRevision: WellFormedPublicationCandidateRevisionSchema.optional(),
+  finalTree: WellFormedPublicationCandidateRevisionSchema,
+  diffDigest: WellFormedPublicationCandidateDigestSchema,
+  changedFilesDigest: WellFormedPublicationCandidateDigestSchema,
+  changedFiles: z.array(WellFormedNonEmptyStringSchema).min(1),
+  verificationEvidenceDigests: z.array(WellFormedPublicationCandidateDigestSchema).min(1),
+  limitations: z.array(WellFormedUnicodeStringSchema),
+  evidenceDigest: WellFormedPublicationCandidateDigestSchema,
+}).strict().superRefine((evidence, ctx) => {
+  for (const [key, values] of [
+    ["changedFiles", evidence.changedFiles],
+    ["verificationEvidenceDigests", evidence.verificationEvidenceDigests],
+  ] as const) {
+    for (let index = 1; index < values.length; index += 1) {
+      if (compareCanonicalUnicodeStrings(values[index - 1]!, values[index]!) >= 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, index],
+          message: "Attempt proposal evidence identity arrays must be sorted and unique." });
+      }
+    }
+  }
+});
+
+export const AttemptProposalEvidenceArtifactSchema = z.object({
+  id: WellFormedCompletionStringSchema, type: z.literal("patch_summary"), kind: z.literal("patch"),
+  title: z.literal("Immutable proposal evidence"),
+  uri: WellFormedCompletionStringSchema, summary: WellFormedCompletionStringSchema,
+  sourceRunId: WellFormedCompletionStringSchema,
+  createdAt: z.string().datetime(),
+  metadata: z.object({
+    proposalEvidence: AttemptProposalEvidenceSchema,
+    evidenceDigest: WellFormedPublicationCandidateDigestSchema,
+    artifactDigest: WellFormedPublicationCandidateDigestSchema,
+    readiness: z.literal("not_assessed"),
+  }).strict(),
+}).strict();
+
+async function sha256Utf8(value: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+export async function validateAttemptProposalEvidenceArtifact(value: unknown) {
+  const artifact = AttemptProposalEvidenceArtifactSchema.parse(value);
+  if (artifact.id !== `${artifact.sourceRunId}:proposal-evidence`
+    || artifact.uri !== `opentag://run/${encodeURIComponent(artifact.sourceRunId)}/proposal-evidence`) {
+    throw new Error("proposal_evidence_identity_mismatch");
+  }
+  const evidence = artifact.metadata.proposalEvidence;
+  const { evidenceDigest: _evidenceDigest, ...evidenceInput } = evidence;
+  const artifactInput = { ...artifact, metadata: { ...artifact.metadata } };
+  delete (artifactInput.metadata as Partial<typeof artifact.metadata>).artifactDigest;
+  const [changedFilesDigest, evidenceDigest, artifactDigest] = await Promise.all([
+    sha256Utf8(canonicalJsonStringify(evidence.changedFiles)),
+    sha256Utf8(canonicalJsonStringify(evidenceInput)),
+    sha256Utf8(canonicalJsonStringify(artifactInput)),
+  ]);
+  if (evidence.changedFilesDigest !== changedFilesDigest
+    || evidence.evidenceDigest !== evidenceDigest
+    || artifact.metadata.evidenceDigest !== evidenceDigest
+    || artifact.metadata.artifactDigest !== artifactDigest) {
+    throw new Error("proposal_evidence_digest_mismatch");
+  }
+  return artifact;
+}
+
 export const ReassessmentObligationSourceKindSchema = z.enum([
   "run_result_recorded",
   "verification_evidence_attached",
@@ -1378,7 +1508,7 @@ export const HumanEscalationRequestSchema = z
 
 export const HumanEscalationSchema = z
   .object({
-    id: z.string().min(1),
+    id: WellFormedNonEmptyStringSchema,
     workThreadId: z.string().min(1),
     runId: z.string().min(1).optional(),
     attemptId: z.string().min(1).optional(),
@@ -1668,9 +1798,9 @@ export const AcceptedProgressAttributionViewSchema = z.object({
       path: ["unresolvedGateAdvanceCount"]
     });
   }
-  const expectedRunIds = [...new Set(view.advances.flatMap((advance) =>
+  const expectedRunIds = sortCanonicalUnicodeStrings([...new Set(view.advances.flatMap((advance) =>
     advance.resolution.status === "attributed" ? [advance.resolution.sourceRunId] : []
-  ))].sort();
+  ))]);
   if (
     expectedRunIds.length !== view.runIdsWithAcceptedProgress.length
     || expectedRunIds.some((runId, index) => view.runIdsWithAcceptedProgress[index] !== runId)
@@ -1832,13 +1962,13 @@ export function runResultArtifactId(runId: string, artifactIndex: number): strin
 }
 
 export const ResultArtifactSchema = z.object({
-  id: z.string().min(1).optional(),
+  id: WellFormedNonEmptyStringSchema.optional(),
   type: RunArtifactTypeSchema.optional(),
   kind: ArtifactKindSchema.optional(),
   title: z.string(),
   uri: z.string(),
   summary: z.string().min(1).optional(),
-  sourceRunId: z.string().min(1).optional(),
+  sourceRunId: WellFormedNonEmptyStringSchema.optional(),
   createdAt: z.string().datetime().optional(),
   relatedIds: z.array(z.string().min(1)).optional(),
   metadata: z.record(z.string(), z.unknown()).optional()
@@ -1869,7 +1999,7 @@ export const OpenTagRunResultSchema = z.object({
 });
 
 export const OpenTagRunSchema = z.object({
-  id: z.string().min(1),
+  id: WellFormedNonEmptyStringSchema,
   eventId: z.string().min(1),
   status: z.enum(["queued", "assigned", "running", "needs_approval", "succeeded", "failed", "cancelled", "interrupted", "timed_out"]),
   thread: WorkThreadSchema.optional(),
@@ -1973,6 +2103,10 @@ export type CompletionReasonCode = z.infer<typeof CompletionReasonCodeSchema>;
 export type CompletionGateResult = z.infer<typeof CompletionGateResultSchema>;
 export type CompletionWaiver = z.infer<typeof CompletionWaiverSchema>;
 export type CompletionAssessment = z.infer<typeof CompletionAssessmentSchema>;
+export type PublicationCandidate = z.infer<typeof PublicationCandidateSchema>;
+export type ProposalReadinessAssessment = z.infer<typeof ProposalReadinessAssessmentSchema>;
+export type AttemptProposalEvidence = z.infer<typeof AttemptProposalEvidenceSchema>;
+export type AttemptProposalEvidenceArtifact = z.infer<typeof AttemptProposalEvidenceArtifactSchema>;
 export type ReassessmentObligationSourceKind = z.infer<typeof ReassessmentObligationSourceKindSchema>;
 export type ReassessmentObligationState = z.infer<typeof ReassessmentObligationStateSchema>;
 export type ReassessmentObligationReasonCode = z.infer<typeof ReassessmentObligationReasonCodeSchema>;

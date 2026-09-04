@@ -12,22 +12,23 @@ import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import {
-  ProviderAdapterRegistry,
   type RegisteredProviderAdapter,
 } from '../../src/delivery/provider-registry.js';
+import { providerRegistry } from './provider-registry-fixture.js';
 import { ProviderSideEffectKernel } from '../../src/delivery/side-effect-kernel.js';
 
 const digest = (value: string) =>
   `sha256:${createHash('sha256').update(value).digest('hex')}`;
 const stable = digest('stable');
 const owner = {
+  organizationId: 'org_test',
   providerId: 'slack', providerInstanceId: 'instance-1',
   providerBindingDigest: stable, providerConfigGeneration: 7,
   providerConfigGenerationDigest: stable, runtimeOwnerId: 'installation-1',
   runtimeGeneration: 3, schemaGeneration: 1,
 };
 const intent = DeliveryIntentV2Schema.parse({
-  contractVersion: 2, sideEffectIntentId: 'intent-1', causalId: 'cause-1',
+  contractVersion: 2, organizationId: "org_test", sideEffectIntentId: 'intent-1', causalId: 'cause-1',
   intentKind: 'delivery', operation: 'create', deliveryKind: 'message',
   presentationDigest: stable, provenance: { kind: 'business',
     repositoryIdentityDigest: stable, runId: 'run-1',
@@ -97,7 +98,7 @@ describe('store delivery kernel repository adapter', () => {
         database, payloadCustody: testPayloadCustody(), owner, leaseOwner: 'worker-1', leaseSeconds: 30,
         now: () => new Date('2026-08-13T00:00:01.000Z'),
       }),
-      registry: new ProviderAdapterRegistry<{ text: string }>().register(
+      registry: providerRegistry<{ text: string }>(
         registered(async ({ text }) => {
           calls.push('provider');
           const row = database.select().from(deliveryAttempts).get();
@@ -108,7 +109,7 @@ describe('store delivery kernel repository adapter', () => {
           });
           expect(text).toBe(privateText);
           return { outcome: 'accepted', evidenceDigest: digest('accepted'),
-            externalResourceId: '171.002' };
+            externalResourceId: '171.002', externalResourceDigest: digest('resource') };
         }),
       ),
       prepareRequest: (_deliveryIntent, payload) => ({
@@ -143,7 +144,7 @@ describe('store delivery kernel repository adapter', () => {
     const kernel = new ProviderSideEffectKernel({
       repository: createDeliveryKernelRepository({ database,
         payloadCustody: testPayloadCustody(), owner, leaseOwner: 'worker-1', leaseSeconds: 30 }),
-      registry: new ProviderAdapterRegistry<{ text: string }>(),
+      registry: providerRegistry<{ text: string }>(),
       prepareRequest: () => ({ request: { text: 'unused' }, operation: 'create',
         presentationDigest: stable, targetDigest: stable }),
     });
@@ -170,10 +171,10 @@ describe('store delivery kernel repository adapter', () => {
       repository: createDeliveryKernelRepository({ database,
         payloadCustody: testPayloadCustody(), owner,
         leaseOwner: 'worker-1', leaseSeconds: 30 }),
-      registry: new ProviderAdapterRegistry<{ text: string }>().register(
+      registry: providerRegistry<{ text: string }>(
         registered(async () => { providerIo += 1;
           return { outcome: 'accepted', evidenceDigest: stable,
-            externalResourceId: '171.002' }; })),
+            externalResourceId: '171.002', externalResourceDigest: stable }; })),
       prepareRequest: () => ({ request: { text: 'unused' }, operation: 'create',
         presentationDigest: stable, targetDigest: stable }),
     });
@@ -200,11 +201,11 @@ describe('store delivery kernel repository adapter', () => {
           if (!custodyAvailable) throw new Error('custody missing'); return payloadCustody.read(input);
         }, recoverJournaled: (input) => payloadCustody.recoverJournaled(input), reconcile: (input) => payloadCustody.reconcile(input) },
         owner, leaseOwner: 'worker-1', leaseSeconds: 30 }),
-      registry: new ProviderAdapterRegistry<{ text: string }>().register(
+      registry: providerRegistry<{ text: string }>(
         registered(async () => {
           credentialIo += 1; providerIo += 1;
           return { outcome: 'accepted', evidenceDigest: stable,
-            externalResourceId: '171.002' };
+            externalResourceId: '171.002', externalResourceDigest: stable };
         }),
       ),
       prepareRequest: (_deliveryIntent, payload) => ({
@@ -240,11 +241,11 @@ describe('store delivery kernel repository adapter', () => {
     const kernel = new ProviderSideEffectKernel({
       repository: createDeliveryKernelRepository({ database,
         payloadCustody: testPayloadCustody(), owner, leaseOwner: 'worker-1', leaseSeconds: 30 }),
-      registry: new ProviderAdapterRegistry<{ text: string }>().register(
+      registry: providerRegistry<{ text: string }>(
         registered(async () => {
           providerIo += 1;
           return { outcome: 'accepted', evidenceDigest: stable,
-            externalResourceId: '171.002' };
+            externalResourceId: '171.002', externalResourceDigest: stable };
         }),
       ),
       prepareRequest: () => ({ request: { text: 'hello' }, ...prepared }),

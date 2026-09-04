@@ -1,8 +1,10 @@
 import { computeControlPayloadDigestV1 } from "@opentag/control-protocol";
 import type { Pool } from "pg";
-import { withPostgresTransaction } from "../../database/postgres.js";
+import { withPostgresTransaction, type PostgresTransactionClient } from "../../database/postgres.js";
 
 type Clock = { now(): Date };
+
+const DOMAIN_FINALIZED_JOB_KINDS = ["source_ingress.process"] as const;
 
 type JobRow = {
   job_id: string;
@@ -46,66 +48,58 @@ export function createDurableJobQueue(input: {
   tokenFactory(): string;
 }) {
   if (input.leaseDurationMs < 1_000) throw new Error("invalid_job_lease_duration");
+  type EnqueueCommand = {
+    jobId: string;
+    organizationId: string | null;
+    kind: string;
+    payload: unknown;
+    maxAttempts: number;
+    availableAt?: Date;
+  };
+  const enqueueInTransaction = async (
+    client: PostgresTransactionClient,
+    command: EnqueueCommand,
+  ) => {
+    if (!command.jobId || !command.kind || !Number.isInteger(command.maxAttempts)
+      || command.maxAttempts < 1 || command.maxAttempts > 100) {
+      throw new Error("invalid_job_command");
+    }
+    const requestDigest = await computeControlPayloadDigestV1({
+      organizationId: command.organizationId, kind: command.kind, payload: command.payload,
+      maxAttempts: command.maxAttempts,
+      availableAt: command.availableAt?.toISOString() ?? null,
+    });
+    const now = input.clock.now();
+    const inserted = await client.query(
+      `INSERT INTO cp_job(
+         job_id, organization_id, job_kind, payload, request_digest,
+         state, available_at, attempt_count, max_attempts, created_at, updated_at
+       ) VALUES($1,$2,$3,$4,$5,'pending',$6,0,$7,$8,$8)
+       ON CONFLICT (job_id) DO NOTHING RETURNING job_id`,
+      [command.jobId, command.organizationId, command.kind, command.payload,
+        requestDigest, command.availableAt ?? now, command.maxAttempts, now],
+    ) as { rows: Array<{ job_id: string }> };
+    if (inserted.rows[0]) return { kind: "created" } as const;
+    const existing = await client.query(
+      "SELECT request_digest FROM cp_job WHERE job_id = $1 FOR UPDATE",
+      [command.jobId],
+    ) as { rows: Array<{ request_digest: string }> };
+    return existing.rows[0]?.request_digest === requestDigest
+      ? { kind: "replayed" } as const
+      : { kind: "conflict" } as const;
+  };
   return {
-    async enqueue(command: {
-      jobId: string;
-      organizationId: string | null;
-      kind: string;
-      payload: unknown;
-      maxAttempts: number;
-      availableAt?: Date;
-    }) {
-      if (
-        !command.jobId
-        || !command.kind
-        || !Number.isInteger(command.maxAttempts)
-        || command.maxAttempts < 1
-        || command.maxAttempts > 100
-      ) {
-        throw new Error("invalid_job_command");
-      }
-      const requestDigest = await computeControlPayloadDigestV1({
-        organizationId: command.organizationId,
-        kind: command.kind,
-        payload: command.payload,
-        maxAttempts: command.maxAttempts,
-        availableAt: command.availableAt?.toISOString() ?? null,
-      });
-      const now = input.clock.now();
-      return withPostgresTransaction(input.pool, async (client) => {
-        const inserted = await client.query(
-          `INSERT INTO cp_job(
-             job_id, organization_id, job_kind, payload, request_digest,
-             state, available_at, attempt_count, max_attempts,
-             created_at, updated_at
-           ) VALUES($1, $2, $3, $4, $5, 'pending', $6, 0, $7, $8, $8)
-           ON CONFLICT (job_id) DO NOTHING
-           RETURNING job_id`,
-          [
-            command.jobId,
-            command.organizationId,
-            command.kind,
-            command.payload,
-            requestDigest,
-            command.availableAt ?? now,
-            command.maxAttempts,
-            now,
-          ],
-        ) as { rows: Array<{ job_id: string }> };
-        if (inserted.rows[0]) return { kind: "created" } as const;
-        const existing = await client.query(
-          "SELECT request_digest FROM cp_job WHERE job_id = $1 FOR UPDATE",
-          [command.jobId],
-        ) as { rows: Array<{ request_digest: string }> };
-        return existing.rows[0]?.request_digest === requestDigest
-          ? { kind: "replayed" } as const
-          : { kind: "conflict" } as const;
-      });
+    enqueueInTransaction,
+    async enqueue(command: EnqueueCommand) {
+      return withPostgresTransaction(input.pool, (client) => enqueueInTransaction(client, command));
     },
 
-    async claim(workerId: string) {
+    async claim(workerId: string, jobKinds?: readonly string[]) {
       if (!workerId || workerId !== workerId.trim()) {
         throw new Error("invalid_worker_id");
+      }
+      if (jobKinds && (jobKinds.length === 0 || jobKinds.some((kind) => !kind))) {
+        throw new Error("invalid_job_kind_filter");
       }
       const now = input.clock.now();
       const leaseExpiresAt = new Date(now.getTime() + input.leaseDurationMs);
@@ -116,6 +110,8 @@ export function createDurableJobQueue(input: {
              SELECT job_id FROM cp_job
              WHERE state = 'claimed' AND lease_expires_at <= $1
                AND attempt_count >= max_attempts
+               AND NOT (job_kind = ANY($2::text[]))
+               AND ($3::text[] IS NULL OR job_kind = ANY($3::text[]))
              FOR UPDATE SKIP LOCKED
            )
            UPDATE cp_job job
@@ -123,12 +119,13 @@ export function createDurableJobQueue(input: {
                lease_expires_at = NULL, last_error_code = 'lease_expired',
                updated_at = $1
            FROM exhausted WHERE job.job_id = exhausted.job_id`,
-          [now],
+          [now, DOMAIN_FINALIZED_JOB_KINDS, jobKinds ?? null],
         );
         const result = await client.query(
           `WITH candidate AS (
              SELECT job_id FROM cp_job
              WHERE attempt_count < max_attempts
+               AND ($5::text[] IS NULL OR job_kind = ANY($5::text[]))
                AND (
                  (state = 'pending' AND available_at <= $1)
                  OR (state = 'claimed' AND lease_expires_at <= $1)
@@ -144,7 +141,7 @@ export function createDurableJobQueue(input: {
            FROM candidate
            WHERE job.job_id = candidate.job_id
            RETURNING job.*`,
-          [now, workerId, leaseToken, leaseExpiresAt],
+          [now, workerId, leaseToken, leaseExpiresAt, jobKinds ?? null],
         ) as { rows: JobRow[] };
         const row = result.rows[0];
         return row
@@ -192,7 +189,7 @@ export function createDurableJobQueue(input: {
         await client.query(
           `UPDATE cp_job
            SET state = 'succeeded', lease_owner = NULL, lease_token = NULL,
-               lease_expires_at = NULL, updated_at = $2
+               lease_expires_at = NULL, last_error_code = NULL, updated_at = $2
            WHERE job_id = $1`,
           [command.jobId, now],
         );
@@ -268,12 +265,16 @@ const MAINTENANCE_WINDOW_MS = 60_000;
 export async function scheduleControlPlaneMaintenance(input: {
   queue: Pick<DurableJobQueue, "enqueue">;
   clock: Clock;
+  includeSourceContentPurge?: boolean;
 }): Promise<void> {
   const windowStart = new Date(
     Math.floor(input.clock.now().getTime() / MAINTENANCE_WINDOW_MS)
       * MAINTENANCE_WINDOW_MS,
   ).toISOString();
-  const commands = [
+  const commands: Array<{
+    jobId: string; organizationId: null; kind: string;
+    payload: { windowStart: string }; maxAttempts: number;
+  }> = [
     {
       jobId: `hosted-attempt-reconciliation:${windowStart}`,
       organizationId: null,
@@ -288,7 +289,21 @@ export async function scheduleControlPlaneMaintenance(input: {
       payload: { windowStart },
       maxAttempts: 5,
     },
-  ] as const;
+    {
+      jobId: `provider-delivery:${windowStart}`,
+      organizationId: null,
+      kind: "provider-delivery",
+      payload: { windowStart },
+      maxAttempts: 1,
+    },
+  ];
+  if (input.includeSourceContentPurge) commands.push({
+    jobId: `source-content-purge:${windowStart}`,
+    organizationId: null,
+    kind: "source-content-purge",
+    payload: { windowStart },
+    maxAttempts: 5,
+  });
   const outcomes = await Promise.all(
     commands.map((command) => input.queue.enqueue(command)),
   );

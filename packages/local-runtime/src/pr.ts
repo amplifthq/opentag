@@ -1,17 +1,16 @@
 import type { OpenTagEvent, OpenTagRun, OpenTagRunResult } from "@opentag/core";
-import { buildPullRequestBody, createPullRequestViaFetch, type FetchLike } from "@opentag/github";
+import type { FetchLike, PublicationProviderObservation } from "@opentag/github";
+import type { OpenTagClient } from "@opentag/client";
 import {
-  branchNameForRun,
-  commitChangedFiles,
-  nodeCommandRunner,
-  pushBranch,
+  computePublicationOperationReceiptDigestV1,
+  type PublicationOperationCapabilityV1,
+  type PublicationOperationReceiptV1,
+} from "@opentag/control-protocol";
+import {
   type CommandRunner,
   type ExecutorCapabilityContract
 } from "@opentag/runner";
-import {
-  canonicalRepositoryIdentity,
-  type RepositoryBindingConfig,
-} from "./config.js";
+import type { RepositoryBindingConfig } from "./config.js";
 
 export type PullRequestOptions = {
   githubToken?: string;
@@ -21,60 +20,11 @@ export type PullRequestOptions = {
   fetchImpl?: FetchLike;
 };
 
-function hasPermission(event: OpenTagEvent, scope: string): boolean {
-  return event.permissions.some((permission) => permission.scope === scope);
-}
-
-function isGitHubRepositoryTarget(input: { event: OpenTagEvent; binding: RepositoryBindingConfig }): boolean {
-  const repoProvider = input.event.metadata["repoProvider"];
-  return input.binding.provider.toLowerCase() === "github"
-    && (repoProvider == null
-      || (typeof repoProvider === "string" && repoProvider.toLowerCase() === "github"));
-}
-
-function repositoryTargetMatchesBinding(input: { event: OpenTagEvent; binding: RepositoryBindingConfig }): boolean {
-  const owner = input.event.metadata["owner"];
-  const repo = input.event.metadata["repo"];
-  if (typeof owner !== "string" || typeof repo !== "string") return false;
-  const provider = input.event.metadata["repoProvider"];
-  const targetIdentity = canonicalRepositoryIdentity({
-    provider: typeof provider === "string" ? provider : input.binding.provider,
-    owner,
-    repo,
-  });
-  const bindingIdentity = canonicalRepositoryIdentity(input.binding);
-  return targetIdentity.provider === bindingIdentity.provider
-    && targetIdentity.owner === bindingIdentity.owner
-    && targetIdentity.repo === bindingIdentity.repo;
-}
-
-type CreatePullRequestIntent = {
-  head: string;
-  base?: string;
-  title?: string;
-  body?: string;
-};
-
-function createPullRequestIntent(result: OpenTagRunResult): CreatePullRequestIntent | null {
-  for (const snapshot of result.suggestedChanges ?? []) {
-    for (const intent of snapshot.intents) {
-      if (intent.domain !== "pull_request" || intent.action !== "create_pull_request") continue;
-      const head = intent.params?.["head"];
-      if (typeof head !== "string" || head.length === 0) continue;
-      const base = intent.params?.["base"];
-      const title = intent.params?.["title"];
-      const body = intent.params?.["body"];
-      return {
-        head,
-        ...(typeof base === "string" && base.length > 0 ? { base } : {}),
-        ...(typeof title === "string" && title.length > 0 ? { title } : {}),
-        ...(typeof body === "string" && body.length > 0 ? { body } : {})
-      };
-    }
-  }
-  return null;
-}
-
+/**
+ * @deprecated Automatic pull-request preparation was retired. Publication now
+ * requires an exact coordinator-issued capability. This no-op remains only so
+ * existing integrations can upgrade without triggering provider side effects.
+ */
 export async function maybeCreatePullRequest(input: {
   run: OpenTagRun;
   executorCapability?: Pick<ExecutorCapabilityContract, "sourceControl">;
@@ -84,72 +34,144 @@ export async function maybeCreatePullRequest(input: {
   options: PullRequestOptions;
   assertExecutionCurrent?: () => Promise<boolean>;
 }): Promise<OpenTagRunResult> {
-  if (!input.options.allowAutoCreatePullRequest && !input.options.preparePullRequestBranch) return input.result;
-  if (!isGitHubRepositoryTarget({ event: input.event, binding: input.binding })) return input.result;
-  if (!repositoryTargetMatchesBinding({ event: input.event, binding: input.binding })) return input.result;
-  if (!hasPermission(input.event, "pr:create")) return input.result;
-  const changedFiles = input.result.changedFiles ?? [];
-  if (changedFiles.length === 0) return input.result;
-  const owner = input.binding.owner;
-  const repo = input.binding.repo;
+  return input.result;
+}
 
-  const intent = createPullRequestIntent(input.result);
-  const branchName = intent?.head ?? branchNameForRun(input.run.id);
-  const runner = input.options.commandRunner ?? nodeCommandRunner;
-  const assertExecutionCurrent = async () => {
-    if (
-      input.assertExecutionCurrent
-      && !(await input.assertExecutionCurrent())
-    ) {
-      throw new Error("execution_authority_expired");
-    }
+export type PublicationOperationCapability = {
+  schemaVersion: 1; protocolVersion: "1.0"; capabilityId: string;
+  organizationId: string; runId: string; attemptId: string; attemptNumber: number;
+  epoch: number; fencingTokenDigest: string; candidateId: string; candidateDigest: string;
+  repository: { provider: "github"; owner: string; repo: string; remote: string; baseBranch: string };
+  branch: string; expectedHeadSha: string;
+  step: "push_owned_branch" | "create_draft_pull_request";
+  operationId: string; idempotencyKey: string; runnerId: string; runnerGeneration: number;
+  issuedAt: string; expiresAt: string;
+};
+
+type PublicationAuthority = Pick<PublicationOperationCapability,
+  "organizationId" | "runId" | "attemptId" | "attemptNumber" | "epoch" |
+  "fencingTokenDigest" | "candidateId" | "candidateDigest" | "runnerId" |
+  "runnerGeneration"> & { now: string };
+
+export type PublicationOperationReceipt = {
+  capabilityId: string; operationId: string;
+  step: PublicationOperationCapability["step"];
+  outcome: "succeeded" | "failed" | "outcome_unknown";
+  observedAt: string; providerObservation: PublicationProviderObservation;
+};
+
+function assertExactCapability(capability: PublicationOperationCapability,
+  authority: PublicationAuthority): void {
+  const keys = ["organizationId", "runId", "attemptId", "attemptNumber", "epoch",
+    "fencingTokenDigest", "candidateId", "candidateDigest", "runnerId",
+    "runnerGeneration"] as const;
+  if (keys.some((key) => capability[key] !== authority[key])
+    || Date.parse(authority.now) < Date.parse(capability.issuedAt)
+    || Date.parse(authority.now) >= Date.parse(capability.expiresAt)) {
+    throw new Error("publication_capability_identity_mismatch");
+  }
+  if (capability.branch === capability.repository.baseBranch) {
+    throw new Error("publication_operation_prohibited");
+  }
+}
+
+export async function executePublicationOperation(input: {
+  capability: PublicationOperationCapability; localAuthority: PublicationAuthority;
+  credential: { githubToken: string };
+  begin(): Promise<{ kind: "begun" | "replayed" | "stale_fence" | "conflict" }>;
+  createDraftPullRequest(): Promise<PublicationProviderObservation>;
+  pushOwnedBranch?: () => Promise<PublicationProviderObservation>;
+  record(receipt: PublicationOperationReceipt): Promise<PublicationOperationReceipt>;
+}): Promise<PublicationOperationReceipt> {
+  assertExactCapability(input.capability, input.localAuthority);
+  const begun = await input.begin();
+  if (begun.kind !== "begun") throw new Error(`publication_begin_${begun.kind}`);
+  let observation: PublicationProviderObservation;
+  try {
+    observation = input.capability.step === "push_owned_branch"
+      ? await (input.pushOwnedBranch?.() ?? Promise.resolve({ kind: "ambiguous" as const }))
+      : await input.createDraftPullRequest();
+  } catch {
+    observation = { kind: "ambiguous" };
+  }
+  const receipt: PublicationOperationReceipt = {
+    capabilityId: input.capability.capabilityId,
+    operationId: input.capability.operationId,
+    step: input.capability.step,
+    outcome: observation.kind === "present" ? "succeeded"
+      : observation.kind === "absent" ? "failed" : "outcome_unknown",
+    observedAt: input.localAuthority.now,
+    providerObservation: observation,
   };
-  if (input.executorCapability?.sourceControl !== "self_committing") {
-    await assertExecutionCurrent();
-    await commitChangedFiles({
-      runner,
-      workspacePath: input.binding.checkoutPath,
-      files: changedFiles,
-      message: `OpenTag run ${input.run.id}`
-    });
-  }
-  await assertExecutionCurrent();
-  await pushBranch({
-    runner,
-    workspacePath: input.binding.checkoutPath,
-    remote: input.binding.pushRemote ?? "origin",
-    branchName
-  });
+  return input.record(receipt);
+}
 
-  if (!input.options.allowAutoCreatePullRequest) {
-    return input.result;
-  }
-  if (!input.options.githubToken) return input.result;
-
-  await assertExecutionCurrent();
-  const pullRequestUrl = await createPullRequestViaFetch(
-    {
-      token: input.options.githubToken,
-      owner,
-      repo,
-      title: intent?.title ?? `OpenTag run ${input.run.id}`,
-      body: intent?.body ?? buildPullRequestBody(input.result),
-      head: branchName,
-      base: intent?.base ?? input.binding.baseBranch ?? "main"
-    },
-    input.options.fetchImpl
-  );
-
+function controlObservation(input: {
+  observation: PublicationProviderObservation;
+  capability: PublicationOperationCapabilityV1;
+}) {
+  if (input.observation.kind !== "present") return input.observation;
   return {
-    ...input.result,
-    createdPullRequestUrl: pullRequestUrl,
-    artifacts: [...(input.result.artifacts ?? []), { kind: "pull_request", title: "Pull request", uri: pullRequestUrl }],
-    nextAction: {
-      summary: `Review pull request: ${pullRequestUrl}`,
-      hint: {
-        kind: "request_review",
-        metadata: { pullRequestUrl }
-      }
-    }
+    kind: "present" as const,
+    headSha: input.observation.headSha,
+    ...("pullRequestNumber" in input.observation
+      ? { externalId: `github_pr_${input.observation.pullRequestNumber}`,
+          externalUri: input.observation.pullRequestUrl, draft: true as const,
+          provider: "github" as const,
+          repository: { owner: input.capability.repository.owner, repo: input.capability.repository.repo },
+          baseBranch: input.capability.repository.baseBranch, state: "open" as const,
+          ...(input.observation.headBranch && input.observation.headRepository
+            ? { headBranch: input.observation.headBranch,
+                headRepository: input.observation.headRepository } : {}) }
+      : {}),
   };
+}
+
+/**
+ * The local-only bridge for a coordinator-issued publication capability.  The
+ * GitHub token remains a closure over the provider call: the client receives
+ * only capability and receipt facts.  It intentionally has no retry loop;
+ * `outcome_unknown` must be reconciled by the paired Runner first.
+ */
+export async function executePublicationControlV1(input: {
+  client: Pick<OpenTagClient, "beginPublicationOperationControlV1" | "recordPublicationOperationReceiptControlV1">;
+  capability: PublicationOperationCapabilityV1;
+  fencingToken: string;
+  now: () => string;
+  pushOwnedBranch?: () => Promise<PublicationProviderObservation>;
+  createDraftPullRequest: () => Promise<PublicationProviderObservation>;
+}): Promise<PublicationOperationReceiptV1> {
+  const capability = input.capability;
+  const begunAt = input.now();
+  await input.client.beginPublicationOperationControlV1({ schemaVersion: 1,
+    protocolVersion: "1.0", requiredCapabilities: ["relay.publication.v1"],
+    requestId: `request_begin_${capability.capabilityId}`, fencingToken: input.fencingToken,
+    capability, begunAt });
+  let provider: PublicationProviderObservation;
+  try {
+    provider = capability.step === "push_owned_branch"
+      ? await (input.pushOwnedBranch?.() ?? Promise.resolve({ kind: "ambiguous" as const }))
+      : await input.createDraftPullRequest();
+  } catch {
+    provider = { kind: "ambiguous" };
+  }
+  const observation = controlObservation({ observation: provider, capability });
+  const receiptSeed = {
+    schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+    receiptId: `receipt_${capability.capabilityId}`, capabilityId: capability.capabilityId,
+    operationId: capability.operationId, organizationId: capability.organizationId,
+    runId: capability.runId, attemptId: capability.attemptId,
+    candidateId: capability.candidateId, candidateDigest: capability.candidateDigest,
+    step: capability.step, runnerId: capability.runnerId,
+    runnerGeneration: capability.runnerGeneration,
+    fencingTokenDigest: capability.fencingTokenDigest, observation,
+    outcome: observation.kind === "present" ? "succeeded" as const
+      : observation.kind === "absent" ? "failed" as const : "outcome_unknown" as const,
+    observedAt: input.now(),
+  };
+  const receipt = { ...receiptSeed,
+    receiptDigest: await computePublicationOperationReceiptDigestV1(receiptSeed) };
+  await input.client.recordPublicationOperationReceiptControlV1({ runnerId: capability.runnerId,
+    fencingToken: input.fencingToken, receipt });
+  return receipt;
 }

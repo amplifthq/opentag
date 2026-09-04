@@ -1,4 +1,4 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import {
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
@@ -7,6 +7,8 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createGithubIngress } from "../src/modules/github-ingress/index.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
+import { createRelayContentCustody } from "../src/modules/source-content/index.js";
+import { hostedGrantIssuerFixture } from "./control-fixtures.js";
 import {
   createIsolatedPostgres,
   TEST_DATABASE_URL,
@@ -19,6 +21,8 @@ function signature(secret: string, body: Uint8Array): string {
 describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
   let ingress: ReturnType<typeof createGithubIngress>;
+  let custody: ReturnType<typeof createRelayContentCustody>;
+  let hosted: ReturnType<typeof createHostedRunCoordinator>;
   const now = new Date("2026-08-15T13:00:00.000Z");
   const owner = {
     operatorId: "operator_ingress",
@@ -60,6 +64,7 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ]), now],
     );
     await fixture.pool.query(
@@ -83,6 +88,7 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ],
       executors: [{
         executorId: "executor_acp",
@@ -141,18 +147,22 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
         readiness,
       ],
     );
-    const hosted = createHostedRunCoordinator({
+    hosted = createHostedRunCoordinator({
       pool: fixture.pool,
       clock: { now: () => now },
       leaseDurationMs: 60_000,
       idFactory: () => "unused_attempt",
       tokenFactory: () => "unused_fence",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
+    custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
+      key: { key: randomBytes(32), keyVersion: "github-ingress-v1" } });
     ingress = createGithubIngress({
       pool: fixture.pool,
       hosted,
       clock: { now: () => now },
       masterSecret: "github-ingress-master-secret-with-32-bytes",
+      sourceContent: custody,
     });
   });
 
@@ -220,6 +230,17 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
         (SELECT count(*)::int FROM cp_hosted_run) AS runs`,
     );
     expect(counts.rows[0]).toEqual({ deliveries: 1, runs: 1 });
+    const encrypted = await fixture.pool.query<{ payload_digest: string; ciphertext: Buffer }>(
+      `SELECT content.payload_digest, content.ciphertext
+       FROM cp_source_content content
+       JOIN cp_hosted_run run
+         ON run.organization_id = content.organization_id
+        AND run.source_content_ids = ARRAY[content.content_id]
+       WHERE run.run_id = $1`,
+      [accepted.kind === "accepted" ? accepted.runId : "missing"],
+    );
+    expect(encrypted.rows).toEqual([{ payload_digest: expect.stringMatching(/^sha256:/u),
+      ciphertext: expect.any(Buffer) }]);
   });
 
   it("allows separate tenants to bind the same provider repository id", async () => {
@@ -276,6 +297,62 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
     });
 
     expect(outcome.kind).toBe("created");
+  });
+
+  it("replays exact custody after a crash before Admission and completes the delivery retry", async () => {
+    let failAdmission = true;
+    let retryNow = new Date(now);
+    const retryIngress = createGithubIngress({ pool: fixture.pool, clock: { now: () => retryNow },
+      masterSecret: "github-ingress-master-secret-with-32-bytes", sourceContent: custody,
+      hosted: { ...hosted, async admit(input) {
+        if (failAdmission) {
+          failAdmission = false;
+          throw new Error("injected_after_custody_before_admission");
+        }
+        return hosted.admit(input);
+      } } });
+    const bindingId = "binding_ingress";
+    const existingBinding = await fixture.pool.query(
+      "SELECT 1 FROM cp_github_binding WHERE organization_id=$1 AND binding_id=$2",
+      [owner.organizationId, bindingId]);
+    if (!existingBinding.rows[0]) {
+      const created = await retryIngress.createBinding(owner, { bindingId,
+        providerRepositoryId: "123", owner: "acme", repo: "demo",
+        runnerId: "runner_ingress", projectTargetId: "target_ingress",
+        allowedActorIds: ["1001"], enabled: true });
+      if (created.kind !== "created") throw new Error("binding missing");
+    }
+    const secret = retryIngress.deriveBindingSecret(owner.organizationId, bindingId, "v1");
+    const body = new TextEncoder().encode(JSON.stringify({ action: "created",
+      repository: { id: 123, name: "demo", owner: { login: "acme" } },
+      sender: { id: 1001, login: "octocat" }, issue: { id: 991, number: 91 },
+      comment: { id: 991, body: "@opentag fix retry custody" } }));
+    const delivery = { bindingId,
+      deliveryId: "delivery_custody_retry", eventName: "issue_comment",
+      signature: signature(secret, body), body };
+    await expect(retryIngress.receive(delivery))
+      .rejects.toThrow("injected_after_custody_before_admission");
+    const original = await fixture.pool.query<{ expires_at: Date }>(
+      "SELECT expires_at FROM cp_source_content WHERE source_delivery_id=$1",
+      ["delivery_custody_retry"]);
+    retryNow = new Date(now.getTime() + 2 * 60_000);
+    await fixture.pool.query(
+      `UPDATE cp_github_delivery SET processing_expires_at = $1
+       WHERE organization_id = $2 AND binding_id = $3 AND delivery_id = $4`,
+      [new Date(now.getTime() - 1), owner.organizationId,
+        bindingId, "delivery_custody_retry"],
+    );
+    await expect(retryIngress.receive(delivery)).resolves.toMatchObject({
+      kind: "accepted", runId: expect.any(String) });
+    expect((await fixture.pool.query(
+      `SELECT count(*)::int AS count FROM cp_source_content
+       WHERE organization_id = $1 AND source_delivery_id = $2`,
+      [owner.organizationId, "delivery_custody_retry"],
+    )).rows).toEqual([{ count: 1 }]);
+    expect((await fixture.pool.query<{ queue_claim_deadline: Date }>(
+      "SELECT queue_claim_deadline FROM cp_hosted_run WHERE hosted_admission->>'deliveryId'=$1",
+      ["delivery_custody_retry"])).rows[0]?.queue_claim_deadline.toISOString())
+      .toBe(original.rows[0]?.expires_at.toISOString());
   });
 
   it("fails closed for a bad signature or non-allowlisted stable actor id", async () => {

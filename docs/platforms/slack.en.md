@@ -1,15 +1,25 @@
 # Slack Setup
 
-Use this guide when `opentag setup` asks for Slack credentials.
+Use this guide when `opentag setup` asks for Slack credentials. In the
+`paired_relay` team profile, Slack is the sole supported Source App: it receives
+signed thread events and renders status/approval projections while the
+self-hosted Control Plane owns canonical Run and Attempt state.
 
 OpenTag supports two Slack connection modes:
 
-- **Local Socket Mode**: recommended for running OpenTag on this computer. No public URL is required.
-- **Public Events API**: best for hosted OpenTag, or advanced local testing with a tunnel.
+- **Local Socket Mode**: a `local_direct` trial/single-machine path. No public URL is required, but `offlineSafe=false`.
+- **Public Events API**: the required Source App ingress for the self-hosted `paired_relay` profile, or an advanced local-testing path.
 
 Both modes support the same core product flow: mention the Slack app, let OpenTag turn that Slack thread into a governed agent work loop, run a local coding agent, and get concise artifacts, status, and safe next actions back in the same Slack thread. Detailed process stays in local audit/status instead of becoming Slack noise.
 
-Slack-only setup proves the Slack loop. It does not by itself grant GitHub write access. If a run proposes a pull request action, `apply 1` can create a GitHub PR only when OpenTag also has a GitHub repository target and GitHub token configured.
+Slack-only setup proves neither an installation certification nor GitHub write
+authority. A run can propose a pull-request action only when it has a configured
+GitHub Project Target and provider binding. A real draft PR still needs the
+exact current policy and a separate explicit approval; no Slack acknowledgement
+or agent result performs it automatically.
+
+Keep the GitHub token in the paired Runner's secret store. Never place it in
+Slack messages, channel bindings, or relay configuration.
 
 Suggested action buttons use Slack Block Kit interactivity. Enable **Interactivity & Shortcuts** in the Slack app so state-driven buttons such as **Apply 1**, **Continue**, and **Reject** can submit the same source-thread action as a typed thread reply.
 
@@ -103,9 +113,12 @@ Do not enter a Request URL for Socket Mode. Slack delivers the event through the
 
 This is what makes Slack buttons such as **Apply 1**, **Continue**, and **Reject** work. If Interactivity is off, OpenTag can still receive typed thread replies, but clicking a button will fail in Slack before it reaches OpenTag.
 
-## Advanced: Public Events API
+## Required for `paired_relay`: Public Events API
 
-Choose this mode when OpenTag has a stable public endpoint, or when you intentionally want to test with a tunnel.
+Use this mode for the self-hosted `paired_relay` profile: the relay must expose
+a stable public HTTPS endpoint that is distinct from the paired local Runner.
+You may also use it for intentionally bounded local tunnel testing. Socket Mode
+is not certified as paired-relay ingress.
 
 ### What You Need
 

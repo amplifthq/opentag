@@ -10,6 +10,7 @@ import {
   type HostedClaimRequestV1,
   type HostedClaimV1,
   type HostedHeartbeatRequestV1,
+  type HostedProgressRequestV1,
   type HostedRejectStartRequestV1,
   type HostedRunningRequestV1,
   type HostedLifecycleReceiptEnvelopeV1,
@@ -32,7 +33,8 @@ const capabilities = [
   "relay.hosted-admission.v1",
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
-  "relay.readiness.v1"
+  "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 const observedAt = "2026-08-10T00:00:00.000Z";
 const leaseExpiresAt = "2099-08-10T00:02:00.000Z";
@@ -156,6 +158,13 @@ async function fixture(input: {
     },
     projectTarget: { projectTargetId: "target-1", version: 1, digest: digestA },
     runnerId: "runner-1",
+    sourceContextEnvelope: { contentId: "content-1", sourceVersionRef: "source-1",
+      aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: digestA,
+      payloadDigest: digestA },
+    queueClaimDeadline: "2026-08-11T00:00:00.000Z",
+    permissionCeiling: { allowedActionDescriptors: ["workspace.write"], digest: digestA },
+    publicationPolicy: { mode: "proposal_only" as const, digest: digestA },
+    completionContract: { mode: "proposal_ready" as const, digest: digestA },
     admissionPolicySnapshot: { snapshotId: "policy-1", digest: digestB },
     receivedAt: observedAt,
     envelopeDigest: digestA
@@ -196,7 +205,8 @@ async function fixture(input: {
         capturedAt: observedAt,
         tenant: { organizationId: "org-1" },
         actor: { provider: "github", providerUserId: "1001", login: "octocat", authorizationRef: "grant-1" },
-        target: { projectTargetId: "target-1", bindingId: "binding-1", providerRepositoryId: "123", defaultBranch: "main" },
+        target: { projectTargetId: "target-1", bindingId: "binding-1", providerRepositoryId: "123", defaultBranch: "main",
+          authorizedPublicationModes: ["proposal_only", "pull_request"] },
         runner: { runnerId: "runner-1", readinessReceiptDigest: digestA },
         executor: { executorId: "executor-acp", capabilityDigest: digestB },
         requiredRelayCapabilities: capabilities,
@@ -210,6 +220,12 @@ async function fixture(input: {
       fencingToken,
       fencingTokenDigest,
       leaseExpiresAt: claimLeaseExpiresAt
+    },
+    sourceContentGrant: {
+      grantId: `grant-${attemptId}`, token: `grant-token-${attemptId}`,
+      keyVersion: "test-v1", fenceDigest: fencingTokenDigest,
+      contentIds: ["content-1"], purpose: "source_context",
+      expiresAt: claimLeaseExpiresAt,
     },
     authority: {
       organizationId: "org-1",
@@ -397,22 +413,7 @@ async function startHostedExecution(
   repo: ReturnType<typeof createOpenTagRepository>,
   claim: HostedClaimV1,
 ): Promise<boolean> {
-  const request = await buildHostedLifecycleRequestV1({
-    action: "running",
-    organizationId: claim.organizationId,
-    runnerId: claim.runnerId,
-    runId: claim.runId,
-    attempt: {
-      attemptId: claim.attempt.id,
-      attemptNumber: claim.attempt.number,
-      epoch: claim.attempt.epoch,
-      fencingToken: claim.attempt.fencingToken,
-      fencingTokenDigest: claim.attempt.fencingTokenDigest
-    },
-    occurredAt: observedAt,
-    executorId: claim.executorId,
-    executorCapabilityDigest: claim.authority.executorCapabilityDigest
-  }) as HostedRunningRequestV1;
+  const request = await runningRequest(claim);
   const local = await repo.markHostedRunRunningLocally({
     destinationId: "cloud-1",
     organizationId: claim.organizationId,
@@ -483,6 +484,59 @@ async function startHostedExecution(
     attemptId: claim.attempt.id,
     fencingToken: claim.attempt.fencingToken
   });
+}
+
+async function runningRequest(claim: HostedClaimV1): Promise<HostedRunningRequestV1> {
+  return await buildHostedLifecycleRequestV1({
+    action: "running",
+    organizationId: claim.organizationId,
+    runnerId: claim.runnerId,
+    runId: claim.runId,
+    attempt: {
+      attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number,
+      epoch: claim.attempt.epoch,
+      fencingToken: claim.attempt.fencingToken,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest
+    },
+    occurredAt: observedAt,
+    executorId: claim.executorId,
+    executorCapabilityDigest: claim.authority.executorCapabilityDigest
+  }) as HostedRunningRequestV1;
+}
+
+async function progressRequest(claim: HostedClaimV1): Promise<HostedProgressRequestV1> {
+  const progressDigest = await computeControlPayloadDigestV1({ type: "status", occurredAt: observedAt });
+  return await buildHostedLifecycleRequestV1({
+    action: "progress",
+    organizationId: claim.organizationId,
+    runnerId: claim.runnerId,
+    runId: claim.runId,
+    attempt: {
+      attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number,
+      epoch: claim.attempt.epoch,
+      fencingToken: claim.attempt.fencingToken,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest
+    },
+    occurredAt: observedAt,
+    progressId: `progress_${progressDigest.slice("sha256:".length)}`,
+    progressDigest
+  }) as HostedProgressRequestV1;
+}
+
+function restoreRecoverableHostedAssignment(
+  sqlite: Database.Database,
+  value: Awaited<ReturnType<typeof fixture>>,
+): void {
+  sqlite.prepare(`UPDATE runs SET status='assigned', assigned_runner_id=?, current_attempt_id=?,
+    lease_expires_at=? WHERE id=?`).run(value.claim.runnerId, value.claim.attempt.id,
+      value.claim.attempt.leaseExpiresAt, value.claim.runId);
+  sqlite.prepare(`UPDATE attempts SET status='assigned', runner_id=?, fencing_token=?,
+    lease_expires_at=? WHERE id=?`).run(value.claim.runnerId, value.claim.attempt.fencingToken,
+      value.claim.attempt.leaseExpiresAt, value.claim.attempt.id);
+  sqlite.prepare(`UPDATE hosted_claim_operations SET state='claimed', terminal_reason_code=NULL,
+    execution_started_at=NULL WHERE operation_id=?`).run(value.request.operationId);
 }
 
 describe("hosted assigned Run import", () => {
@@ -570,6 +624,518 @@ describe("hosted assigned Run import", () => {
       fencing_token: "cloud-fence-1",
       lease_expires_at: leaseExpiresAt
     });
+  });
+
+  it("recovers only the exact succeeded publication fence across Store restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opentag-publication-authority-"));
+    tempDirs.push(directory);
+    const path = join(directory, "store.sqlite");
+    const sqlite = new Database(path);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const value = await fixture();
+    await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    await startHostedExecution(repo, value.claim);
+    await expect(repo.completeRun({ runId: value.claim.runId, runnerId: value.claim.runnerId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+      result: { conclusion: "success", summary: "content-free" } })).resolves.toBe("completed");
+    sqlite.close();
+
+    const restartedSqlite = new Database(path);
+    migrateSchema(restartedSqlite);
+    const restarted = createOpenTagRepository(drizzle(restartedSqlite));
+    const exact = { destinationId: "cloud-1", organizationId: value.claim.organizationId,
+      runnerId: value.claim.runnerId, runId: value.claim.runId,
+      attemptId: value.claim.attempt.id,
+      fencingTokenDigest: value.claim.attempt.fencingTokenDigest };
+    await expect(restarted.getHostedSucceededPublicationAuthority(exact)).resolves.toEqual({
+      fencingToken: value.claim.attempt.fencingToken, attemptNumber: value.claim.attempt.number,
+    });
+    await expect(restarted.getHostedSucceededPublicationAuthority({ ...exact,
+      fencingTokenDigest: digestA })).resolves.toBeNull();
+    restartedSqlite.prepare("UPDATE hosted_claim_operations SET state='empty' WHERE operation_id=?")
+      .run(value.request.operationId);
+    await expect(restarted.getHostedSucceededPublicationAuthority(exact)).resolves.toBeNull();
+    restartedSqlite.close();
+  });
+
+  it("persists only a metadata shell and never stores redeemed execution plaintext", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opentag-hosted-privacy-"));
+    tempDirs.push(directory);
+    const path = join(directory, "store.sqlite");
+    const sqlite = new Database(path);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "PRIVATE_REDEEMED_SOURCE_BODY_7f4c9d";
+    const value = await fixture({ body: secret });
+    await begin(repo, value);
+
+    const imported = await repo.importHostedAssignedRun(value);
+
+    expect(imported.claimed?.event.command.rawText).toBe(secret);
+    expect(imported.claimed?.run.contextPacket).toBeDefined();
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+    const restartedSqlite = new Database(path);
+    migrateSchema(restartedSqlite);
+    const restarted = createOpenTagRepository(drizzle(restartedSqlite));
+    await expect(restarted.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: "org-1", runnerId: "runner-1" })).resolves.toBeNull();
+    restartedSqlite.close();
+  });
+
+  it("scrubs pre-fix hosted plaintext during schema upgrade and vacuums raw bytes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opentag-hosted-upgrade-"));
+    tempDirs.push(directory);
+    const path = join(directory, "store.sqlite");
+    const sqlite = new Database(path);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const value = await fixture({ body: "LEGACY_HOSTED_PLAINTEXT_82f90a" });
+    await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    sqlite.prepare("UPDATE runs SET event_json = ?, context_packet_json = ?, result_json = ? WHERE id = ?")
+      .run(JSON.stringify(value.event), "LEGACY_HOSTED_PLAINTEXT_82f90a",
+        JSON.stringify({ conclusion: "success", summary: "LEGACY_HOSTED_PLAINTEXT_82f90a" }),
+        value.claim.runId);
+    sqlite.prepare("INSERT INTO run_events(run_id,type,visibility,importance,message,payload_json,created_at) VALUES(?,?,?,?,?,?,?)")
+      .run(value.claim.runId, "artifact.created", "audit", "normal",
+        "LEGACY_HOSTED_PLAINTEXT_82f90a", JSON.stringify({ summary: "LEGACY_HOSTED_PLAINTEXT_82f90a" }), observedAt);
+    sqlite.prepare("DELETE FROM opentag_schema_migrations WHERE id = ?")
+      .run("2026-08-31-hosted-plaintext-scrub-v1");
+    migrateSchema(sqlite);
+    expect(sqlite.serialize().includes(Buffer.from("LEGACY_HOSTED_PLAINTEXT_82f90a"))).toBe(false);
+    sqlite.close();
+  });
+
+  it("keeps hosted completion echoes out of result, artifact, and audit persistence and evicts memory", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const value = await fixture({ body: "ECHOED_HOSTED_PLAINTEXT_c191" });
+    await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    await startHostedExecution(repo, value.claim);
+    await expect(repo.completeRun({ runId: value.claim.runId, runnerId: value.claim.runnerId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+      result: { conclusion: "success", summary: "ECHOED_HOSTED_PLAINTEXT_c191",
+        artifacts: [{ kind: "patch", title: "ECHOED_HOSTED_PLAINTEXT_c191",
+          uri: "opentag://echo", summary: "ECHOED_HOSTED_PLAINTEXT_c191" }] } }))
+      .resolves.toBe("completed");
+    expect(sqlite.serialize().includes(Buffer.from("ECHOED_HOSTED_PLAINTEXT_c191"))).toBe(false);
+    sqlite.prepare("UPDATE runs SET status = 'assigned', assigned_runner_id = ?, current_attempt_id = ? WHERE id = ?")
+      .run(value.claim.runnerId, value.claim.attempt.id, value.claim.runId);
+    sqlite.prepare("UPDATE attempts SET status = 'assigned', finished_at = NULL WHERE id = ?")
+      .run(value.claim.attempt.id);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+    sqlite.close();
+  });
+
+  it("keeps hosted cancel and reject-start reasons content-free and evicts their payloads", async () => {
+    for (const closure of ["cancel", "reject"] as const) {
+      const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+      const repo = createOpenTagRepository(drizzle(sqlite));
+      const secret = `HOSTED_${closure.toUpperCase()}_PLAINTEXT_419b`;
+      const value = await fixture({ body: secret }); await begin(repo, value);
+      await repo.importHostedAssignedRun(value);
+      if (closure === "cancel") {
+        await expect(repo.cancelRun({ runId: value.claim.runId, reason: secret,
+          requestedBy: secret })).resolves.toMatchObject({ outcome: "cancelled" });
+      } else {
+        const request = await buildHostedLifecycleRequestV1({ action: "reject-start",
+          organizationId: value.claim.organizationId, runnerId: value.claim.runnerId,
+          runId: value.claim.runId, attempt: { attemptId: value.claim.attempt.id,
+            attemptNumber: value.claim.attempt.number, epoch: value.claim.attempt.epoch,
+            fencingToken: value.claim.attempt.fencingToken,
+            fencingTokenDigest: value.claim.attempt.fencingTokenDigest },
+          occurredAt: observedAt, executorId: value.claim.executorId,
+          reasonCode: "unknown_safe_failure" });
+        await expect(repo.rejectHostedAttemptStartLocally({ runId: value.claim.runId,
+          runnerId: value.claim.runnerId, attemptId: value.claim.attempt.id,
+          fencingToken: value.claim.attempt.fencingToken, executorId: value.claim.executorId,
+          reason: secret, destinationId: "cloud-1", organizationId: value.claim.organizationId,
+          credentialId: value.claim.authority.credentialId, request }))
+          .resolves.toMatchObject({ outcome: "requeued" });
+      }
+      expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+      sqlite.prepare("UPDATE runs SET status='assigned', assigned_runner_id=?, current_attempt_id=? WHERE id=?")
+        .run(value.claim.runnerId, value.claim.attempt.id, value.claim.runId);
+      sqlite.prepare("UPDATE attempts SET status='assigned', finished_at=NULL, lease_expires_at=? WHERE id=?")
+        .run("2099-08-10T00:02:00.000Z", value.claim.attempt.id);
+      await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+        organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+        .resolves.toBeNull();
+      sqlite.close();
+    }
+  });
+
+  it("evicts an expired hosted payload when recovery discovers the closed Attempt", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-08-10T00:03:00.000Z"));
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const value = await fixture({ leaseExpiresAt: "2026-08-10T00:02:00.000Z" });
+    await begin(repo, value); await repo.importHostedAssignedRun(value);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId })).resolves.toBeNull();
+    sqlite.prepare("UPDATE attempts SET lease_expires_at=? WHERE id=?")
+      .run("2099-08-10T00:02:00.000Z", value.claim.attempt.id);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId })).resolves.toBeNull();
+    sqlite.close();
+  });
+
+  it("evicts hosted payloads on every durable authority-loss branch", async () => {
+    const cases = [
+      { name: "terminal run", mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+        sqlite.prepare("UPDATE runs SET status='failed' WHERE id=?").run(value.claim.runId), probe: "recovery" },
+      { name: "non-current attempt", mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+        sqlite.prepare("UPDATE runs SET current_attempt_id='different-attempt' WHERE id=?").run(value.claim.runId), probe: "recovery_error" },
+      { name: "terminal attempt", mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+        sqlite.prepare("UPDATE attempts SET status='failed' WHERE id=?").run(value.claim.attempt.id), probe: "recovery_error" },
+      { name: "inactive claim operation", mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+        sqlite.prepare("UPDATE hosted_claim_operations SET state='empty' WHERE operation_id=?").run(value.request.operationId), probe: "current" },
+      { name: "missing attempt import", mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) => {
+        sqlite.exec("BEGIN; DROP TRIGGER hosted_attempt_imports_delete_guard");
+        sqlite.prepare("DELETE FROM hosted_attempt_imports WHERE attempt_id=?").run(value.claim.attempt.id);
+      }, restore: (sqlite: Database.Database) => sqlite.exec("ROLLBACK"), probe: "current" },
+      { name: "invalid attempt number", mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+        sqlite.prepare("UPDATE attempts SET number=number+1 WHERE id=?").run(value.claim.attempt.id),
+        restore: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE attempts SET number=? WHERE id=?").run(value.claim.attempt.number, value.claim.attempt.id),
+        probe: "current" },
+      { name: "expired lease", mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+        sqlite.prepare("UPDATE attempts SET lease_expires_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(value.claim.attempt.id), probe: "current" },
+      { name: "stale completion", mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+        sqlite.prepare("UPDATE attempts SET fencing_token='different-fence' WHERE id=?").run(value.claim.attempt.id), probe: "complete" },
+    ] as const;
+    for (const testCase of cases) {
+      const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+      const repo = createOpenTagRepository(drizzle(sqlite));
+      const secret = `HOSTED_EVICTION_${testCase.name.replaceAll(" ", "_")}_7b3a`;
+      const value = await fixture({ body: secret }); await begin(repo, value);
+      await repo.importHostedAssignedRun(value);
+      if (testCase.probe !== "recovery" && testCase.probe !== "recovery_error") {
+        await startHostedExecution(repo, value.claim);
+      }
+      testCase.mutate(sqlite, value);
+      if (testCase.probe === "recovery" || testCase.probe === "recovery_error") {
+        const recovery = expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+          organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }));
+        if (testCase.probe === "recovery_error") {
+          await recovery.rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        } else {
+          await recovery.resolves.toBeNull();
+        }
+      } else if (testCase.probe === "current") {
+        await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
+          attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+          .resolves.toBe(false);
+      } else {
+        await expect(repo.completeRun({ runId: value.claim.runId,
+          runnerId: value.claim.runnerId, attemptId: value.claim.attempt.id,
+          fencingToken: value.claim.attempt.fencingToken,
+          result: { conclusion: "failure", summary: "content-free" } }))
+          .resolves.toBe("stale_attempt");
+      }
+      if ("restore" in testCase) testCase.restore(sqlite, value);
+      sqlite.prepare("UPDATE runs SET status='assigned', assigned_runner_id=?, current_attempt_id=? WHERE id=?")
+        .run(value.claim.runnerId, value.claim.attempt.id, value.claim.runId);
+      sqlite.prepare("UPDATE attempts SET status='assigned', runner_id=?, fencing_token=?, lease_expires_at=? WHERE id=?")
+        .run(value.claim.runnerId, value.claim.attempt.fencingToken, leaseExpiresAt, value.claim.attempt.id);
+      sqlite.prepare("UPDATE hosted_claim_operations SET state='claimed' WHERE operation_id=?")
+        .run(value.request.operationId);
+      await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+        organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+        .resolves.toBeNull();
+      expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+      sqlite.close();
+    }
+  });
+
+  it("retains the exact active hosted payload when terminal reason is null", async () => {
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_ACTIVE_TERMINAL_NULL_CONTROL_4de7";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value); await startHostedExecution(repo, value.claim);
+    await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+      .resolves.toBe(true);
+    sqlite.prepare("UPDATE hosted_claim_operations SET execution_started_at=NULL WHERE operation_id=?")
+      .run(value.request.operationId);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toMatchObject({ claimed: { attemptId: value.claim.attempt.id,
+        event: { command: { rawText: secret } } } });
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("retains canonical active authority after a caller presents a wrong fence", async () => {
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_WRONG_CALLER_FENCE_CONTROL_63b8";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value); await startHostedExecution(repo, value.claim);
+    await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: "caller-wrong-fence" }))
+      .resolves.toBe(false);
+    await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+      .resolves.toBe(true);
+    sqlite.prepare("UPDATE hosted_claim_operations SET execution_started_at=NULL WHERE operation_id=?")
+      .run(value.request.operationId);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toMatchObject({ claimed: { attemptId: value.claim.attempt.id,
+        event: { command: { rawText: secret } } } });
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("rejects and evicts recovery payloads for terminal claimed operations", async () => {
+    // Catches removing the terminalReasonCode rejection from getHostedAssignedRunForRecovery().
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_TERMINAL_RECOVERY_EVICTION_829f";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    sqlite.prepare(`UPDATE hosted_claim_operations SET state='claimed',
+      terminal_reason_code='stale_control_authority' WHERE operation_id=?`)
+      .run(value.request.operationId);
+
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+
+    restoreRecoverableHostedAssignment(sqlite, value);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("evicts terminal recovery payloads when the claimed operation run id is null", async () => {
+    // Catches checking nullable runId before terminalReasonCode in getHostedAssignedRunForRecovery().
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_TERMINAL_NULL_RUN_EVICTION_c5a1";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    sqlite.prepare(`UPDATE hosted_claim_operations SET state='claimed', run_id=NULL, attempt_id=?,
+      terminal_reason_code='stale_control_authority' WHERE operation_id=?`)
+      .run(value.claim.attempt.id, value.request.operationId);
+    expect(sqlite.prepare(`SELECT run_id, attempt_id, terminal_reason_code
+      FROM hosted_claim_operations WHERE operation_id=?`).get(value.request.operationId))
+      .toEqual({ run_id: null, attempt_id: value.claim.attempt.id,
+        terminal_reason_code: "stale_control_authority" });
+
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+
+    restoreRecoverableHostedAssignment(sqlite, value);
+    sqlite.prepare("UPDATE hosted_claim_operations SET run_id=? WHERE operation_id=?")
+      .run(value.claim.runId, value.request.operationId);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("rejects and evicts current execution payloads for terminal claimed operations", async () => {
+    // Catches removing terminal claim rejection and eviction from isHostedExecutionCurrent().
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_TERMINAL_CURRENT_EVICTION_16ac";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value); await startHostedExecution(repo, value.claim);
+    sqlite.prepare(`UPDATE hosted_claim_operations SET state='claimed',
+      terminal_reason_code='stale_control_authority' WHERE operation_id=?`)
+      .run(value.request.operationId);
+
+    await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+      .resolves.toBe(false);
+
+    restoreRecoverableHostedAssignment(sqlite, value);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("evicts hosted payloads when active execution APIs prove durable authority loss", async () => {
+    const recoveredPayloads: string[] = [];
+    const cases = [
+      {
+        name: "execution lease terminal run",
+        prepare: startHostedExecution,
+        mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE runs SET status='failed' WHERE id=?").run(value.claim.runId),
+        probe: async (repo: ReturnType<typeof createOpenTagRepository>, value: Awaited<ReturnType<typeof fixture>>) =>
+          expect(repo.getHostedExecutionLease({ ...heartbeatAuthority, runId: value.claim.runId,
+            attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+            .resolves.toBeNull(),
+      },
+      {
+        name: "execution start failed attempt",
+        prepare: startHostedExecution,
+        mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE attempts SET status='failed' WHERE id=?").run(value.claim.attempt.id),
+        probe: async (repo: ReturnType<typeof createOpenTagRepository>, value: Awaited<ReturnType<typeof fixture>>) =>
+          expect(repo.acquireHostedExecutionStart({ runId: value.claim.runId,
+            attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+            .rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT"),
+      },
+      {
+        name: "mark running superseded attempt",
+        prepare: async () => true,
+        mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE runs SET current_attempt_id='superseding-attempt' WHERE id=?")
+            .run(value.claim.runId),
+        probe: async (repo: ReturnType<typeof createOpenTagRepository>, value: Awaited<ReturnType<typeof fixture>>) =>
+          expect(repo.markHostedRunRunningLocally({ ...heartbeatAuthority, runId: value.claim.runId,
+            attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+            executor: value.claim.executorId, request: await runningRequest(value.claim) }))
+            .rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT"),
+      },
+      {
+        name: "progress non-current attempt",
+        prepare: startHostedExecution,
+        mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE runs SET current_attempt_id='superseding-attempt' WHERE id=?")
+            .run(value.claim.runId),
+        probe: async (repo: ReturnType<typeof createOpenTagRepository>, value: Awaited<ReturnType<typeof fixture>>) =>
+          expect(repo.recordHostedProgressLocally({ ...heartbeatAuthority, runId: value.claim.runId,
+            attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+            message: "content-free", idempotencyKey: "progress-authority-loss",
+            request: await progressRequest(value.claim) }))
+            .rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT"),
+      },
+      {
+        name: "heartbeat abandoned claim",
+        prepare: startHostedExecution,
+        mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE hosted_claim_operations SET terminal_reason_code='stale_control_authority' WHERE operation_id=?")
+            .run(value.request.operationId),
+        probe: async (repo: ReturnType<typeof createOpenTagRepository>, value: Awaited<ReturnType<typeof fixture>>) =>
+          expect(repo.beginHostedHeartbeatOperation({ ...heartbeatAuthority, runId: value.claim.runId,
+            attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+            request: await heartbeatRequest({ claim: value.claim,
+              expectedLeaseExpiresAt: value.claim.attempt.leaseExpiresAt }) }))
+            .rejects.toThrow("HOSTED_HEARTBEAT_OPERATION_CONFLICT"),
+      },
+    ] as const;
+    for (const testCase of cases) {
+      const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+      const repo = createOpenTagRepository(drizzle(sqlite));
+      const secret = `HOSTED_ACTIVE_API_EVICTION_${testCase.name.replaceAll(" ", "_")}_f91d`;
+      const value = await fixture({ body: secret }); await begin(repo, value);
+      await repo.importHostedAssignedRun(value); await testCase.prepare(repo, value.claim);
+      testCase.mutate(sqlite, value); await testCase.probe(repo, value);
+      restoreRecoverableHostedAssignment(sqlite, value);
+      if (await repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+        organizationId: value.claim.organizationId, runnerId: value.claim.runnerId })) {
+        recoveredPayloads.push(testCase.name);
+      }
+      expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+      sqlite.close();
+    }
+    expect(recoveredPayloads).toEqual([]);
+  });
+
+  it("retains an exact active payload across wrong-caller fences on execution APIs", async () => {
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_WRONG_CALLER_FENCE_CONTROL_86e2";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value); await startHostedExecution(repo, value.claim);
+    await expect(repo.acquireHostedExecutionStart({ runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: "wrong-caller-fence" }))
+      .rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+    await expect(repo.getHostedExecutionLease({ ...heartbeatAuthority, runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: "wrong-caller-fence" })).resolves.toBeNull();
+    await expect(repo.beginHostedHeartbeatOperation({ ...heartbeatAuthority, runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: "wrong-caller-fence",
+      request: await heartbeatRequest({ claim: value.claim,
+        expectedLeaseExpiresAt: value.claim.attempt.leaseExpiresAt }) }))
+      .rejects.toThrow("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
+    restoreRecoverableHostedAssignment(sqlite, value);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toMatchObject({ claimed: { event: { command: { rawText: secret } } } });
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("evicts a hosted payload when heartbeat receipt handling proves the claim abandoned", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-08-10T00:01:00.000Z"));
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_HEARTBEAT_RECEIPT_EVICTION_18c4";
+    const value = await fixture({ body: secret, leaseExpiresAt: "2026-08-10T00:02:00.000Z" });
+    await begin(repo, value); await repo.importHostedAssignedRun(value);
+    await startHostedExecution(repo, value.claim);
+    const request = await heartbeatRequest({ claim: value.claim,
+      expectedLeaseExpiresAt: value.claim.attempt.leaseExpiresAt });
+    await repo.beginHostedHeartbeatOperation({ ...heartbeatAuthority, runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken, request });
+    const receipt = await heartbeatReceipt({ claim: value.claim, request,
+      leaseExpiresAt: "2026-08-10T00:04:00.000Z" });
+    sqlite.prepare("UPDATE hosted_claim_operations SET terminal_reason_code='stale_control_authority' WHERE operation_id=?")
+      .run(value.request.operationId);
+    await expect(repo.applyHostedHeartbeatReceipt({ ...heartbeatAuthority, runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+      operationId: request.operationId, requestId: request.requestId, receipt }))
+      .resolves.toBe("rejected");
+    restoreRecoverableHostedAssignment(sqlite, value);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("rejects proposal evidence tampering at persistence and read boundaries", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const value = await fixture();
+    await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    await startHostedExecution(repo, value.claim);
+    const proposalEvidence = { schemaVersion: 1, kind: "attempt_proposal_evidence",
+      attemptId: value.claim.attempt.id, attemptNumber: value.claim.attempt.number,
+      workspaceId: "workspace_attempt", workspacePathDigest: `sha256:${"1".repeat(64)}`,
+      branch: `opentag/${value.claim.runId}`,
+      baseRevision: "a".repeat(40), finalRevision: "b".repeat(40), finalTree: "c".repeat(40),
+      diffDigest: "sha256:1bf4fcc26d8874b8c276b08749bf22799ae398f9f1681bb02d3dd828cef8df3e",
+      changedFilesDigest: "sha256:7054d00b268c67236e86fd5fafb9dbdae2efdbf5901516aecbcd3d9a4b5ee850",
+      changedFiles: ["src/index.ts"], verificationEvidenceDigests: [],
+      limitations: ["Task 8 completion gates have not run."],
+      evidenceDigest: "sha256:badbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadb" };
+    const result = { conclusion: "success" as const, summary: "done", artifacts: [{
+      id: `${value.claim.runId}:proposal-evidence`, type: "patch_summary", kind: "patch",
+      title: "Immutable proposal evidence", uri: `opentag://run/${value.claim.runId}/proposal-evidence`,
+      summary: "Attempt-bound proposal evidence captured; completion readiness is not assessed here.",
+      sourceRunId: value.claim.runId, createdAt: observedAt,
+      metadata: { proposalEvidence, evidenceDigest: proposalEvidence.evidenceDigest,
+        readiness: "not_assessed" } }] };
+    await expect(repo.completeRun({ runId: value.claim.runId, runnerId: value.claim.runnerId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+      result })).rejects.toThrow(/proposal_evidence_(?:invalid|digest_mismatch)/u);
+    sqlite.prepare("UPDATE runs SET result_json = ? WHERE id = ?")
+      .run(JSON.stringify(result), value.claim.runId);
+    await expect(repo.getRun({ runId: value.claim.runId }))
+      .rejects.toThrow(/proposal_evidence_(?:invalid|digest_mismatch)/u);
+    sqlite.close();
   });
 
   it("replays after restart and preserves the durable journal request after response loss", async () => {
@@ -722,7 +1288,7 @@ describe("hosted assigned Run import", () => {
     });
   });
 
-  it("recovers a locally-running attempt before execution and acquires only after running is acknowledged", async () => {
+  it("fails closed after restart when a locally-running Attempt has no in-memory payload", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-10T00:01:00.000Z"));
     const directory = await mkdtemp(join(tmpdir(), "opentag-running-recovery-"));
@@ -770,18 +1336,12 @@ describe("hosted assigned Run import", () => {
       destinationId: "cloud-1",
       organizationId: value.claim.organizationId,
       runnerId: value.claim.runnerId
-    })).resolves.toMatchObject({ claimed: { run: { status: "running" }, attemptId: value.claim.attempt.id } });
+    })).resolves.toBeNull();
     await expect(second.acquireHostedExecutionStart({
       runId: value.claim.runId,
       attemptId: value.claim.attempt.id,
       fencingToken: value.claim.attempt.fencingToken
     })).rejects.toMatchObject({ code: "HOSTED_IMPORT_AUTHORITY_CONFLICT" });
-    await expect(startHostedExecution(second, value.claim)).resolves.toBe(true);
-    await expect(second.acquireHostedExecutionStart({
-      runId: value.claim.runId,
-      attemptId: value.claim.attempt.id,
-      fencingToken: value.claim.attempt.fencingToken
-    })).resolves.toBe(false);
     secondSqlite.close();
   });
 
@@ -1373,7 +1933,9 @@ describe("hosted heartbeat lease authority", () => {
     })).resolves.toBe("completed");
     const stored = sqlite.prepare("SELECT result_json AS resultJson FROM runs WHERE id = ?")
       .get(value.claim.runId) as { resultJson: string };
-    expect(JSON.parse(stored.resultJson)).toEqual(persistedResult);
+    expect(JSON.parse(stored.resultJson)).toEqual({ conclusion: "success",
+      summary: "Hosted executor result accepted; execution details were not retained locally.",
+      nextAction: "Use authoritative hosted receipts and proposal evidence for follow-up." });
     expect(stored.resultJson).not.toContain(value.claim.attempt.fencingToken);
   });
 

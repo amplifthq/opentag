@@ -462,14 +462,14 @@ describe("local-runtime doctor", () => {
     expect(formatDoctorChecks(checks)).toContain("OK   Codex config: service_tier=acme-enterprise-tier");
   });
 
-  it("warns when direct GitHub apply is explicitly disabled", async () => {
+  it("warns that legacy automatic-PR flags are ignored", async () => {
     const checks = await runCodexDoctor('service_tier = "fast"\n', {
       preparePullRequestBranch: true,
       githubApplyToken: null
     });
 
     expect(formatDoctorChecks(checks)).toContain(
-      "WARN GitHub PR actions: Run branches can be pushed, but a GitHub apply token is required for direct `apply 1` PR creation"
+      "WARN GitHub PR actions: Legacy automatic-PR flags are deprecated and ignored; publication requires an exact Candidate, current approval, and coordinator-issued capability"
     );
   });
 

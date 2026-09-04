@@ -16,6 +16,8 @@ export type ExecutorEvent = {
   type: "executor.started" | "executor.progress" | "executor.completed" | "executor.failed";
   message: string;
   at: string;
+  workspaceAttestation?: import("./git.js").AttemptWorkspaceAttestation;
+  interruptionEvidence?: import("@opentag/core").AttemptInterruptionEvidenceV1;
 };
 
 export type ExecutorEventSink = {
@@ -47,6 +49,7 @@ export type ExecutorPermissionResolution = {
   reconciled?: boolean;
   receipt?: { receiptRef: string; outcome: "succeeded" | "failed" | "unknown" };
   material?: boolean;
+  confirmMaterialAuthorization?: () => Promise<boolean>;
 };
 
 export type ExecutorMaterialActionReport = {
@@ -61,6 +64,13 @@ export type ExecutorMaterialActionReport = {
 export type ExecutorRunInput = {
   runId: string;
   attemptId?: string;
+  attemptAuthority?: {
+    attemptNumber: number;
+    fencingTokenDigest: string;
+    credentialId: string;
+    leaseExpiresAt: string;
+  };
+  workspaceAttestation?: import("./git.js").AttemptWorkspaceAttestation;
   workspace: ExecutorWorkspace;
   command: OpenTagCommand;
   source?: OpenTagRunSourceRef;

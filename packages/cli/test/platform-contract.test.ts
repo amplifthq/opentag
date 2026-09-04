@@ -113,7 +113,6 @@ async function createGitHubConfiguredDispatcher() {
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false,
       port: 3050
     }
   });
@@ -159,7 +158,8 @@ describe("CLI platform contract smoke", () => {
     expect(dispatcherRuntimeInputFromCliConfig(config)).toMatchObject({
       githubToken: "ghp_contract"
     });
-    expect(config.daemon.preparePullRequestBranch).toBe(true);
+    expect(config.daemon).not.toHaveProperty("preparePullRequestBranch");
+    expect(config.daemon).not.toHaveProperty("allowAutoCreatePullRequest");
 
     const githubIngress = createGitHubWebhookApp({
       webhookSecret: config.platforms.github!.webhookSecret,
@@ -201,20 +201,10 @@ describe("CLI platform contract smoke", () => {
     });
     expect(mention.status).toBe(200);
 
-    const gitCommands: string[] = [];
     await runOneDaemonIteration({
       runnerId: config.daemon.runnerId,
       repositories: config.daemon.repositories,
       executors: { codex: changingExecutor },
-      pullRequestOptions: {
-        preparePullRequestBranch: true,
-        commandRunner: {
-          async run(command, args) {
-            gitCommands.push(`${command} ${args.join(" ")}`);
-            return { exitCode: 0, stdout: "", stderr: "" };
-          }
-        }
-      },
       client: {
         claim: () => client.claim({ runnerId: config.daemon.runnerId }),
         markRunning: (runId, executor, lease) => client.markRunning({ runnerId: config.daemon.runnerId, runId, ...lease, executor }),
@@ -224,11 +214,6 @@ describe("CLI platform contract smoke", () => {
       }
     });
 
-    expect(gitCommands).toEqual([
-      "git add -- README.md",
-      "git commit -m OpenTag run run_github_contract",
-      "git push -u origin opentag/run_github_contract"
-    ]);
     expect(delivered.some((message) =>
       message.kind === "business"
       && message.phase === "final"
@@ -263,40 +248,17 @@ describe("CLI platform contract smoke", () => {
     expect(apply.status).toBe(200);
 
     expect(githubRequests).toEqual([
-      {
-        url: "https://api.github.com/repos/acme/demo/branches/opentag%2Frun_github_contract",
-        method: "GET",
-        authorization: "Bearer ghp_contract"
-      },
-      {
-        url: "https://api.github.com/repos/acme/demo/branches/main",
-        method: "GET",
-        authorization: "Bearer ghp_contract"
-      },
-      {
-        url: "https://api.github.com/repos/acme/demo/pulls",
-        method: "POST",
-        authorization: "Bearer ghp_contract",
-        body: {
-          title: "OpenTag run run_github_contract",
-          body: [
-            "## Summary",
-            "",
-            "changed README through the contract test",
-            "",
-            "## Changed Files",
-            "- `README.md`",
-            "",
-            "## Risks",
+      { url: "https://api.github.com/repos/acme/demo/branches/opentag%2Frun_github_contract",
+        method: "GET", authorization: "Bearer ghp_contract" },
+      { url: "https://api.github.com/repos/acme/demo/branches/main",
+        method: "GET", authorization: "Bearer ghp_contract" },
+      { url: "https://api.github.com/repos/acme/demo/pulls", method: "POST",
+        authorization: "Bearer ghp_contract", body: { title: "OpenTag run run_github_contract",
+          body: ["## Summary", "", "changed README through the contract test", "",
+            "## Changed Files", "- `README.md`", "", "## Risks",
             "- Creates a pull request from the executor-produced branch; review the diff before merging.",
-            "",
-            "## Executor Conditions",
-            "- isolated branch exists"
-          ].join("\n"),
-          head: "opentag/run_github_contract",
-          base: "main"
-        }
-      }
+            "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
+          head: "opentag/run_github_contract", base: "main", draft: true } },
     ]);
     await expect(client.getRun({ runId: "run_github_contract" })).resolves.toMatchObject({
       run: { id: "run_github_contract", status: "succeeded" },

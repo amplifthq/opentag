@@ -4,13 +4,13 @@ Use this guide when `opentag setup` asks for GitHub settings.
 
 The OpenTag CLI currently uses a **repository webhook** for GitHub. This is the smallest correct MVP path: GitHub sends issue and pull request comments to your local OpenTag process through a public tunnel, then OpenTag turns the source thread into a governed agent work loop: bounded context, local execution, audit ledger, artifacts, action receipts, and concise GitHub callbacks.
 
-When a coding agent changes files, OpenTag's default flow is:
+When a coding agent changes files, this local-direct GitHub ingress reports the
+result and any proposed action back to the source thread. It does not
+automatically push a branch or create a pull request.
 
-1. Push a temporary run branch with the agent's changes.
-2. Show a suggested `create_pull_request` action in the same GitHub thread.
-3. Create the pull request only after you reply `apply 1`.
-
-That keeps the user in control. The older "create a PR immediately after every run" mode still exists as an advanced option, but it is not the default setup.
+Draft pull-request publication is a separate exact operation. It requires a
+verified Candidate, current human approval, and a coordinator-issued capability;
+the retired automatic-PR options are ignored.
 
 GitHub App installation is the longer-term product path, but it is not the default CLI setup yet.
 
@@ -29,7 +29,7 @@ OpenTag setup helps with the parts that can be local and safe:
 - It detects the GitHub repository from your local `origin` remote when possible.
 - It generates a strong webhook secret.
 - It saves the local dispatcher, GitHub webhook listener, runner, and repository binding.
-- It enables run branch preparation so `apply 1` can create a pull request later.
+- It records the GitHub credential used for source-thread replies and explicitly authorized publication.
 - It routes source-thread control commands such as `@opentag /status`, `@opentag /doctor`, and `@opentag /stop [run_id]` without creating a new run.
 - It starts the local webhook listener with `opentag start`.
 
@@ -39,8 +39,8 @@ GitHub cannot call `localhost` on your computer. You still need:
 
 - A public tunnel that forwards to the local OpenTag GitHub listener.
 - A GitHub repository webhook that points to that public tunnel URL.
-- A GitHub token that lets OpenTag post comments and create a pull request after you reply `apply 1`.
-- Git remote credentials that can push branches to the repository. OpenTag uses your local `origin` remote for the run branch.
+- A GitHub token that lets OpenTag post comments. The same credential can be used by an explicitly authorized pull-request publication when it has Pull requests write permission.
+- For paired-relay publication, Git remote credentials that can push the exact owned branch selected by the authorized operation.
 
 ## 1. Run Setup
 
@@ -60,7 +60,6 @@ OpenTag asks for:
 
 ```text
 GitHub repository (owner/repo)
-Allow OpenTag to create pull requests immediately after runs?
 Local GitHub webhook port
 GitHub token for comments and pull requests
 ```
@@ -75,7 +74,7 @@ opentag setup --platform github --github-port 3051 --force
 
 ## 2. Create The GitHub Token
 
-OpenTag uses this token to post acknowledgement, progress, and final result comments. It also uses the token to create the pull request after you reply `apply 1`.
+OpenTag uses this token to post acknowledgement, progress, and final result comments. A paired-relay installation can also use it when an exact Candidate, current approval, and coordinator-issued capability authorize pull-request publication.
 
 1. Open [GitHub's token creation page](https://github.com/settings/personal-access-tokens/new).
 2. Choose **Generate new token** if GitHub asks which token type to create.
@@ -84,8 +83,7 @@ OpenTag uses this token to post acknowledgement, progress, and final result comm
 5. Under **Repository permissions**, set:
    - **Issues**: Read and write
    - **Pull requests**: Read and write
-6. For the default `apply 1` flow, **Contents** permission is not required because the branch push uses your local git remote credentials. If you enabled the legacy immediate PR mode, also set:
-   - **Contents**: Read and write
+6. **Contents** permission is not required for this token when the owned branch is pushed with your local git remote credentials.
 7. Click **Generate token**.
 8. Copy the token immediately. GitHub only shows it once.
 9. Paste it into the `GitHub token for comments and pull requests` prompt.
@@ -157,8 +155,8 @@ Expected result:
 2. OpenTag creates a run.
 3. Your local runner executes the coding agent.
 4. OpenTag posts acknowledgement, progress, and final result comments back to the same GitHub thread.
-5. If the agent changed files, OpenTag pushes a run branch and shows a `create_pull_request` action.
-6. Reply `apply 1` in the thread to create the pull request.
+5. If the agent changed files, the final result preserves the proposal and evidence. Local-direct GitHub ingress does not materialize a pull request automatically.
+6. An exact paired-relay publication, when configured, requires a verified Candidate, current approval, and coordinator-issued capability.
 
 While a run is active, you can inspect or stop the runtime from the same source thread:
 
@@ -195,5 +193,5 @@ Check these first:
 - The webhook secret exactly matches the one saved by OpenTag.
 - The webhook subscribes to **Issue comments** and **Pull request review comments**.
 - The GitHub token has write access to Issues and Pull requests.
-- Your local `origin` remote can push branches if you expect `apply 1` pull requests.
+- For paired-relay publication, your local Git remote can push the exact owned branch named by the authorized operation.
 - `opentag start` is still running.

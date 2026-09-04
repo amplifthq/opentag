@@ -8,12 +8,14 @@
   "references": [
     { "path": "../core" },
     { "path": "../delivery-contract" },
+    { "path": "../delivery-runtime" },
     { "path": "../governance" },
     { "path": "../github" },
     { "path": "../gitlab" },
     { "path": "../lark" },
     { "path": "../linear" },
     { "path": "../slack" },
+    { "path": "../source-app-runtime" },
     { "path": "../teams" },
     { "path": "../telegram" },
     { "path": "../store" }

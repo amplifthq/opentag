@@ -309,12 +309,12 @@ that Gateway-owned tool subprocesses have stopped.
 | `openclaw` | installed `openclaw` command, default profile and Gateway | Optional OpenClaw command, profile, and Gateway WebSocket URL. The built-in launch is `openclaw [--profile <profile>] acp [--url <gatewayUrl>]`; cancellation is best effort. |
 | `agentSessionProfile` | derived per run | Executor-neutral session identity. Use `profile` for a fixed local agent identity or `profileTemplate` for a stable identity derived from provider, source thread, Project Target, and actor metadata. The `opentag status` session-profile section shows the active rule without embedding local checkout paths or secret values in the session identity. |
 | `security` | none | Runner security policy |
-| `githubToken` | none | GitHub credential fallback for direct-apply helpers and optional legacy PR creation |
+| `githubToken` | none | GitHub credential fallback for source-thread replies and capability-authorized publication |
 | `githubApplyToken` | `githubToken` | Optional dispatcher direct-apply token override. Set to `null` to render direct-apply actions as setup-required. |
 | `completionPolicies` | none | Per-repository strict GitHub completion policies (`owner`, `repo`, `requiredChecks`, optional `baseBranch` and `requireMerge`) that gate completion on named checks and merge evidence |
 | `defaultGitHubCompletion` | `governed` | Zero-config completion tier for GitHub-backed runs without a matching completion policy. `governed` holds a run that ships a pull request open until the PR exists and every observed check passes on the current head; `compat` preserves legacy executor-success semantics. Runs that ship no pull request keep executor-success semantics in both modes. |
-| `preparePullRequestBranch` | `false` | Commits and pushes executor run branches so a later source-thread `apply 1` can create the PR through an ApplyPlan |
-| `allowAutoCreatePullRequest` | `false` | Legacy mode that creates a PR immediately when executor results include changes |
+| `preparePullRequestBranch` | `false` | Deprecated compatibility field; parsed but ignored. Publication requires an exact Candidate, current approval, and coordinator-issued capability |
+| `allowAutoCreatePullRequest` | `false` | Deprecated compatibility field; parsed but ignored. Immediate automatic PR creation is retired |
 | `pollIntervalMs` | `5000` | Poll interval for `serve` |
 | `heartbeatIntervalMs` | `15000` | Heartbeat interval for claimed runs |
 | `runTimeoutMs` | none | Optional hard timeout for one executor run. When it fires, OpenTag requests cancellation and records the run as `timed_out`. |
@@ -636,11 +636,11 @@ for repeatable setups.
 | `OPENTAG_ALLOWED_WORKSPACE_ROOT` | none | Restricts allowed checkout paths |
 | `OPENTAG_ALLOW_UNSAFE_PROMPTS` | `false` | Allows prompts normally rejected by runner security |
 | `OPENTAG_EXTRA_SAFE_ENV` | none | Comma-separated env names preserved for executor processes |
-| `OPENTAG_GITHUB_TOKEN` | none | GitHub credential fallback for dispatcher direct-apply helpers and optional legacy PR creation |
+| `OPENTAG_GITHUB_TOKEN` | none | GitHub credential fallback for capability-authorized publication |
 | `OPENTAG_GITHUB_APPLY_TOKEN` | `OPENTAG_GITHUB_TOKEN` | Optional token override for dispatcher direct-apply helpers |
 | `OPENTAG_GITHUB_APPLY_DISABLED` | `false` | Set to `true` to force direct-apply receipts into setup-required state |
-| `OPENTAG_PREPARE_PR_BRANCH` | `false` | Pushes executor run branches for thread-native PR creation after approval |
-| `OPENTAG_ALLOW_AUTO_CREATE_PR` | `false` | Allows legacy immediate daemon PR creation |
+| `OPENTAG_PREPARE_PR_BRANCH` | `false` | Deprecated compatibility input; parsed but ignored |
+| `OPENTAG_ALLOW_AUTO_CREATE_PR` | `false` | Deprecated compatibility input; parsed but ignored |
 | `OPENTAG_PAIRING_TOKEN` | none | Legacy shared dispatcher token and fallback for runner calls |
 | `OPENTAG_RUNNER_TOKEN` | `OPENTAG_PAIRING_TOKEN` fallback | Preferred runner-scoped dispatcher token for claim/progress/completion, status, cancel, and local hook ingest |
 | `OPENTAG_POLL_INTERVAL_MS` | `5000` | Poll interval |

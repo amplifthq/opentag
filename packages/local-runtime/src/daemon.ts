@@ -6,6 +6,7 @@ import {
   parseWorkContextMutationCommand,
   projectTargetRefFromEvent,
   sanitizeCredentialLikeValue,
+  computeControlPayloadDigestV1,
   type OpenTagEvent,
   type OpenTagRun,
   type OpenTagRunResult,
@@ -13,7 +14,9 @@ import {
   type ActionPermissionResolution,
   type ApprovalMode,
   type MaterialActionReceipt,
-  type ProjectTargetRef
+  type ProjectTargetRef,
+  type AttemptWorkspaceAttestationV1,
+  type AttemptInterruptionEvidenceV1
 } from "@opentag/core";
 import {
   assessRunnerSecurity,
@@ -34,7 +37,6 @@ import {
   type RepositoryBindingConfig,
 } from "./config.js";
 import type { HostedControlLoop } from "./control-v1.js";
-import { maybeCreatePullRequest, type PullRequestOptions } from "./pr.js";
 
 export type ClaimedRun = {
   run: OpenTagRun;
@@ -57,10 +59,16 @@ export type DaemonClient = {
   ): Promise<void>;
   rejectAttemptStart?(runId: string, executorId: string, reason: string, lease: AttemptLease): Promise<void>;
   heartbeat(runId: string, lease: AttemptLease): Promise<void>;
-  progress(runId: string, lease: AttemptLease, input: { type: string; message: string; at: string }): Promise<void>;
-  complete(runId: string, lease: AttemptLease, result: OpenTagRunResult): Promise<void>;
+  progress(runId: string, lease: AttemptLease, input: { type: string; message: string; at: string;
+    workspaceAttestation?: AttemptWorkspaceAttestationV1;
+    interruptionEvidence?: AttemptInterruptionEvidenceV1 }): Promise<void>;
+  complete(runId: string, lease: AttemptLease, result: OpenTagRunResult, evidence?: {
+    idempotencyKey?: string;
+    workspaceAttestation?: AttemptWorkspaceAttestationV1;
+    interruptionEvidence?: AttemptInterruptionEvidenceV1 }): Promise<void>;
   requestActionPermission(runId: string, lease: AttemptLease, request: ActionPermissionRequest): Promise<ActionPermissionResolution>;
   resolveActionPermission(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
+  confirmActionPermission?(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
   recordMaterialActionReceipt(runId: string, lease: AttemptLease, actionId: string, receipt: import("@opentag/core").MaterialActionReceipt): Promise<ActionPermissionResolution>;
 };
 
@@ -173,17 +181,6 @@ type ExecutorRunOutcome =
   | { kind: "timeout" }
   | { kind: "hosted_lease_expired" };
 
-function pullRequestPreparationFailureResult(result: OpenTagRunResult, error: unknown): OpenTagRunResult {
-  return {
-    conclusion: "needs_human",
-    summary: `Executor completed, but OpenTag could not prepare the pull request action: ${errorMessage(error)}`,
-    ...(result.changedFiles ? { changedFiles: result.changedFiles } : {}),
-    ...(result.artifacts ? { artifacts: result.artifacts } : {}),
-    ...(result.verification ? { verification: result.verification } : {}),
-    nextAction: "Fix branch push or pull request credentials, then retry the run before applying the PR action."
-  };
-}
-
 function metadataToken(metadata: Record<string, unknown> | null | undefined, key: string): string | undefined {
   const value = metadata?.[key];
   if (typeof value === "string") return value;
@@ -221,7 +218,6 @@ export type LegacyDaemonIterationInput = {
   approvalMode?: ApprovalMode;
   trustedMaterialActionReceipt?: TrustedMaterialActionReceiptProvider;
   security?: RunnerSecurityPolicy;
-  pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
   runTimeoutMs?: number;
   agentSessionProfile?: AgentSessionProfileConfig;
@@ -238,6 +234,10 @@ export type ClaimedRunExecutionInput = Omit<
   client: ClaimedRunExecutionClient;
   hostedExecutionAuthority?: {
     leaseExpiresAt: string;
+    credentialId?: string;
+    attemptNumber?: number;
+    fencingTokenDigest?: string;
+    workspaceAttestation?: import("@opentag/runner").AttemptWorkspaceAttestation;
     assertCurrent(): Promise<boolean>;
     readAcceptedLeaseExpiresAt?(): Promise<string | null>;
     now?: () => Date;
@@ -536,6 +536,7 @@ export async function executeClaimedRun(
     if (cancelPromise) await cancelPromise;
     return true;
   }
+  let latestWorkspaceAttestation = hostedAuthority?.workspaceAttestation;
   if (heartbeatIntervalMs > 0) {
     heartbeatHandle = setInterval(() => {
       if (heartbeatInFlight) return;
@@ -544,6 +545,12 @@ export async function executeClaimedRun(
           const acceptedLeaseExpiresAt = await hostedAuthority
             ?.readAcceptedLeaseExpiresAt?.();
           if (!acceptedLeaseExpiresAt || hostedLeaseRevoked) return;
+          if (latestWorkspaceAttestation) {
+            latestWorkspaceAttestation = {
+              ...latestWorkspaceAttestation,
+              leaseExpiresAt: acceptedLeaseExpiresAt,
+            };
+          }
           const acceptedDeadline = Date.parse(acceptedLeaseExpiresAt);
           if (
             Number.isFinite(acceptedDeadline)
@@ -561,12 +568,45 @@ export async function executeClaimedRun(
     }, heartbeatIntervalMs);
   }
   const trustedReceiptsByActionId = new Map<string, Promise<MaterialActionReceipt | null>>();
+  const lifecycleEvidence = (conclusion?: OpenTagRunResult["conclusion"]) => {
+    if (!latestWorkspaceAttestation) return undefined;
+    const interruptionEvidence = conclusion && ["cancelled", "interrupted", "timed_out"].includes(conclusion)
+      ? {
+          state: "interrupted_evidence" as const,
+          runId,
+          attemptId: lease.attemptId,
+          attemptNumber: hostedAuthority?.attemptNumber ?? claimed.attemptNumber,
+          workspaceId: latestWorkspaceAttestation.workspaceId,
+          workspacePathDigest: latestWorkspaceAttestation.workspacePathDigest,
+          fencingTokenDigest: hostedAuthority?.fencingTokenDigest
+            ?? latestWorkspaceAttestation.fencingTokenDigest,
+          reason: conclusion === "interrupted" ? "stale_fence" as const : "cancelled" as const,
+          observedAt: new Date().toISOString(),
+          processStop: "unconfirmed" as const,
+          materialOutcome: "outcome_unknown" as const,
+        }
+      : undefined;
+    return { workspaceAttestation: latestWorkspaceAttestation,
+      ...(interruptionEvidence ? { interruptionEvidence } : {}) };
+  };
 
   const executorRunPromise: Promise<ExecutorRunOutcome> = activeExecutor
     .run(
       {
         runId,
         attemptId: claimed.attemptId,
+        ...(hostedAuthority?.credentialId && hostedAuthority.attemptNumber
+          && hostedAuthority.fencingTokenDigest
+          ? { attemptAuthority: {
+              attemptNumber: hostedAuthority.attemptNumber,
+              fencingTokenDigest: hostedAuthority.fencingTokenDigest,
+              credentialId: hostedAuthority.credentialId,
+              leaseExpiresAt: hostedAuthority.leaseExpiresAt,
+            } }
+          : {}),
+        ...(hostedAuthority?.workspaceAttestation
+          ? { workspaceAttestation: hostedAuthority.workspaceAttestation }
+          : {}),
         workspace,
         command: claimed.event.command,
         context: claimed.event.context,
@@ -593,7 +633,11 @@ export async function executeClaimedRun(
             ...(request.grantScope ? { grantScope: request.grantScope } : {}),
             permissionScopes: request.permissionScopes,
             mode: input.approvalMode ?? "auto",
-            provider: request.provider
+            provider: request.provider,
+            ...(latestWorkspaceAttestation
+              ? { workspaceAttestationDigest:
+                  await computeControlPayloadDigestV1(latestWorkspaceAttestation) }
+              : {})
           });
           while (resolution.state === "waiting") {
             await new Promise((resolveWait) => setTimeout(resolveWait, 250));
@@ -614,7 +658,14 @@ export async function executeClaimedRun(
             return {
               actionId: resolution.action.id,
               decision: resolution.decision === "allow_run" ? "allow_run" as const : "allow_once" as const,
-              material: resolution.action.riskTier !== "low"
+              material: resolution.action.riskTier !== "low",
+              ...(resolution.action.riskTier !== "low" && input.client.confirmActionPermission
+                ? { confirmMaterialAuthorization: async () => {
+                    const confirmed = await input.client.confirmActionPermission!(
+                      runId, lease, resolution.action.id);
+                    return confirmed.state === "authorized";
+                  } }
+                : {})
             };
           }
           if (resolution.state === "reconciled") {
@@ -664,12 +715,25 @@ export async function executeClaimedRun(
       {
         emit: async (event) => {
           const safeEvent = sanitizeCredentialLikeValue(event, { secrets: [lease.fencingToken] });
-          console.log(`[${safeEvent.type}] ${safeEvent.message}`);
+          if (safeEvent.workspaceAttestation) {
+            latestWorkspaceAttestation = {
+              ...safeEvent.workspaceAttestation,
+              leaseExpiresAt: latestWorkspaceAttestation?.leaseExpiresAt
+                ?? safeEvent.workspaceAttestation.leaseExpiresAt,
+            };
+          }
+          const progressMessage = hostedAuthority
+            ? "Hosted executor progress received."
+            : safeEvent.message;
+          console.log(`[${safeEvent.type}] ${progressMessage}`);
           try {
             await input.client.progress(runId, lease, {
               type: safeEvent.type,
-              message: safeEvent.message,
-              at: safeEvent.at
+              message: progressMessage,
+              at: safeEvent.at,
+              ...(latestWorkspaceAttestation ? { workspaceAttestation: latestWorkspaceAttestation } : {}),
+              ...(safeEvent.interruptionEvidence
+                ? { interruptionEvidence: safeEvent.interruptionEvidence } : {}),
             });
           } catch (error) {
             if (runNoLongerClaimed(error)) {
@@ -765,7 +829,8 @@ export async function executeClaimedRun(
         sanitizeCredentialLikeValue(
           timedOutRunResult({ executorName: activeExecutor.displayName, timeoutMs: runTimeoutMs ?? 0 }),
           { secrets: [lease.fencingToken] }
-        )
+        ),
+        lifecycleEvidence("timed_out"),
       );
     } catch (completeError) {
       if (runNoLongerClaimed(completeError)) {
@@ -791,7 +856,8 @@ export async function executeClaimedRun(
         lease,
         sanitizeCredentialLikeValue(failedRunResult(activeExecutor.displayName, executorOutcome.error), {
           secrets: [lease.fencingToken]
-        })
+        }),
+        lifecycleEvidence("failure"),
       );
     } catch (completeError) {
       if (runNoLongerClaimed(completeError)) {
@@ -813,36 +879,13 @@ export async function executeClaimedRun(
   const executorResult = sanitizeCredentialLikeValue(executorOutcome.result, {
     secrets: [lease.fencingToken]
   });
-  let result: OpenTagRunResult;
-  try {
-    result = binding
-      ? await maybeCreatePullRequest({
-          run: claimed.run,
-          ...(executor.capability ? { executorCapability: executor.capability } : {}),
-          event: claimed.event,
-          binding,
-          result: executorResult,
-          options: input.pullRequestOptions ?? {},
-          ...(hostedAuthority
-            ? { assertExecutionCurrent: hostedExecutionIsCurrent }
-            : {})
-        })
-      : executorResult;
-  } catch (error) {
-    if (!(await hostedExecutionIsCurrent())) {
-      if (cancelPromise) await cancelPromise;
-      return true;
-    }
-    result = sanitizeCredentialLikeValue(pullRequestPreparationFailureResult(executorResult, error), {
-      secrets: [lease.fencingToken]
-    });
-  }
+  const result = executorResult;
   if (!(await hostedExecutionIsCurrent())) {
     if (cancelPromise) await cancelPromise;
     return true;
   }
   try {
-    await input.client.complete(runId, lease, result);
+    await input.client.complete(runId, lease, result, lifecycleEvidence(result.conclusion));
   } catch (error) {
     if (runNoLongerClaimed(error)) {
       return true;

@@ -19,7 +19,6 @@ import {
   CompletionWaiverSchema,
   canonicalJsonStringify,
   computeControlPayloadDigestV1,
-  computeControlReceiptDigestV1,
   computeHostedLifecycleRequestDigestV1,
   computeHostedLifecycleRequestIdV1,
   computeHostedLifecycleOperationIdV1,
@@ -40,7 +39,6 @@ import {
   defaultRunEventMetadata,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
-  parseGitHubIssueCommentsTargetV1,
   ReassessmentObligationReasonCodeSchema,
   ReassessmentObligationSchema,
   ReassessmentObligationSourceKindSchema,
@@ -447,7 +445,7 @@ export type ImportHostedAssignedRunResult = {
 };
 
 export type HostedSourceRefetchReceipt = {
-  provider: "github";
+  provider: "github" | "slack";
   providerRepositoryId: string;
   owner: string;
   repo: string;
@@ -1400,6 +1398,52 @@ function newFencingToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+function validatePersistedProposalEvidence(result: OpenTagRunResult): OpenTagRunResult {
+  for (const artifact of result.artifacts ?? []) {
+    const metadata = artifact.metadata;
+    const proposalLike = artifact.id?.endsWith(":proposal-evidence")
+      || artifact.title === "Immutable proposal evidence"
+      || artifact.uri?.endsWith("/proposal-evidence")
+      || Boolean(metadata?.["proposalEvidence"] || metadata?.["evidenceDigest"]);
+    if (!proposalLike) continue;
+    if (!metadata || metadata["readiness"] !== "not_assessed"
+      || typeof metadata["evidenceDigest"] !== "string"
+      || typeof metadata["artifactDigest"] !== "string"
+      || !metadata["proposalEvidence"] || typeof metadata["proposalEvidence"] !== "object") {
+      throw new Error("proposal_evidence_invalid");
+    }
+    if (!artifact.sourceRunId
+      || artifact.id !== `${artifact.sourceRunId}:proposal-evidence`
+      || artifact.type !== "patch_summary" || artifact.kind !== "patch"
+      || artifact.title !== "Immutable proposal evidence"
+      || artifact.uri !== `opentag://run/${encodeURIComponent(artifact.sourceRunId)}/proposal-evidence`
+      || canonicalJsonStringify(Object.keys(metadata).sort())
+        !== canonicalJsonStringify(["artifactDigest", "evidenceDigest", "proposalEvidence", "readiness"])) {
+      throw new Error("proposal_evidence_identity_mismatch");
+    }
+    const evidence = metadata["proposalEvidence"] as Record<string, unknown>;
+    const changedFiles = evidence["changedFiles"];
+    const evidenceDigest = evidence["evidenceDigest"];
+    const digestInput = { ...evidence };
+    delete digestInput["evidenceDigest"];
+    const computedChangedFilesDigest = Array.isArray(changedFiles)
+      ? canonicalSha256Json(changedFiles) : null;
+    const computedEvidenceDigest = canonicalSha256Json(digestInput);
+    const artifactDigestInput = { ...artifact, metadata: { ...metadata } };
+    delete (artifactDigestInput.metadata as Record<string, unknown>)["artifactDigest"];
+    const computedArtifactDigest = canonicalSha256Json(artifactDigestInput);
+    if (evidence["schemaVersion"] !== 1
+      || evidence["kind"] !== "attempt_proposal_evidence"
+      || evidence["changedFilesDigest"] !== computedChangedFilesDigest
+      || evidenceDigest !== computedEvidenceDigest
+      || metadata["evidenceDigest"] !== evidenceDigest
+      || metadata["artifactDigest"] !== computedArtifactDigest) {
+      throw new Error("proposal_evidence_digest_mismatch");
+    }
+  }
+  return result;
+}
+
 function attemptFromRow(row: typeof attempts.$inferSelect): Attempt {
   return {
     id: row.id,
@@ -1411,7 +1455,8 @@ function attemptFromRow(row: typeof attempts.$inferSelect): Attempt {
     heartbeatAt: row.heartbeatAt,
     leaseExpiresAt: row.leaseExpiresAt,
     ...(row.finishedAt ? { finishedAt: row.finishedAt } : {}),
-    ...(row.resultJson ? { result: OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) } : {}),
+    ...(row.resultJson ? { result: validatePersistedProposalEvidence(
+      OpenTagRunResultSchema.parse(JSON.parse(row.resultJson))) } : {}),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
@@ -2012,7 +2057,8 @@ class StaleActionTransitionError extends Error {}
 
 function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
-  const result = row.resultJson ? OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) : undefined;
+  const result = row.resultJson ? validatePersistedProposalEvidence(
+    OpenTagRunResultSchema.parse(JSON.parse(row.resultJson))) : undefined;
   const triggeredByAction = row.triggeredByActionJson ? ActionHintSchema.parse(JSON.parse(row.triggeredByActionJson)) : undefined;
   const protocolFields = protocolRunFieldsFromEvent(event, row.createdAt);
   const durableThread = protocolFields.thread && row.workThreadId
@@ -2827,12 +2873,42 @@ function aggregateMetrics(input: {
 }
 
 export function createOpenTagRepository(db: BetterSQLite3Database) {
+  const hostedExecutionPayloads = new Map<string, {
+    runId: string;
+    fencingToken: string;
+    event: OpenTagEvent;
+    contextPacket: ReturnType<typeof protocolRunFieldsFromEvent>["contextPacket"];
+  }>();
+  function evictHostedExecutionPayload(input: {
+    attemptId?: string | undefined;
+    runId?: string | undefined;
+  }): void {
+    if (input.attemptId) hostedExecutionPayloads.delete(input.attemptId);
+    if (input.runId) {
+      for (const [attemptId, payload] of hostedExecutionPayloads) {
+        if (payload.runId === input.runId) hostedExecutionPayloads.delete(attemptId);
+      }
+    }
+  }
+  function evictHostedExecutionPayloadIfFenceChanged(
+    attemptId: string,
+    canonicalFencingToken: string,
+  ): void {
+    const payload = hostedExecutionPayloads.get(attemptId);
+    if (payload && payload.fencingToken !== canonicalFencingToken) {
+      hostedExecutionPayloads.delete(attemptId);
+    }
+  }
   function activeAttemptLease(input: AttemptLease):
     | { outcome: "active"; run: typeof runs.$inferSelect; attempt: typeof attempts.$inferSelect }
     | { outcome: "stale_attempt" | "not_found" } {
     const run = db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-    if (!run) return { outcome: "not_found" };
+    if (!run) {
+      evictHostedExecutionPayload({ attemptId: input.attemptId, runId: input.runId });
+      return { outcome: "not_found" };
+    }
     if (run.currentAttemptId !== input.attemptId || run.assignedRunnerId !== input.runnerId) {
+      evictHostedExecutionPayload({ attemptId: input.attemptId });
       return { outcome: "stale_attempt" };
     }
     const attempt = db.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
@@ -2840,10 +2916,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       !attempt ||
       attempt.runId !== input.runId ||
       attempt.runnerId !== input.runnerId ||
-      attempt.fencingToken !== input.fencingToken ||
       (attempt.status !== "assigned" && attempt.status !== "running") ||
       !hasActiveAttemptLease(attempt)
     ) {
+      evictHostedExecutionPayload({ attemptId: input.attemptId });
+      return { outcome: "stale_attempt" };
+    }
+    if (attempt.fencingToken !== input.fencingToken) {
+      evictHostedExecutionPayloadIfFenceChanged(input.attemptId, attempt.fencingToken);
       return { outcome: "stale_attempt" };
     }
     return { outcome: "active", run, attempt };
@@ -3544,6 +3624,53 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
   }
 
   type ProjectionTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+  function evictHostedExecutionPayloadIfDurablyUnrecoverable(
+    tx: ProjectionTransaction,
+    attemptId: string,
+    callerFencingToken: string,
+  ): void {
+    const payload = hostedExecutionPayloads.get(attemptId);
+    if (!payload) return;
+    const importedRun = tx.select().from(hostedRunImports)
+      .where(eq(hostedRunImports.runId, payload.runId)).limit(1).get();
+    const importedAttempt = tx.select().from(hostedAttemptImports)
+      .where(eq(hostedAttemptImports.attemptId, attemptId)).limit(1).get();
+    const run = tx.select().from(runs).where(eq(runs.id, payload.runId)).limit(1).get();
+    const attempt = tx.select().from(attempts).where(eq(attempts.id, attemptId)).limit(1).get();
+    if (
+      attempt
+      && attempt.fencingToken !== callerFencingToken
+      && attempt.fencingToken === payload.fencingToken
+    ) return;
+    const claim = importedAttempt
+      ? tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId))
+          .limit(1).get()
+      : undefined;
+    const leaseExpiresAt = Date.parse(attempt?.leaseExpiresAt ?? "");
+    const recoverable = Boolean(
+      importedRun && importedAttempt && run && attempt && claim
+      && importedAttempt.runId === payload.runId
+      && importedAttempt.attemptNumber === attempt.number
+      && run.currentAttemptId === attemptId
+      && run.assignedRunnerId === attempt.runnerId
+      && ["assigned", "running", "needs_approval"].includes(run.status)
+      && run.leaseExpiresAt === attempt.leaseExpiresAt
+      && attempt.runId === payload.runId
+      && ["assigned", "running"].includes(attempt.status)
+      && attempt.fencingToken === payload.fencingToken
+      && Number.isFinite(leaseExpiresAt)
+      && leaseExpiresAt > Date.now()
+      && claim.state === "claimed"
+      && claim.runId === payload.runId
+      && claim.attemptId === attemptId
+      && claim.attemptNumber === importedAttempt.attemptNumber
+      && claim.fencingTokenDigest === importedAttempt.fencingTokenDigest
+      && claim.terminalReasonCode === null
+    );
+    if (!recoverable) hostedExecutionPayloads.delete(attemptId);
+  }
 
   type PreparedHostedLifecycleOperation = {
     destinationId: string;
@@ -5543,7 +5670,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         || !Number.isFinite(oldExpiry) || !Number.isFinite(newExpiry)
         || oldExpiry <= Date.parse(acknowledgedAt)
         || newExpiry <= oldExpiry || newExpiry <= Date.parse(acknowledgedAt)
-      ) return false;
+      ) {
+        evictHostedExecutionPayloadIfDurablyUnrecoverable(
+          tx,
+          row.attemptId,
+          request.attempt.fencingToken,
+        );
+        return false;
+      }
       const attemptUpdated = tx.update(attempts).set({
         heartbeatAt: acknowledgedAt,
         leaseExpiresAt: receipt.payload.leaseExpiresAt,
@@ -7911,7 +8045,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
     async cancelRun(input: { runId: string; reason?: string; requestedBy?: string }): Promise<CancelRunOutcome> {
       const updatedAt = nowIso();
-      return db.transaction((tx) => {
+      const cancellation = db.transaction((tx) => {
         const current = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
         if (!current) return { outcome: "not_found" as const };
         const event = OpenTagEventSchema.parse(JSON.parse(current.eventJson));
@@ -7924,7 +8058,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           .where(eq(attempts.runId, input.runId))
           .all()
           .map((attempt) => attempt.fencingToken);
-        const safeCancellation = sanitizeRunEventValue({
+        const hosted = tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, input.runId)).limit(1).get();
+        const safeCancellation = hosted ? {
+          reason: "Hosted Run cancellation recorded.",
+        } : sanitizeRunEventValue({
           reason: input.reason ?? "Cancellation was requested by a human.",
           ...(input.requestedBy ? { requestedBy: input.requestedBy } : {})
         }, fencingTokens);
@@ -7998,7 +8136,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             previousRunnerId: current.assignedRunnerId,
             terminalReason: "cancelled_by_user",
             terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups.",
-            ...(safeCancellation.requestedBy ? { requestedBy: safeCancellation.requestedBy } : {}),
+            ...(!hosted && safeCancellation.requestedBy ? { requestedBy: safeCancellation.requestedBy } : {}),
             reason: result.summary
           },
           visibility: "audit" as const,
@@ -8015,6 +8153,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         }
         return { outcome: "cancelled" as const, run: runFromRow(cancelled), event };
       });
+      if (cancellation.outcome === "cancelled" || cancellation.outcome === "already_terminal") {
+        for (const [attemptId, payload] of hostedExecutionPayloads) {
+          if (payload.runId === input.runId) hostedExecutionPayloads.delete(attemptId);
+        }
+      }
+      return cancellation;
     },
 
     async createFollowUpRequest(input: {
@@ -8926,13 +9070,27 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         eq(hostedClaimOperations.state, "claimed")
       )).orderBy(desc(hostedClaimOperations.acknowledgedAt), desc(hostedClaimOperations.operationId));
       for (const operation of operations) {
-        if (!operation.runId || operation.executionStartedAt) continue;
+        if (operation.terminalReasonCode !== null) {
+          evictHostedExecutionPayload({
+            attemptId: operation.attemptId ?? undefined,
+            ...(operation.runId ? { runId: operation.runId } : {}),
+          });
+          continue;
+        }
+        if (!operation.runId) continue;
+        if (operation.executionStartedAt) continue;
         const runRow = await db.select().from(runs).where(and(
           eq(runs.id, operation.runId),
           inArray(runs.status, ["assigned", "running"]),
           eq(runs.assignedRunnerId, input.runnerId)
         )).limit(1).get();
-        if (!runRow?.currentAttemptId) continue;
+        if (!runRow?.currentAttemptId) {
+          evictHostedExecutionPayload({
+            attemptId: operation.attemptId ?? undefined,
+            runId: operation.runId,
+          });
+          continue;
+        }
         const attemptRow = await db.select().from(attempts).where(and(
           eq(attempts.id, runRow.currentAttemptId),
           eq(attempts.runId, runRow.id),
@@ -8946,12 +9104,22 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           : undefined;
         if (
           !attemptRow || !importRow || !attemptImportRow || !attemptRow.selectedExecutorId
+          || attemptRow.number !== attemptImportRow.attemptNumber
           || operation.operationId !== attemptImportRow.claimOperationId
         ) {
+          evictHostedExecutionPayload({
+            attemptId: attemptRow?.id ?? operation.attemptId ?? undefined,
+            runId: runRow.id,
+          });
           throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
         }
         const leaseExpiresAt = Date.parse(attemptRow.leaseExpiresAt);
-        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= recoveredAt) continue;
+        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= recoveredAt) {
+          evictHostedExecutionPayload({ attemptId: attemptRow.id });
+          continue;
+        }
+        const executionPayload = hostedExecutionPayloads.get(attemptRow.id);
+        if (!executionPayload) return null;
         const hostedAuthority: HostedImportAuthority = {
           ...(JSON.parse(attemptImportRow.authorityJson) as HostedClaimV1["authority"]),
           admissionId: importRow.admissionId,
@@ -8973,8 +9141,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         };
         return {
           claimed: {
-            run: runFromRow(runRow),
-            event: OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)),
+            run: { ...runFromRow(runRow), contextPacket: executionPayload.contextPacket },
+            event: executionPayload.event,
             attemptId: attemptRow.id,
             attemptNumber: attemptRow.number,
             fencingToken: attemptRow.fencingToken,
@@ -9037,6 +9205,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ? JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]
           : undefined;
         if (!run || !attempt || !importedAttempt || !claim || authority?.credentialId !== input.credentialId) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
           throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
         }
         if (
@@ -9049,7 +9218,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || !["assigned", "running"].includes(attempt.status)
           || (attempt.selectedExecutorId !== null && attempt.selectedExecutorId !== safeInput.executor)
           || !hasActiveAttemptLease(attempt)
-        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
         const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
         const duplicate = run.status === "running" && attempt.status === "running";
         if (!duplicate) {
@@ -9145,7 +9317,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || attempt.runId !== input.runId || attempt.runnerId !== input.runnerId
           || attempt.fencingToken !== input.fencingToken || attempt.status !== "running"
           || !hasActiveAttemptLease(attempt)
-        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
         const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
         const digest = progressIdempotencyDigest(input.idempotencyKey);
         const inserted = tx.insert(runEvents).values({
@@ -9196,7 +9371,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         action: "reject-start",
         request
       });
-      return db.transaction((tx) => {
+      const rejection = db.transaction((tx) => {
         const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
         const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
         const claim = tx.select().from(hostedClaimOperations).where(and(
@@ -9225,7 +9400,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           && Date.parse(claim.leaseExpiresAt ?? "") > Date.parse(prepared.createdAt)
         );
         if (!run || !attempt) {
-          if (!validShell) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+          if (!validShell) {
+            evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+            throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+          }
           const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
           return { outcome: "journaled" as const, operation: journal.operation };
         }
@@ -9242,12 +9420,17 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || attempt.runnerId !== input.runnerId || attempt.fencingToken !== input.fencingToken
           || attempt.status !== "assigned" || attempt.selectedExecutorId !== safeInput.executorId
           || !hasActiveAttemptLease(attempt)
-        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
         const rejections = routingRejectionsFromJson(run.routingRejectionsJson);
-        rejections.push({ runnerId: input.runnerId, executorId: safeInput.executorId, reason: safeInput.reason });
+        const stableReason = "hosted_attempt_start_rejected";
+        rejections.push({ runnerId: input.runnerId, executorId: safeInput.executorId, reason: stableReason });
         tx.update(attempts).set({
           status: "interrupted", finishedAt: prepared.createdAt,
-          resultJson: JSON.stringify({ conclusion: "interrupted", summary: safeInput.reason }),
+          resultJson: JSON.stringify({ conclusion: "interrupted",
+            summary: "Hosted Attempt start rejected." }),
           updatedAt: prepared.createdAt
         }).where(eq(attempts.id, input.attemptId)).run();
         tx.update(runs).set({
@@ -9262,13 +9445,18 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           payload: {
             runnerId: input.runnerId, executorId: safeInput.executorId,
             attemptId: input.attemptId, routingDecisionId: attempt.routingDecisionId,
-            reason: safeInput.reason
+            reasonCode: stableReason
           },
-          visibility: "audit", importance: "blocking", message: safeInput.reason,
+          visibility: "audit", importance: "blocking",
+          message: "Hosted Attempt start rejected.",
           createdAt: prepared.createdAt
         })).run();
         return { outcome: "requeued" as const, operation: journal.operation };
       }, { behavior: "immediate" });
+      if (["requeued", "duplicate", "journaled"].includes(rejection.outcome)) {
+        hostedExecutionPayloads.delete(input.attemptId);
+      }
+      return rejection;
     },
 
     async acquireHostedExecutionStart(input: {
@@ -9314,10 +9502,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || attempt.fencingToken !== input.fencingToken
           || !validAcknowledgedLifecycleDependency(runningOperation)
         ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
           throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
         }
         const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
-        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.parse(startedAt)) return false;
+        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.parse(startedAt)) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+          return false;
+        }
         if (operation.executionStartedAt) return false;
         const acquired = tx.update(hostedClaimOperations).set({
           executionStartedAt: startedAt,
@@ -9349,19 +9541,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           eq(hostedClaimOperations.runId, input.runId),
           isNotNull(hostedClaimOperations.executionStartedAt)
         )).limit(1).get();
+        if (operation && operation.terminalReasonCode !== null) {
+          evictHostedExecutionPayload({ attemptId: input.attemptId });
+          return false;
+        }
         if (
           !importedRun || !importedAttempt || !run || !attempt || !operation
           || importedAttempt.runId !== input.runId
+          || attempt.number !== importedAttempt.attemptNumber
           || run.currentAttemptId !== input.attemptId
           || !["assigned", "running", "needs_approval"].includes(run.status)
           || attempt.runId !== input.runId
           || !["assigned", "running"].includes(attempt.status)
-          || attempt.fencingToken !== input.fencingToken
         ) {
+          evictHostedExecutionPayload({ attemptId: input.attemptId });
+          return false;
+        }
+        if (attempt.fencingToken !== input.fencingToken) {
+          evictHostedExecutionPayloadIfFenceChanged(input.attemptId, attempt.fencingToken);
           return false;
         }
         const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
-        return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > checkedAt;
+        const current = Number.isFinite(leaseExpiresAt) && leaseExpiresAt > checkedAt;
+        if (!current) evictHostedExecutionPayload({ attemptId: input.attemptId });
+        return current;
       });
     },
 
@@ -9406,16 +9609,19 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || importedAttempt.attemptNumber !== attempt.number
           || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
         ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
           return null;
         }
         const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
-        return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > checkedAt
-          ? { leaseExpiresAt: attempt.leaseExpiresAt }
-          : null;
+        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= checkedAt) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+          return null;
+        }
+        return { leaseExpiresAt: attempt.leaseExpiresAt };
       });
     },
 
-    async enqueueHostedLifecycleOperation(input: {
+    async enqueueHostedLifecycleOperation(_input: {
       destinationId: string;
       organizationId: string;
       runnerId: string;
@@ -9741,6 +9947,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || !Number.isFinite(Date.parse(attempt.leaseExpiresAt))
           || Date.parse(attempt.leaseExpiresAt) <= Date.parse(prepared.createdAt)
         ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
           throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
         }
         const result = enqueueHostedLifecycleOperationTx(tx, prepared);
@@ -9956,6 +10163,113 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
     },
 
+    async getHostedProposalSettlementForRetry(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+    }) {
+      const candidates = await db.select().from(runs).where(and(
+        eq(runs.status, "succeeded"),
+        eq(runs.assignedRunnerId, input.runnerId),
+        isNotNull(runs.resultJson),
+      )).orderBy(runs.updatedAt).all();
+      for (const run of candidates) {
+        if (!run.currentAttemptId || !run.resultJson) continue;
+        const attempt = await db.select().from(attempts).where(and(
+          eq(attempts.id, run.currentAttemptId),
+          eq(attempts.runId, run.id),
+          eq(attempts.runnerId, input.runnerId),
+          eq(attempts.status, "succeeded"),
+        )).limit(1).get();
+        const imported = attempt ? await db.select().from(hostedRunImports).where(and(
+          eq(hostedRunImports.runId, run.id),
+          eq(hostedRunImports.attemptId, attempt.id),
+        )).limit(1).get() : undefined;
+        const claim = imported ? await db.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, imported.claimOperationId),
+          eq(hostedClaimOperations.destinationId, input.destinationId),
+          eq(hostedClaimOperations.organizationId, input.organizationId),
+          eq(hostedClaimOperations.runnerId, input.runnerId),
+          eq(hostedClaimOperations.state, "claimed"),
+        )).limit(1).get() : undefined;
+        const completion = attempt ? await db.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          eq(hostedLifecycleOperations.runnerId, input.runnerId),
+          eq(hostedLifecycleOperations.runId, run.id),
+          eq(hostedLifecycleOperations.attemptId, attempt.id),
+          eq(hostedLifecycleOperations.action, "complete"),
+          eq(hostedLifecycleOperations.state, "acknowledged"),
+        )).limit(1).get() : undefined;
+        if (!attempt || !imported || !claim || !completion
+          || attempt.fencingToken === "" || imported.fencingTokenDigest !== completion.fencingTokenDigest) {
+          continue;
+        }
+        const result = validatePersistedProposalEvidence(
+          OpenTagRunResultSchema.parse(JSON.parse(run.resultJson)));
+        const proposalArtifact = result.artifacts?.find((artifact) =>
+          artifact.id === `${run.id}:proposal-evidence`);
+        const artifactDigest = proposalArtifact?.metadata?.["artifactDigest"];
+        if (!proposalArtifact || typeof artifactDigest !== "string") continue;
+        const authority = JSON.parse(imported.authorityJson) as HostedClaimV1["authority"];
+        const evidence = proposalArtifact.metadata?.["proposalEvidence"] as
+          | { branch?: unknown; baseRevision?: unknown; finalRevision?: unknown; finalTree?: unknown }
+          | undefined;
+        if (!evidence || typeof evidence.branch !== "string"
+          || typeof evidence.baseRevision !== "string"
+          || typeof evidence.finalRevision !== "string"
+          || typeof evidence.finalTree !== "string") continue;
+        return { runId: run.id, attemptId: attempt.id, attemptNumber: attempt.number,
+          fencingToken: attempt.fencingToken, fencingTokenDigest: imported.fencingTokenDigest,
+          runnerGeneration: authority.credentialGeneration,
+          projectTargetId: authority.projectTargetId,
+          targetBindingDigest: authority.targetBindingDigest,
+          candidateId: `candidate_${artifactDigest.slice("sha256:".length,
+            "sha256:".length + 48)}`, branch: evidence.branch,
+          baseRevision: evidence.baseRevision, finalRevision: evidence.finalRevision,
+          finalTree: evidence.finalTree, proposalArtifact };
+      }
+      return null;
+    },
+
+    async getHostedSucceededPublicationAuthority(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      runId: string;
+      attemptId: string;
+      fencingTokenDigest: string;
+    }): Promise<{ fencingToken: string; attemptNumber: number } | null> {
+      const run = await db.select().from(runs).where(and(
+        eq(runs.id, input.runId), eq(runs.status, "succeeded"),
+      )).limit(1).get();
+      const attempt = run ? await db.select().from(attempts).where(and(
+        eq(attempts.id, input.attemptId), eq(attempts.runId, input.runId),
+        eq(attempts.runnerId, input.runnerId), eq(attempts.status, "succeeded"),
+      )).limit(1).get() : undefined;
+      const runImport = attempt ? await db.select().from(hostedRunImports)
+        .where(and(eq(hostedRunImports.runId, input.runId),
+          eq(hostedRunImports.attemptId, input.attemptId),
+          eq(hostedRunImports.fencingTokenDigest, input.fencingTokenDigest)))
+        .limit(1).get() : undefined;
+      const attemptImport = runImport ? await db.select().from(hostedAttemptImports)
+        .where(and(eq(hostedAttemptImports.attemptId, input.attemptId),
+          eq(hostedAttemptImports.runId, input.runId),
+          eq(hostedAttemptImports.attemptNumber, attempt!.number),
+          eq(hostedAttemptImports.fencingTokenDigest, input.fencingTokenDigest)))
+        .limit(1).get() : undefined;
+      const claim = attemptImport ? await db.select().from(hostedClaimOperations)
+        .where(and(eq(hostedClaimOperations.operationId, attemptImport.claimOperationId),
+          eq(hostedClaimOperations.destinationId, input.destinationId),
+          eq(hostedClaimOperations.organizationId, input.organizationId),
+          eq(hostedClaimOperations.runnerId, input.runnerId),
+          eq(hostedClaimOperations.state, "claimed")))
+        .limit(1).get() : undefined;
+      if (!attempt || !runImport || !attemptImport || !claim
+        || attempt.fencingToken === "" || attempt.number !== attemptImport.attemptNumber) return null;
+      return { fencingToken: attempt.fencingToken, attemptNumber: attempt.number };
+    },
+
     async importHostedAssignedRun(input: {
       event: OpenTagEvent;
       claim: HostedClaimV1;
@@ -9985,24 +10299,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         : typeof event.metadata.pullRequestNumber === "number"
           ? event.metadata.pullRequestNumber
           : null;
-      if (
-        event.source !== "github"
+      const repositoryProvider = admission.repository.provider ?? admission.provider;
+      const githubSourceMatches = admission.provider === "github"
+        && event.source === "github" && event.actor.provider === "github"
+        && event.workItem?.provider === "github"
+        && event.workItem.kind === admission.sourceThread.kind
+        && localThreadNumber === admission.sourceThread.number;
+      const slackSourceMatches = admission.provider === "slack"
+        && event.source === "slack" && event.actor.provider === "slack"
+        && event.workItem?.provider === "slack" && event.workItem.kind === "thread"
+        && event.workItem.externalId === admission.sourceThread.providerThreadId
+        && event.metadata["channelId"] === admission.sourceThread.channelId
+        && event.metadata["messageTs"] === admission.sourceEvent.messageId;
+      if (!(githubSourceMatches || slackSourceMatches)
         || event.sourceEventId !== admission.sourceEvent.providerEventId
-        || event.actor.provider !== "github"
         || event.actor.providerUserId !== admission.verifiedActor.providerUserId
         || event.actor.handle !== admission.verifiedActor.login
         || deliveryId !== admission.deliveryId
-        || projectTarget?.provider !== admission.provider
+        || projectTarget?.provider !== repositoryProvider
         || projectTarget.owner !== admission.repository.owner
-        || projectTarget.repo !== admission.repository.repo
-        || event.workItem?.provider !== "github"
-        || event.workItem.kind !== admission.sourceThread.kind
-        || localThreadNumber !== admission.sourceThread.number
-      ) {
+        || projectTarget.repo !== admission.repository.repo) {
         throw new HostedImportConflictError("HOSTED_IMPORT_EVENT_MISMATCH");
       }
       if (
-        sourceReceipt.provider !== "github"
+        sourceReceipt.provider !== admission.provider
         || sourceReceipt.providerRepositoryId !== admission.repository.providerRepositoryId
         || sourceReceipt.owner !== admission.repository.owner
         || sourceReceipt.repo !== admission.repository.repo
@@ -10019,6 +10339,19 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
       const importedAt = nowIso();
       const protocolFields = protocolRunFieldsFromEvent(event, event.receivedAt);
+      const durableMetadata = Object.fromEntries(Object.entries(event.metadata ?? {})
+        .filter(([key, value]) => ["owner", "repo", "repoProvider", "issueNumber",
+          "pullRequestNumber", "deliveryId", "githubDeliveryId"].includes(key)
+          && (typeof value === "string" || typeof value === "number" || typeof value === "boolean")));
+      const durableEvent = OpenTagEventSchema.parse({
+        ...event,
+        command: { rawText: "[redeemed source omitted]", intent: event.command.intent, args: {} },
+        context: [],
+        permissions: [],
+        metadata: durableMetadata,
+        ...(event.callback ? { callback: { provider: event.callback.provider,
+          uri: "opentag://hosted-source-callback-omitted" } } : {}),
+      });
       const eventDigest = canonicalSha256Json(event);
       const contextPacketDigest = canonicalSha256Json(protocolFields.contextPacket);
       const incomingWorkThreadDigest = protocolFields.thread
@@ -10376,8 +10709,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           id: claim.runId,
           eventId: event.id,
           status: "assigned",
-          eventJson: JSON.stringify(event),
-          contextPacketJson: JSON.stringify(protocolFields.contextPacket),
+          eventJson: JSON.stringify(durableEvent),
+          contextPacketJson: null,
           assignedRunnerId: claim.runnerId,
           executor: claim.executorId,
           repoProvider: projectTarget.provider,
@@ -10488,10 +10821,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           runEventValues({
             runId: claim.runId,
             type: "context_packet.generated",
-            payload: { contextPacket: protocolFields.contextPacket, ...(durableThread ? { thread: durableThread } : {}) },
+            payload: { contextPacketDigest, ...(durableThread ? { thread: durableThread } : {}) },
             visibility: "audit",
             importance: "normal",
-            message: protocolFields.contextPacket.summary,
+            message: "Hosted execution context accepted in memory.",
             createdAt: importedAt
           })
         ]).run();
@@ -10508,7 +10841,22 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         };
       });
 
-      const storedEvent = OpenTagEventSchema.parse(JSON.parse(result.runRow.eventJson));
+      for (const [attemptId, payload] of hostedExecutionPayloads) {
+        if (payload.runId === claim.runId && attemptId !== claim.attempt.id) {
+          hostedExecutionPayloads.delete(attemptId);
+        }
+      }
+      if (!result.superseded && !result.executionStartedAt
+        && !terminalRunStatus(result.runRow.status)) {
+        hostedExecutionPayloads.set(claim.attempt.id, {
+          runId: claim.runId,
+          fencingToken: claim.attempt.fencingToken,
+          event,
+          contextPacket: protocolFields.contextPacket,
+        });
+      } else {
+        hostedExecutionPayloads.delete(claim.attempt.id);
+      }
       const hostedAuthority: HostedImportAuthority = {
         ...(JSON.parse(result.attemptImportRow.authorityJson) as HostedClaimV1["authority"]),
         admissionId: result.importRow.admissionId,
@@ -10539,8 +10887,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             : "ready_to_start",
         executionMayStart: false,
         claimed: result.superseded || result.executionStartedAt || terminalRunStatus(result.runRow.status) ? null : {
-          run: runFromRow(result.runRow),
-          event: storedEvent,
+          run: { ...runFromRow(result.runRow), contextPacket: protocolFields.contextPacket },
+          event,
           attemptId: claim.attempt.id,
           attemptNumber: claim.attempt.number,
           fencingToken: claim.attempt.fencingToken,
@@ -11750,7 +12098,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       ): Promise<CompleteRunOutcome> => {
       const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
       const safeIdempotencyKey = safeInput.idempotencyKey;
-      const parsedResult = OpenTagRunResultSchema.parse(safeInput.result);
+      const parsedResult = validatePersistedProposalEvidence(
+        OpenTagRunResultSchema.parse(safeInput.result));
       const humanEscalation = input.humanEscalation
         ? HumanEscalationSchema.parse(input.humanEscalation)
         : undefined;
@@ -11811,6 +12160,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                   : "failed";
       const runRow = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
       if (!runRow) {
+        if (input.runnerId) evictHostedExecutionPayload({
+          attemptId: input.attemptId, runId: input.runId });
         if (input.runnerId) return "not_found";
         throw new Error(`Run not found: ${input.runId}`);
       }
@@ -11931,6 +12282,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         }
       }
       if (terminalRunStatus(runRow.status)) {
+        if (input.runnerId) evictHostedExecutionPayload({
+          attemptId: input.attemptId, runId: input.runId });
         if (hostedLifecycleOperation && !hasExactHostedLifecycleReplay) {
           throw new HostedLifecycleOperationConflictError(
             "HOSTED_LIFECYCLE_OPERATION_CONFLICT",
@@ -11940,6 +12293,19 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }
       const runThread = runRow ? protocolRunFieldsFromEvent(OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)), runRow.createdAt).thread : undefined;
       const attemptId = input.attemptId ?? runRow.currentAttemptId ?? undefined;
+      const hostedAttempt = attemptId
+        ? await db.select({ attemptId: hostedAttemptImports.attemptId })
+            .from(hostedAttemptImports).where(eq(hostedAttemptImports.attemptId, attemptId)).limit(1).get()
+        : undefined;
+      const durableResult = hostedAttempt
+        ? OpenTagRunResultSchema.parse({
+            conclusion: result.conclusion,
+            summary: "Hosted executor result accepted; execution details were not retained locally.",
+            nextAction: result.conclusion === "success"
+              ? "Use authoritative hosted receipts and proposal evidence for follow-up."
+              : "Reconcile the hosted Attempt before issuing fresh authority.",
+          })
+        : result;
       const attemptStatus =
         result.conclusion === "success"
           ? "succeeded"
@@ -11952,7 +12318,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 : result.conclusion === "needs_human"
                   ? "needs_human"
                   : "failed";
-      const parsedSnapshots = (result.suggestedChanges ?? []).map((snapshot) =>
+      const parsedSnapshots = (durableResult.suggestedChanges ?? []).map((snapshot) =>
         SuggestedChangesSnapshotSchema.parse({
           ...snapshot,
           sourceRunId: snapshot.sourceRunId ?? input.runId,
@@ -12014,16 +12380,25 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       ];
       const completionOutcome = db.transaction((tx) => {
         const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-        if (!currentRun) return input.runnerId ? ("not_found" as const) : ("not_found" as const);
+        if (!currentRun) {
+          if (input.runnerId) evictHostedExecutionPayload({
+            attemptId: input.attemptId, runId: input.runId });
+          return input.runnerId ? ("not_found" as const) : ("not_found" as const);
+        }
         let currentAttempt: typeof attempts.$inferSelect | undefined;
         if (input.runnerId && input.attemptId && input.fencingToken) {
           currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
           if (
             !currentAttempt ||
             currentAttempt.runId !== input.runId ||
-            currentAttempt.runnerId !== input.runnerId ||
-            currentAttempt.fencingToken !== input.fencingToken
+            currentAttempt.runnerId !== input.runnerId
           ) {
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
+            return "stale_attempt" as const;
+          }
+          if (currentAttempt.fencingToken !== input.fencingToken) {
+            evictHostedExecutionPayloadIfFenceChanged(
+              input.attemptId, currentAttempt.fencingToken);
             return "stale_attempt" as const;
           }
           if (releasedTerminalAttemptMatchesRun(currentAttempt, currentRun)) {
@@ -12069,20 +12444,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 );
               }
             }
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
             return status === currentRun.status ? ("duplicate" as const) : ("stale_attempt" as const);
           }
           if (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") {
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
             return "stale_attempt" as const;
           }
-          if (!hasActiveAttemptLease(currentAttempt)) return "stale_attempt" as const;
+          if (!hasActiveAttemptLease(currentAttempt)) {
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
+            return "stale_attempt" as const;
+          }
           if (currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId) {
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
             return "stale_attempt" as const;
           }
-          if (currentRun.status !== "assigned" && currentRun.status !== "running") return "stale_attempt" as const;
+          if (currentRun.status !== "assigned" && currentRun.status !== "running") {
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
+            return "stale_attempt" as const;
+          }
         } else if (terminalRunStatus(currentRun.status)) {
+          evictHostedExecutionPayload({ attemptId: input.attemptId, runId: input.runId });
           return "not_found" as const;
         }
-        let completedResult = result;
+        let completedResult = durableResult;
         if (humanEscalation) {
           const activeDedupeKey = humanEscalation.dedupeKey
             ? `${humanEscalation.runId ?? "thread"}:${humanEscalation.dedupeKey}`
@@ -12135,7 +12520,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             }
           }
           completedResult = OpenTagRunResultSchema.parse({
-            ...result,
+            ...durableResult,
             humanEscalationId: effectiveEscalation.id
           });
           tx.insert(reassessmentObligations)
@@ -12281,6 +12666,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         return "completed" as const;
       });
       if (completionOutcome !== "completed") return completionOutcome;
+      if (attemptId) hostedExecutionPayloads.delete(attemptId);
       return "completed";
       };
       completeRunWithHostedLifecycle = (input, lifecycle) =>

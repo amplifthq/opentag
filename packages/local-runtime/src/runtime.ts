@@ -1,8 +1,5 @@
 import { createDispatcherClient } from "@opentag/client";
-import {
-  OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1,
-  resolveGitHubSourceApiOrigin
-} from "@opentag/github";
+import { resolveGitHubSourceApiOrigin } from "@opentag/github";
 import {
   createAcpAgentExecutor,
   createBuiltInAcpExecutors,
@@ -12,7 +9,7 @@ import {
   type ExecutorAdapter,
   type RunnerSecurityPolicy
 } from "@opentag/runner";
-import type { RunnerExecutorRegistration } from "@opentag/core";
+import { compareCanonicalUnicodeStrings, type RunnerExecutorRegistration } from "@opentag/core";
 import {
   assertHostedRelayAuthorization,
   hostedRunnerAuthProblem,
@@ -20,7 +17,6 @@ import {
   type OpenTagDaemonConfig
 } from "./config.js";
 import type { DaemonClient, DaemonRuntimeInput } from "./daemon.js";
-import type { PullRequestOptions } from "./pr.js";
 import { createHostedControlLoop } from "./control-v1.js";
 
 export function securityFromConfig(config: OpenTagDaemonConfig): RunnerSecurityPolicy | undefined {
@@ -109,7 +105,7 @@ export function runnerExecutorRegistrations(
       readiness: "ready" as const,
       reason: "Executor is configured; run-specific readiness is verified before execution starts."
     }))
-    .sort((left, right) => left.executorId.localeCompare(right.executorId));
+    .sort((left, right) => compareCanonicalUnicodeStrings(left.executorId, right.executorId));
 }
 
 export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
@@ -132,19 +128,9 @@ export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
   });
 }
 
-export function pullRequestOptionsFromConfig(config: OpenTagDaemonConfig): PullRequestOptions | undefined {
-  const githubToken = config.githubToken === OPENTAG_E2E_NO_PROVIDER_CREDENTIAL_V1
-    ? undefined
-    : config.githubToken;
-  if (!githubToken && config.preparePullRequestBranch === undefined && config.allowAutoCreatePullRequest === undefined) {
-    return undefined;
-  }
-
-  return {
-    ...(githubToken ? { githubToken } : {}),
-    ...(config.preparePullRequestBranch !== undefined ? { preparePullRequestBranch: config.preparePullRequestBranch } : {}),
-    ...(config.allowAutoCreatePullRequest !== undefined ? { allowAutoCreatePullRequest: config.allowAutoCreatePullRequest } : {})
-  };
+/** @deprecated Legacy automatic-PR settings are parsed but no longer executed. */
+export function pullRequestOptionsFromConfig(_config: OpenTagDaemonConfig): undefined {
+  return undefined;
 }
 
 export function createDaemonRuntimeInput(
@@ -152,7 +138,6 @@ export function createDaemonRuntimeInput(
   options: { databasePath?: string; githubApiOrigin?: string } = {},
 ): DaemonRuntimeInput {
   const security = securityFromConfig(config);
-  const pullRequestOptions = pullRequestOptionsFromConfig(config);
   const executors = executorsFromConfig(config);
   if (options.githubApiOrigin !== undefined && !config.controlRegistration) {
     throw new Error(
@@ -182,7 +167,6 @@ export function createDaemonRuntimeInput(
       databasePath: options.databasePath,
       executors,
       ...(security ? { security } : {}),
-      ...(pullRequestOptions ? { pullRequestOptions } : {}),
       ...(githubApiOrigin !== undefined ? { githubApiOrigin } : {}),
     });
     if (!controlLoop) {
@@ -204,7 +188,6 @@ export function createDaemonRuntimeInput(
     keepScratch: config.keepScratch,
     approvalMode: config.approvalMode,
     ...(security ? { security } : {}),
-    ...(pullRequestOptions ? { pullRequestOptions } : {}),
     ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),
     ...(config.runTimeoutMs ? { runTimeoutMs: config.runTimeoutMs } : {}),
     ...(config.agentSessionProfile ? { agentSessionProfile: config.agentSessionProfile } : {}),

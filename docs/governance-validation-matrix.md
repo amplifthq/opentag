@@ -11,6 +11,10 @@ Run every local matrix case:
 corepack pnpm smoke:governance -- --all --report .omx/governance-matrix/all.json
 ```
 
+Each case stores an explicit executable plus argument vector. The harness passes
+that vector directly to the child process without shell parsing, and JSON reports
+preserve the same structured command.
+
 List available cases:
 
 ```bash
@@ -25,7 +29,7 @@ corepack pnpm smoke:governance -- --list
 | `source-thread-controls` | GitHub, GitLab, Slack, and Lark action replies reach `submitThreadAction`; `apply 1`, `reject 1`, `continue 1`, and `stop` have durable effects; duplicate and concurrent action replies are idempotent. |
 | `recovery-idempotency` | Runner leases, duplicate source deliveries, lifecycle idempotency keys, delivery-intent dedupe, fenced settlement, heartbeats, timeout cancellation, and status evidence survive failure or retry paths. |
 | `artifact-ledger-quality` | `opentag status --run <run_id>` remains useful after live-shaped runs: artifacts, Agent Work Ledger, queued delivery intents, activation blocks, and apply outcome metrics are visible while source-thread receipts stay concise. Provider delivery outcomes come only from the delivery journal or signed provider observations. |
-| `apply-failure-ux` | PR/MR apply cleanup and failure paths are explicit: missing branches disable apply before writes, create failures fall back to child runs, repeated replies do not duplicate external writes, and provider tokens/headers stay out of delivery presentations. |
+| `apply-failure-ux` | Retired automatic-PR compatibility has no git/provider side effects; exact publication preserves operation identity and reconciles ambiguous provider outcomes before retry; supported direct-apply failures remain explicit and do not leak credentials. |
 | `replay-parity` | GitHub, Slack, GitLab, and Lark live-shaped fixtures replay in memory with the same receipt, artifact, ledger, delivery-intent, and executor-capability strategy. |
 | `completion-governance` | One sanitized GitHub fixture proves admission, Context Packet generation, durable WorkThread identity, fencing, executor success pending verification, current-head checks, merge, superseding assessment lineage, concise source-thread projection, CLI explanation, restart recovery, and the end-to-end completion metric. |
 | `work-loop-actions` | Completion gates, human escalations, material-action receipts, and run outcomes produce structured causes and ActionHint primitives; WorkThread status and bounded attention expose one canonical WorkLoop view; the golden loop moves from evidence refresh to no action. |

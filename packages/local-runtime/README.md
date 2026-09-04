@@ -18,7 +18,7 @@ pnpm add @opentag/local-runtime
 - `createDaemonRuntimeInput`: derives daemon runtime input from config.
 - `runDoctor`: checks dispatcher, bindings, checkouts, and executors.
 - `parseDaemonConfig`: parses daemon config with compatibility aliases.
-- `maybeCreatePullRequest`: creates GitHub pull requests from prepared run branches.
+- `maybeCreatePullRequest`: deprecated, side-effect-free compatibility tombstone for the retired automatic-PR path.
 
 Subpath exports are also available:
 

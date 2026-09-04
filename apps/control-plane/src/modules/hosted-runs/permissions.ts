@@ -4,6 +4,8 @@ import {
   computePermissionFencingTokenDigestV1,
   computePermissionRequestDigestV1,
   HumanPermissionDecisionRequestV1Schema,
+  HOSTED_PUBLICATION_ACTION_CAPABILITIES_V1,
+  HostedAdmissionEnvelopeV1Schema,
   PermissionRequestDigestInputV1Schema,
   PermissionResolutionReceiptEnvelopeV1Schema,
   ReceiptDigestSchema,
@@ -15,7 +17,7 @@ import {
   type RunnerPermissionRequestV1,
 } from "@opentag/control-protocol";
 import type { Pool } from "pg";
-import { withPostgresTransaction } from "../../database/postgres.js";
+import { withPostgresTransaction, type PostgresTransactionClient } from "../../database/postgres.js";
 import type { RuntimePrincipal } from "../runners/index.js";
 
 type Clock = { now(): Date };
@@ -47,6 +49,30 @@ type StoredPermissionRequestV1 = ReturnType<
   typeof StoredPermissionRequestV1Schema.parse
 >;
 
+const publicationCapabilities = new Set<string>(
+  HOSTED_PUBLICATION_ACTION_CAPABILITIES_V1,
+);
+
+async function withinFrozenPermissionAuthority(
+  client: { query<Row extends Record<string, unknown>>(text: string,
+    values?: readonly unknown[]): Promise<{ rows: Row[] }> },
+  input: { organizationId: string; runId: string; request: StoredPermissionRequestV1 },
+): Promise<boolean> {
+  const result = await client.query<{ hosted_admission: unknown; publication_mode: string }>(
+    `SELECT hosted_admission, publication_mode FROM cp_hosted_run
+     WHERE organization_id = $1 AND run_id = $2`,
+    [input.organizationId, input.runId],
+  );
+  const row = result.rows[0];
+  if (!row) return false;
+  const admission = HostedAdmissionEnvelopeV1Schema.parse(row.hosted_admission);
+  return input.request.actionDescriptorDigest
+      === await computeControlPayloadDigestV1(input.request.actionDescriptor)
+    && admission.permissionCeiling.allowedActionDescriptors.includes(input.request.actionDescriptor)
+    && !(row.publication_mode === "proposal_only"
+      && publicationCapabilities.has(input.request.actionDescriptor));
+}
+
 export type PermissionCoordinator = {
   request(input: {
     principal: RuntimePrincipal;
@@ -60,6 +86,7 @@ export type PermissionCoordinator = {
     principal: ApproverPrincipal;
     runnerId: string;
     decision: HumanPermissionDecisionRequestV1;
+    authorityAttemptEpoch?: number;
   }): Promise<
     | { kind: "resolved" | "replayed"; receipt: PermissionResolutionReceiptEnvelopeV1 }
     | { kind: "stale_fence" }
@@ -91,12 +118,14 @@ function permissionDigestInput(request: RunnerPermissionRequestV1) {
     },
     permissionRequestId: request.permissionRequestId,
     actionId: request.actionId,
-    actionFamily: request.actionFamily,
+    actionDescriptor: request.actionDescriptor,
+    actionDescriptorDigest: request.actionDescriptorDigest,
     riskTier: request.riskTier,
     targetFingerprint: request.targetFingerprint,
-    permissionScopes: request.permissionScopes,
     policySnapshotRef: request.policySnapshotRef,
     policySnapshotDigest: request.policySnapshotDigest,
+    ...(request.workspaceAttestationDigest
+      ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}),
     requestedAt: request.requestedAt,
   };
 }
@@ -132,12 +161,14 @@ async function buildReceipt(input: {
     permissionRequestId: input.request.permissionRequestId,
     permissionRequestDigest: input.request.permissionRequestDigest,
     actionId: input.request.actionId,
-    actionFamily: input.request.actionFamily,
+    actionDescriptor: input.request.actionDescriptor,
+    actionDescriptorDigest: input.request.actionDescriptorDigest,
     riskTier: input.request.riskTier,
     targetFingerprint: input.request.targetFingerprint,
-    permissionScopes: input.request.permissionScopes,
     policySnapshotRef: input.request.policySnapshotRef,
     policySnapshotDigest: input.request.policySnapshotDigest,
+    ...(input.request.workspaceAttestationDigest
+      ? { workspaceAttestationDigest: input.request.workspaceAttestationDigest } : {}),
     state: input.state,
     ...(input.decision
       ? {
@@ -201,11 +232,15 @@ async function currentAttemptMatches(
     fencingTokenDigest: string;
     policySnapshotRef?: string;
     policySnapshotDigest?: string;
+    allowNeedsApproval?: boolean;
+    permissionRequestId?: string;
+    workspaceAttestationDigest?: string;
+    requireWorkspaceAttestationDigest?: boolean;
     now: Date;
   },
 ): Promise<boolean> {
   const result = await client.query(
-    `SELECT 1
+    `SELECT attempt.workspace_attestation
      FROM cp_hosted_run run
      JOIN cp_hosted_attempt attempt
        ON attempt.organization_id = run.organization_id
@@ -221,6 +256,13 @@ async function currentAttemptMatches(
          OR run.admission_policy_snapshot ->> 'receiptDigest' = $9)
        AND ($10::text IS NULL
          OR run.admission_policy_snapshot -> 'payload' ->> 'snapshotId' = $10)
+       AND attempt.material_start_state IN ('open','started_or_ambiguous')
+       AND (
+         (run.state IN ('assigned','running') AND attempt.state IN ('claimed','running'))
+         OR ($11::boolean AND run.state = 'needs_approval'
+           AND attempt.state = 'needs_approval'
+           AND attempt.blocked_permission_request_id = $12)
+       )
      FOR UPDATE OF run, attempt`,
     [
       input.organizationId,
@@ -233,15 +275,28 @@ async function currentAttemptMatches(
       input.now,
       input.policySnapshotDigest ?? null,
       input.policySnapshotRef ?? null,
+      input.allowNeedsApproval ?? false,
+      input.permissionRequestId ?? null,
     ],
-  ) as { rows: unknown[] };
-  return result.rows.length === 1;
+  ) as { rows: Array<{ workspace_attestation: unknown | null }> };
+  const row = result.rows[0];
+  if (!row) return false;
+  if (!input.workspaceAttestationDigest) return !input.requireWorkspaceAttestationDigest;
+  if (row.workspace_attestation === null) return false;
+  return row.workspace_attestation !== null
+    && await computeControlPayloadDigestV1(row.workspace_attestation)
+      === input.workspaceAttestationDigest;
 }
 
 export function createPermissionCoordinator(input: {
   pool: Pool;
   clock: Clock;
   idFactory(kind: PermissionIdKind): string;
+  issueWaitingAuthorityInTransaction?: (client: PostgresTransactionClient, input: {
+    principal: RuntimePrincipal;
+    request: RunnerPermissionRequestV1;
+    receipt: PermissionResolutionReceiptEnvelopeV1;
+  }) => Promise<void>;
 }): PermissionCoordinator {
   return {
     async request(command) {
@@ -280,6 +335,23 @@ export function createPermissionCoordinator(input: {
             replay.request_digest !== operationDigest
             || replay.operation_kind !== "request"
           ) return { kind: "conflict" } as const;
+          if (!(await currentAttemptMatches(client, {
+            organizationId: command.principal.organizationId,
+            runnerId: command.principal.runnerId,
+            credentialId: command.principal.credentialId,
+            runId: request.runId,
+            attemptId: request.attempt.attemptId,
+            attemptNumber: request.attempt.attemptNumber,
+            fencingTokenDigest: request.attempt.fencingTokenDigest,
+            policySnapshotRef: request.policySnapshotRef,
+            policySnapshotDigest: request.policySnapshotDigest,
+            allowNeedsApproval: true,
+            permissionRequestId: request.permissionRequestId,
+            ...(request.workspaceAttestationDigest
+              ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}),
+            requireWorkspaceAttestationDigest: true,
+            now: input.clock.now(),
+          }))) return { kind: "stale_fence" } as const;
           return {
             kind: "replayed",
             receipt: PermissionResolutionReceiptEnvelopeV1Schema.parse(
@@ -297,10 +369,18 @@ export function createPermissionCoordinator(input: {
           fencingTokenDigest: request.attempt.fencingTokenDigest,
           policySnapshotRef: request.policySnapshotRef,
           policySnapshotDigest: request.policySnapshotDigest,
+          ...(request.workspaceAttestationDigest
+            ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}),
+          requireWorkspaceAttestationDigest: true,
           now: input.clock.now(),
         }))) {
           return { kind: "stale_fence" } as const;
         }
+        if (!(await withinFrozenPermissionAuthority(client, {
+          organizationId: command.principal.organizationId,
+          runId: request.runId,
+          request: permissionRequestForStorage(request),
+        }))) return { kind: "conflict" } as const;
         const existing = await client.query(
           `SELECT permission_request_digest
            FROM cp_permission_request
@@ -373,6 +453,11 @@ export function createPermissionCoordinator(input: {
             observedAt,
           ],
         );
+        await input.issueWaitingAuthorityInTransaction?.(client, {
+          principal: command.principal,
+          request,
+          receipt,
+        });
         await client.query(
           `INSERT INTO cp_hosted_audit_event(
              organization_id, run_id, event_kind, event, created_at
@@ -399,7 +484,10 @@ export function createPermissionCoordinator(input: {
       if (decision.organizationId !== command.principal.organizationId) {
         return { kind: "conflict" };
       }
-      const operationDigest = await computeControlPayloadDigestV1(decision);
+      const operationDigest = await computeControlPayloadDigestV1(
+        command.authorityAttemptEpoch === undefined ? decision
+          : { decision, authorityAttemptEpoch: command.authorityAttemptEpoch },
+      );
       return withPostgresTransaction(input.pool, async (client) => {
         const operation = await client.query(
           `SELECT request_digest, operation_kind, receipt
@@ -419,11 +507,59 @@ export function createPermissionCoordinator(input: {
             replay.request_digest !== operationDigest
             || replay.operation_kind !== "decision"
           ) return { kind: "conflict" } as const;
+          const receipt = PermissionResolutionReceiptEnvelopeV1Schema.parse(
+            replay.receipt,
+          );
+          const replayAuthority = await client.query<{
+            run_state: string; attempt_state: string; material_start_state: string;
+            blocked_permission_request_id: string | null;
+            blocked_action_descriptor_digest: string | null;
+            blocked_policy_snapshot_digest: string | null;
+            workspace_attestation: unknown | null;
+          }>(
+            `SELECT run.state AS run_state, attempt.state AS attempt_state,
+                    attempt.material_start_state,
+                    attempt.blocked_permission_request_id,
+                    attempt.blocked_action_descriptor_digest,
+                    attempt.blocked_policy_snapshot_digest,
+                    attempt.workspace_attestation
+             FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
+               ON attempt.organization_id = run.organization_id
+              AND attempt.run_id = run.run_id
+              AND attempt.attempt_number = run.current_attempt_number
+             WHERE run.organization_id = $1 AND run.run_id = $2
+               AND run.runner_id = $3 AND run.terminal_kind IS NULL
+               AND attempt.attempt_id = $4 AND attempt.attempt_number = $5
+               AND attempt.fencing_token_digest = $6
+               AND attempt.lease_expires_at > $7
+               AND attempt.material_start_state IN ('open','started_or_ambiguous')
+               AND run.state IN ('assigned','running','needs_approval')
+               AND attempt.state IN ('claimed','running','needs_approval')
+             FOR UPDATE OF run, attempt`,
+            [command.principal.organizationId, decision.runId, command.runnerId,
+              decision.attempt.attemptId, decision.attempt.attemptNumber,
+              decision.attempt.fencingTokenDigest, input.clock.now()],
+          );
+          const authority = replayAuthority.rows[0];
+          if (!authority || !receipt.payload.workspaceAttestationDigest
+            || authority.workspace_attestation === null
+            || await computeControlPayloadDigestV1(authority.workspace_attestation)
+              !== receipt.payload.workspaceAttestationDigest) {
+            return { kind: "stale_fence" } as const;
+          }
+          const approvalPending = authority.run_state === "needs_approval"
+            || authority.attempt_state === "needs_approval";
+          if (approvalPending && (authority.blocked_permission_request_id
+              !== receipt.payload.permissionRequestId
+            || authority.blocked_action_descriptor_digest
+              !== receipt.payload.actionDescriptorDigest
+            || authority.blocked_policy_snapshot_digest
+              !== receipt.payload.policySnapshotDigest)) {
+            return { kind: "conflict" } as const;
+          }
           return {
             kind: "replayed",
-            receipt: PermissionResolutionReceiptEnvelopeV1Schema.parse(
-              replay.receipt,
-            ),
+            receipt,
           } as const;
         }
         const result = await client.query(
@@ -436,8 +572,13 @@ export function createPermissionCoordinator(input: {
           [command.principal.organizationId, decision.permissionRequestId],
         ) as { rows: StoredPermission[] };
         const stored = result.rows[0];
+        const storedRequest = stored ? StoredPermissionRequestV1Schema.parse(stored.request) : null;
+        const waitingReceipt = stored
+          ? PermissionResolutionReceiptEnvelopeV1Schema.parse(stored.current_receipt)
+          : null;
         if (
           !stored
+          || !storedRequest
           || stored.state !== "waiting"
           || stored.runner_id !== command.runnerId
           || stored.run_id !== decision.runId
@@ -447,7 +588,15 @@ export function createPermissionCoordinator(input: {
           || stored.permission_request_digest
             !== decision.permissionRequestDigest
           || stored.policy_snapshot_digest !== decision.policySnapshotDigest
+          || (command.authorityAttemptEpoch !== undefined
+            && storedRequest.attempt.epoch !== command.authorityAttemptEpoch)
         ) return { kind: "conflict" } as const;
+        if (!storedRequest.workspaceAttestationDigest
+          || !waitingReceipt?.payload.workspaceAttestationDigest
+          || waitingReceipt.payload.workspaceAttestationDigest
+            !== storedRequest.workspaceAttestationDigest) {
+          return { kind: "stale_fence" } as const;
+        }
         if (!(await currentAttemptMatches(client, {
           organizationId: command.principal.organizationId,
           runnerId: command.runnerId,
@@ -455,9 +604,21 @@ export function createPermissionCoordinator(input: {
           attemptId: decision.attempt.attemptId,
           attemptNumber: decision.attempt.attemptNumber,
           fencingTokenDigest: decision.attempt.fencingTokenDigest,
+          policySnapshotRef: storedRequest.policySnapshotRef,
+          policySnapshotDigest: stored.policy_snapshot_digest,
+          allowNeedsApproval: true,
+          permissionRequestId: decision.permissionRequestId,
+          workspaceAttestationDigest: storedRequest.workspaceAttestationDigest,
+          requireWorkspaceAttestationDigest: true,
           now: input.clock.now(),
         }))) return { kind: "stale_fence" } as const;
-        const request = StoredPermissionRequestV1Schema.parse(stored.request);
+        const request = storedRequest;
+        if (decision.decision === "allow_once"
+          && !(await withinFrozenPermissionAuthority(client, {
+            organizationId: command.principal.organizationId,
+            runId: decision.runId,
+            request,
+          }))) return { kind: "conflict" } as const;
         const state = decision.decision === "allow_once"
           ? "authorized" as const
           : "denied" as const;
@@ -479,6 +640,34 @@ export function createPermissionCoordinator(input: {
             decidedAt: decision.decidedAt,
           },
         });
+        const approvalState = await client.query<{ run_state: string; attempt_state: string;
+          blocked_permission_request_id: string | null;
+          blocked_action_descriptor_digest: string | null;
+          blocked_policy_snapshot_digest: string | null }>(
+          `SELECT run.state AS run_state, attempt.state AS attempt_state,
+                  attempt.blocked_permission_request_id,
+                  attempt.blocked_action_descriptor_digest,
+                  attempt.blocked_policy_snapshot_digest
+           FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
+             ON attempt.organization_id = run.organization_id
+            AND attempt.run_id = run.run_id
+            AND attempt.attempt_number = run.current_attempt_number
+           WHERE run.organization_id = $1 AND run.run_id = $2`,
+          [command.principal.organizationId, decision.runId],
+        );
+        const resumesApproval = approvalState.rows[0]?.run_state === "needs_approval"
+          && approvalState.rows[0]?.attempt_state === "needs_approval"
+          && approvalState.rows[0]?.blocked_permission_request_id
+            === decision.permissionRequestId
+          && approvalState.rows[0]?.blocked_action_descriptor_digest
+            === request.actionDescriptorDigest
+          && approvalState.rows[0]?.blocked_policy_snapshot_digest
+            === decision.policySnapshotDigest;
+        const approvalPending = approvalState.rows[0]?.run_state === "needs_approval"
+          || approvalState.rows[0]?.attempt_state === "needs_approval";
+        if (approvalPending && !resumesApproval) {
+          return { kind: "conflict" } as const;
+        }
         await client.query(
           `UPDATE cp_permission_request
            SET state = $3, current_receipt = $4::jsonb, updated_at = $5
@@ -491,6 +680,44 @@ export function createPermissionCoordinator(input: {
             observedAt,
           ],
         );
+        if (resumesApproval) {
+          if (decision.decision === "allow_once") {
+            await client.query(
+              `UPDATE cp_hosted_attempt SET state = 'running',
+                 blocked_permission_request_id = NULL,
+                 blocked_action_descriptor_digest = NULL,
+                 blocked_policy_snapshot_digest = NULL, updated_at = $4
+               WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
+                 AND state = 'needs_approval'`,
+              [command.principal.organizationId, decision.runId,
+                decision.attempt.attemptNumber, observedAt],
+            );
+            await client.query(
+              `UPDATE cp_hosted_run SET state = 'running', updated_at = $3
+               WHERE organization_id = $1 AND run_id = $2 AND state = 'needs_approval'`,
+              [command.principal.organizationId, decision.runId, observedAt],
+            );
+          } else {
+            await client.query(
+              `UPDATE cp_hosted_attempt SET state = 'failed',
+                 blocked_permission_request_id = NULL,
+                 blocked_action_descriptor_digest = NULL,
+                 blocked_policy_snapshot_digest = NULL, updated_at = $4
+               WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
+                 AND state = 'needs_approval'`,
+              [command.principal.organizationId, decision.runId,
+                decision.attempt.attemptNumber, observedAt],
+            );
+            await client.query(
+              `UPDATE cp_hosted_run SET state = 'failed', terminal_kind = 'failed',
+                 terminal_reason = 'permission_denied', terminal_receipt = $3::jsonb,
+                 updated_at = $4 WHERE organization_id = $1 AND run_id = $2
+                 AND state = 'needs_approval'`,
+              [command.principal.organizationId, decision.runId,
+                JSON.stringify(receipt), observedAt],
+            );
+          }
+        }
         await client.query(
           `INSERT INTO cp_permission_operation(
              organization_id, operation_id, request_digest,
@@ -542,6 +769,8 @@ export function createPermissionCoordinator(input: {
           attemptId: query.attempt.attemptId,
           attemptNumber: query.attempt.attemptNumber,
           fencingTokenDigest: query.attempt.fencingTokenDigest,
+          allowNeedsApproval: true,
+          permissionRequestId: query.permissionRequestId,
           now: input.clock.now(),
         }))) return { kind: "stale_fence" } as const;
         const result = await client.query(

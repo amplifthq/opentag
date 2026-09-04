@@ -96,7 +96,6 @@ function githubConfig(port?: number) {
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false,
       port: port ?? 3050
     }
   });
@@ -105,7 +104,7 @@ function githubConfig(port?: number) {
 function pairedHostedGithubConfig() {
   const built = githubConfig();
   built.runtime = {
-    mode: "relay",
+    mode: "paired_relay",
     relayUrl: "https://relay.example",
     relayProvider: "custom"
   };
@@ -878,14 +877,16 @@ describe("OpenTag CLI start wiring", () => {
     }
   });
 
-  it("fails fast for GitHub when run branches are not prepared for apply actions", () => {
+  it("ignores legacy automatic-PR flags when building the GitHub runtime", () => {
     const built = githubConfig();
     built.daemon.preparePullRequestBranch = false;
     built.daemon.allowAutoCreatePullRequest = false;
 
-    expect(() => dispatcherRuntimeInputFromCliConfig(built)).toThrow(
-      "GitHub platform requires daemon.preparePullRequestBranch=true unless legacy daemon.allowAutoCreatePullRequest is enabled."
-    );
+    expect(() => dispatcherRuntimeInputFromCliConfig(built)).not.toThrow();
+
+    built.daemon.preparePullRequestBranch = true;
+    built.daemon.allowAutoCreatePullRequest = true;
+    expect(() => dispatcherRuntimeInputFromCliConfig(built)).not.toThrow();
   });
 
   it("fails fast when the Discord public key is set without a bot token", () => {
@@ -1170,7 +1171,7 @@ describe("OpenTag CLI start wiring", () => {
   it("starts relay mode without local dispatcher, local port checks, or GitHub ingress", async () => {
     const built = githubConfig();
     built.runtime = {
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "https://relay.example",
       relayProvider: "custom"
     };
@@ -1224,7 +1225,10 @@ describe("OpenTag CLI start wiring", () => {
     });
 
     expect(calls).toEqual(["wait", "bootstrap", "daemon"]);
-    expect(logs.join("\n")).toContain("OpenTag is running in relay mode.");
+    expect(logs.join("\n")).toContain("OpenTag is running in paired_relay mode.");
+    expect(logs.join("\n")).toContain("Offline-safe: false");
+    expect(logs.join("\n")).toContain("Certification: unverified");
+    expect(logs.join("\n")).not.toContain("Certification: verified");
     expect(logs.join("\n")).toContain("Local dispatcher: disabled");
     expect(logs.join("\n")).toContain("Security: only pair with a relay you operate or trust");
     expect(logs.join("\n")).toContain("GitHub webhook URL: https://relay.example/github/webhooks");
@@ -1236,7 +1240,7 @@ describe("OpenTag CLI start wiring", () => {
   it("aborts and awaits the relay daemon before start resolves", async () => {
     const built = githubConfig();
     built.runtime = {
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "https://relay.example",
       relayProvider: "custom"
     };
@@ -1263,7 +1267,7 @@ describe("OpenTag CLI start wiring", () => {
 
   it("starts a paired Hosted Control V1 runner with wait then daemon and no bootstrap", async () => {
     const built = githubConfig();
-    built.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    built.runtime = { mode: "paired_relay", relayUrl: "https://relay.example", relayProvider: "custom" };
     built.daemon.dispatcherUrl = "https://relay.example";
     built.daemon.runnerToken = "hosted_runtime_token";
     built.daemon.trustedRelay = {
@@ -1395,7 +1399,7 @@ describe("OpenTag CLI start wiring", () => {
 
   it("rejects invalid hosted auth before wait, bootstrap, or daemon startup", async () => {
     const built = githubConfig();
-    built.runtime = { mode: "relay", relayUrl: "https://relay.example", relayProvider: "custom" };
+    built.runtime = { mode: "paired_relay", relayUrl: "https://relay.example", relayProvider: "custom" };
     built.daemon.dispatcherUrl = "https://relay.example";
     built.daemon.trustedRelay = {
       schemaVersion: 1,
@@ -1427,7 +1431,7 @@ describe("OpenTag CLI start wiring", () => {
 
   it("rejects a hosted dispatcher rebind before wait or client startup", async () => {
     const built = githubConfig();
-    built.runtime = { mode: "relay", relayUrl: "https://other.example" };
+    built.runtime = { mode: "paired_relay", relayUrl: "https://other.example" };
     built.daemon.dispatcherUrl = "https://other.example";
     built.daemon.runnerToken = "hosted_runtime_token";
     built.daemon.trustedRelay = {
@@ -1471,7 +1475,7 @@ describe("OpenTag CLI start wiring", () => {
   it("starts relay mode for GitLab without local dispatcher, local port checks, or local GitLab ingress", async () => {
     const built = gitlabConfig();
     built.runtime = {
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "https://relay.example",
       relayProvider: "custom"
     };
@@ -1514,7 +1518,7 @@ describe("OpenTag CLI start wiring", () => {
     });
 
     expect(calls).toEqual(["wait", "bootstrap", "daemon"]);
-    expect(logs.join("\n")).toContain("OpenTag is running in relay mode.");
+    expect(logs.join("\n")).toContain("OpenTag is running in paired_relay mode.");
     expect(logs.join("\n")).toContain("GitLab webhook URL: https://relay.example/gitlab/webhooks");
     expect(logs.join("\n")).toContain("GitLab webhook secret: the relay must verify X-Gitlab-Token before creating runs.");
   });
@@ -1522,7 +1526,7 @@ describe("OpenTag CLI start wiring", () => {
   it("starts relay mode for Linear without local dispatcher, local port checks, or local Linear ingress", async () => {
     const built = linearConfig();
     built.runtime = {
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "https://relay.example",
       relayProvider: "custom"
     };
@@ -1565,7 +1569,7 @@ describe("OpenTag CLI start wiring", () => {
     });
 
     expect(calls).toEqual(["wait", "bootstrap", "daemon"]);
-    expect(logs.join("\n")).toContain("OpenTag is running in relay mode.");
+    expect(logs.join("\n")).toContain("OpenTag is running in paired_relay mode.");
     expect(logs.join("\n")).toContain("Linear webhook URL: https://relay.example/linear/webhooks");
     expect(logs.join("\n")).toContain(
       "Linear webhook secret: the relay must verify Linear-Signature and webhook timestamp before creating runs."
@@ -1575,7 +1579,7 @@ describe("OpenTag CLI start wiring", () => {
   it("refuses public HTTP relay configs before connecting", async () => {
     const built = githubConfig();
     built.runtime = {
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "http://relay.example",
       relayProvider: "custom"
     };
@@ -1798,7 +1802,7 @@ describe("OpenTag CLI start wiring", () => {
   it("fails clearly for relay mode platform ingress that is not supported in the MVP", async () => {
     const built = config();
     built.runtime = {
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "https://relay.example",
       relayProvider: "custom"
     };
@@ -1819,7 +1823,7 @@ describe("OpenTag CLI start wiring", () => {
           }
         }
       })
-    ).rejects.toThrow("Relay mode currently supports GitHub/GitLab/Linear-backed ingress only.");
+    ).rejects.toThrow("paired_relay currently supports GitHub/GitLab/Linear-backed ingress only.");
   });
 
   it("waits for dispatcher health instead of assuming the port is ready", async () => {

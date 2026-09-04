@@ -583,26 +583,16 @@ export async function runDoctor(input: {
 
   const githubApplyToken = input.config.githubApplyToken === null ? undefined : (input.config.githubApplyToken ?? input.config.githubToken);
 
-  if (input.config.allowAutoCreatePullRequest) {
-    checks.push(
-      input.config.githubToken
-        ? check("ok", "GitHub PR actions", "Configured for legacy immediate PR creation")
-        : check("warn", "GitHub PR actions", "Immediate PR creation is enabled, but githubToken is not configured")
-    );
-  } else if (input.config.preparePullRequestBranch) {
-    checks.push(
-      githubApplyToken
-        ? check("ok", "GitHub PR actions", "Configured for thread-native `apply 1` PR creation")
-        : check(
-            "warn",
-            "GitHub PR actions",
-            "Run branches can be pushed, but a GitHub apply token is required for direct `apply 1` PR creation"
-          )
-    );
-  } else if (input.config.githubToken) {
-    checks.push(check("warn", "GitHub PR actions", "githubToken is configured, but run branch preparation is disabled"));
+  if (input.config.allowAutoCreatePullRequest !== undefined || input.config.preparePullRequestBranch !== undefined) {
+    checks.push(check(
+      "warn",
+      "GitHub PR actions",
+      "Legacy automatic-PR flags are deprecated and ignored; publication requires an exact Candidate, current approval, and coordinator-issued capability"
+    ));
+  } else if (githubApplyToken) {
+    checks.push(check("ok", "GitHub PR actions", "Credential is configured for capability-authorized publication"));
   } else {
-    checks.push(check("warn", "GitHub PR actions", "Not configured; PR creation actions will be skipped or fail"));
+    checks.push(check("warn", "GitHub PR actions", "No GitHub publication credential is configured"));
   }
 
   return checks;

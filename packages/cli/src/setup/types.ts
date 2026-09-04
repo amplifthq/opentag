@@ -40,7 +40,8 @@ export type GitHubSetupInput = {
   owner: string;
   repo: string;
   webhookPath: string;
-  autoCreatePullRequest: boolean;
+  /** @deprecated Retained for callers compiled against the legacy setup input; ignored. */
+  autoCreatePullRequest?: boolean;
   port: number;
 };
 
@@ -153,7 +154,6 @@ export type SetupDefaults = Partial<{
   githubPort: number;
   githubWebhookSecret: string;
   githubWebhookPath: string;
-  githubAutoCreatePullRequest: boolean;
   gitlabProjectPathWithNamespace: string;
   gitlabBaseUrl: string;
   gitlabPort: number;

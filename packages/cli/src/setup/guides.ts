@@ -300,35 +300,31 @@ export function formatSlackCredentialHelp(language: CliLanguage, mode: SlackSetu
   ].join("\n");
 }
 
-export function formatGitHubTokenHelp(language: CliLanguage, input: { autoCreatePullRequest: boolean }): string {
+export function formatGitHubTokenHelp(language: CliLanguage): string {
   if (language === "zh-CN") {
-    const permissions =
-      input.autoCreatePullRequest
-        ? ["- Issues: Read and write", "- Pull requests: Read and write", "- Contents: Read and write"]
-        : ["- Issues: Read and write", "- Pull requests: Read and write", "- Contents: 默认 apply 1 流程不需要；run branch 会使用本机 git remote 凭据推送"];
     return [
       "GitHub token 在哪里创建:",
       `- 直接打开: ${OFFICIAL_SETUP_LINKS.githubTokenPage}`,
       `- 官方教程: ${OFFICIAL_SETUP_LINKS.githubTokenDocs}`,
       "",
       "推荐创建 fine-grained personal access token，只授权当前仓库。需要权限:",
-      ...permissions,
+      "- Issues: Read and write",
+      "- Pull requests: Read and write",
+      "- Contents: 精确发布流程通过本机 git remote 凭据推送 owned branch 时不需要此 token 权限",
       "",
       "GitHub 只会展示 token 一次，创建后马上复制并粘贴到下一步。"
     ].join("\n");
   }
 
-  const permissions =
-    input.autoCreatePullRequest
-      ? ["- Issues: Read and write", "- Pull requests: Read and write", "- Contents: Read and write"]
-      : ["- Issues: Read and write", "- Pull requests: Read and write", "- Contents: not needed for the default apply-1 flow; branch push uses your local git remote credentials"];
   return [
     "Where to create the GitHub token:",
     `- Direct token page: ${OFFICIAL_SETUP_LINKS.githubTokenPage}`,
     `- Official guide: ${OFFICIAL_SETUP_LINKS.githubTokenDocs}`,
     "",
     "Create a fine-grained personal access token and limit it to this repository. Required permissions:",
-    ...permissions,
+    "- Issues: Read and write",
+    "- Pull requests: Read and write",
+    "- Contents: not needed by this token when the exact publication flow pushes its owned branch with your local git remote credentials",
     "",
     "GitHub only shows the token once. Copy it immediately, then paste it into the next prompt."
   ].join("\n");

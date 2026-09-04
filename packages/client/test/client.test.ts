@@ -773,6 +773,50 @@ describe("@opentag/client", () => {
     await expect(client.claim({ runnerId: "runner_1" })).resolves.toBeNull();
   });
 
+  it("redeems hosted source content over the authenticated paired route", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const digest = (value: string) => `sha256:${value.repeat(64)}`;
+    const request = {
+      schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.source-content-redeem.v1"] as const,
+      requestId: "request_redeem", operationId: "operation_redeem",
+      organizationId: "org_1", runnerId: "runner_1", runId: "run_1",
+      expectedAuthority: { credentialId: "credential_1",
+        registrationGeneration: 1, credentialGeneration: 1 },
+      attempt: { attemptId: "attempt_1", attemptNumber: 1, epoch: 1,
+        fencingTokenDigest: digest("1"), leaseExpiresAt: "2026-08-30T01:00:00.000Z" },
+      grant: { grantId: "grant_1", token: "grant_token_1", keyVersion: "relay-v1",
+        fenceDigest: digest("1"), contentIds: ["content_1"], purpose: "source_context" as const,
+        expiresAt: "2026-08-30T01:00:00.000Z" },
+      admissionEnvelopeDigest: digest("2"),
+      contentEnvelope: { contentId: "content_1", sourceVersionRef: "source_version_1",
+        aadDigest: "a".repeat(64), keyVersion: "relay-v1", envelopeDigest: digest("3"),
+        payloadDigest: "sha256:282ae7754c324606c1bc679b45b0429b475518dd51732d7787b83c0c1b714f3e" },
+    };
+    const response = { kind: "hosted_source_content_redeemed" as const,
+      schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requestId: request.requestId, operationId: request.operationId,
+      organizationId: request.organizationId, runnerId: request.runnerId,
+      runId: request.runId, attempt: request.attempt,
+      admissionEnvelopeDigest: request.admissionEnvelopeDigest,
+      contentEnvelope: request.contentEnvelope,
+      content: { contentId: "content_1", payload: { text: "private" } },
+      payloadDigest: request.contentEnvelope.payloadDigest,
+      redeemedAt: "2026-08-30T00:00:00.000Z" };
+    const client = createOpenTagClient({ dispatcherUrl: "http://dispatcher.test",
+      controlCredential: { kind: "runtime", token: "runtime_secret" },
+      fetchImpl: async (url, init) => { requests.push({ url: String(url), init });
+        return jsonResponse(response, 200, String(url)); } });
+
+    await expect(client.redeemHostedSourceContentControlV1({ runnerId: "runner_1", request }))
+      .resolves.toEqual(response);
+    expect(requests[0]?.url).toBe(
+      "http://dispatcher.test/v1/runners/runner_1/runs/run_1/source-content/redeem",
+    );
+    expect(requests[0]?.init?.headers).toMatchObject({ authorization: "Bearer runtime_secret" });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(request);
+  });
+
   it("parses claimed run responses", async () => {
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",

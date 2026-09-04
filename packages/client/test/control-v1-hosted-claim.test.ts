@@ -15,6 +15,7 @@ const hostedClaimCapabilities = [
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 
 function sha256(value: string): string {
@@ -97,6 +98,13 @@ async function hostedClaim() {
         digest,
       },
       runnerId: "runner_1",
+      sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
+        aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: digest,
+        payloadDigest: digest },
+      queueClaimDeadline: "2026-08-09T00:00:00.000Z",
+      permissionCeiling: { allowedActionDescriptors: ["workspace.write"], digest },
+      publicationPolicy: { mode: "proposal_only" as const, digest },
+      completionContract: { mode: "proposal_ready" as const, digest },
       admissionPolicySnapshot: {
         snapshotId: "policy_1",
         digest: otherDigest,
@@ -136,6 +144,7 @@ async function hostedClaim() {
           bindingId: "binding_1",
           providerRepositoryId: "123",
           defaultBranch: "main",
+          authorizedPublicationModes: ["proposal_only", "pull_request"] as const,
         },
         runner: {
           runnerId: "runner_1",
@@ -161,6 +170,11 @@ async function hostedClaim() {
       fencingToken,
       fencingTokenDigest: sha256(fencingToken),
       leaseExpiresAt: "2026-08-08T00:02:00.000Z",
+    },
+    sourceContentGrant: {
+      grantId: "grant_1", token: "grant_token_1", keyVersion: "test-v1",
+      fenceDigest: sha256(fencingToken), contentIds: ["content_1"],
+      purpose: "source_context" as const, expiresAt: "2026-08-08T00:02:00.000Z",
     },
     authority: {
       organizationId: "org_1",

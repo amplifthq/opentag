@@ -2,15 +2,17 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   checkMigrationReadiness,
+  loadSqlMigrations,
   runMigrations,
   type SqlMigration,
 } from "../src/database/migrations.js";
+import { join } from "node:path";
 
 type RecordedQuery = { text: string; values?: readonly unknown[] };
 
 function migrationHarness(
   applied: Array<{ name: string; checksum: string }> = [],
-  options: { failUnlock?: boolean } = {},
+  options: { failUnlock?: boolean; schemaReady?: boolean } = {},
 ) {
   const queries: RecordedQuery[] = [];
   let released = 0;
@@ -18,6 +20,9 @@ function migrationHarness(
     async query(text: string, values?: readonly unknown[]) {
       queries.push(values ? { text, values } : { text });
       if (text.includes("SELECT name, checksum")) return { rows: applied };
+      if (text.includes("AS schema_ready")) {
+        return { rows: [{ schema_ready: options.schemaReady ?? true }] };
+      }
       if (options.failUnlock && text.includes("pg_advisory_unlock")) {
         throw new Error("unlock_failed");
       }
@@ -48,6 +53,32 @@ const migration = (name: string, sql: string): SqlMigration => ({
 });
 
 describe("checked-in PostgreSQL migrations", () => {
+  it("checks in the content-free Attempt workspace evidence migration", async () => {
+    const migrations = await loadSqlMigrations(join(process.cwd(), "apps/control-plane/migrations"));
+    const workspace = migrations.find(({ name }) => name === "0012_attempt_workspace_evidence.sql");
+    expect(workspace?.sql).toContain("workspace_attestation");
+    expect(workspace?.sql).toContain("interruption_evidence");
+    expect(workspace?.sql).not.toMatch(/workspace_path\s+text/iu);
+  });
+  it("checks in PublicationCandidate as the next immutable versioned migration", async () => {
+    const migrations = await loadSqlMigrations(join(process.cwd(), "apps/control-plane/migrations"));
+    const candidate = migrations.find(({ name }) => name === "0013_publication_candidates.sql");
+    expect(candidate?.sql).toContain("CREATE TABLE IF NOT EXISTS cp_publication_candidate");
+    expect(candidate?.sql).toContain("REFERENCES cp_hosted_attempt");
+    expect(candidate?.sql).toContain("cp_publication_candidate_immutable");
+    expect(candidate?.sql).toContain("CREATE TRIGGER");
+  });
+  it("checks in immutable publication operation authority as a distinct migration", async () => {
+    const migrations = await loadSqlMigrations(join(process.cwd(), "apps/control-plane/migrations"));
+    const publication = migrations.find(({ name }) => name === "0014_publication_operations.sql");
+    expect(publication?.sql).toContain("CREATE TABLE cp_publication_intent");
+    expect(publication?.sql).toContain("cp_publication_capability");
+    expect(publication?.sql).toContain("push_owned_branch");
+    expect(publication?.sql).toContain("create_draft_pull_request");
+    expect(publication?.sql).toContain("CREATE TABLE cp_publication_completion");
+    expect(publication?.sql).toContain("cp_publication_completion_immutable");
+    expect(publication?.sql).toContain("cp_publication_receipt_immutable");
+  });
   it("serializes migration application and records the reviewed checksum", async () => {
     const harness = migrationHarness();
     const first = migration("0000_control_plane.sql", "CREATE TABLE example(id text)");
@@ -111,7 +142,7 @@ describe("checked-in PostgreSQL migrations", () => {
     const current = migration("0000_control_plane.sql", "SELECT 1");
 
     await expect(
-      checkMigrationReadiness(migrationHarness().pool, [current]),
+      checkMigrationReadiness(migrationHarness([], { schemaReady: false }).pool, [current]),
     ).resolves.toEqual({ ready: false, reason: "migrations_pending" });
     await expect(
       checkMigrationReadiness(
@@ -121,7 +152,8 @@ describe("checked-in PostgreSQL migrations", () => {
     ).resolves.toEqual({ ready: false, reason: "migrations_pending" });
     await expect(
       checkMigrationReadiness(
-        migrationHarness([{ name: current.name, checksum: current.checksum }]).pool,
+        migrationHarness([{ name: current.name, checksum: current.checksum }],
+          { schemaReady: true }).pool,
         [current],
       ),
     ).resolves.toEqual({ ready: true });
@@ -134,5 +166,9 @@ describe("checked-in PostgreSQL migrations", () => {
         [current],
       ),
     ).resolves.toEqual({ ready: false, reason: "migrations_pending" });
+    await expect(checkMigrationReadiness(
+      migrationHarness([{ name: current.name, checksum: current.checksum }],
+        { schemaReady: false }).pool, [current],
+    )).resolves.toEqual({ ready: false, reason: "migrations_pending" });
   });
 });

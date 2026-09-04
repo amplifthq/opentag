@@ -68,11 +68,6 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(lastSetup?.githubPort ? { githubPort: lastSetup.githubPort } : github?.port ? { githubPort: github.port } : {}),
     ...(github?.webhookSecret ? { githubWebhookSecret: github.webhookSecret } : {}),
     ...(github?.webhookPath ? { githubWebhookPath: github.webhookPath } : {}),
-    ...(lastSetup?.githubAutoCreatePullRequest !== undefined
-      ? { githubAutoCreatePullRequest: lastSetup.githubAutoCreatePullRequest }
-      : config.daemon.allowAutoCreatePullRequest !== undefined
-        ? { githubAutoCreatePullRequest: config.daemon.allowAutoCreatePullRequest }
-        : {}),
     ...(lastSetup?.gitlabProjectPathWithNamespace
       ? { gitlabProjectPathWithNamespace: lastSetup.gitlabProjectPathWithNamespace }
       : gitlab?.projectPathWithNamespace

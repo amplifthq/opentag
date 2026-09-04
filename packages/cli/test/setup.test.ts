@@ -483,7 +483,7 @@ describe("OpenTag CLI setup", () => {
         worktreeRoot: "/tmp/opentag-state/worktrees"
       },
       runtime: {
-        mode: "relay",
+        mode: "paired_relay",
         relayUrl: "https://relay.example",
         relayProvider: "custom"
       },
@@ -543,7 +543,7 @@ describe("OpenTag CLI setup", () => {
         worktreeRoot: "/tmp/opentag-state/worktrees"
       },
       runtime: {
-        mode: "relay",
+        mode: "paired_relay",
         relayUrl: "https://relay.example",
         relayProvider: "custom"
       },
@@ -1166,7 +1166,7 @@ describe("OpenTag CLI setup", () => {
     expect(readCliConfig(configPath).platforms.github?.webhookPath).toBe("/opentag");
   });
 
-  it("keeps the existing GitHub auto-PR choice on --yes setup reruns", async () => {
+  it("does not persist the deprecated GitHub auto-PR choice on --yes setup reruns", async () => {
     const configPath = join(tempDir(), "config.json");
     const projectPath = tempDir();
 
@@ -1201,8 +1201,9 @@ describe("OpenTag CLI setup", () => {
     );
 
     const config = readCliConfig(configPath);
-    expect(config.daemon.allowAutoCreatePullRequest).toBe(true);
-    expect(config.preferences?.lastSetup?.githubAutoCreatePullRequest).toBe(true);
+    expect(config.daemon).not.toHaveProperty("preparePullRequestBranch");
+    expect(config.daemon).not.toHaveProperty("allowAutoCreatePullRequest");
+    expect(config.preferences?.lastSetup).not.toHaveProperty("githubAutoCreatePullRequest");
   });
 
   it("rejects a GitHub webhook path that is not rooted", async () => {

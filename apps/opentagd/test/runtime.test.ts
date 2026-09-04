@@ -83,6 +83,7 @@ const hostedClaimCapabilities = [
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 const controlDigest = `sha256:${"1".repeat(64)}`;
 
@@ -105,6 +106,7 @@ async function hostedClaimFixture(request: HostedClaimRequestV1) {
       bindingId: "binding_1",
       providerRepositoryId: "123",
       defaultBranch: "main",
+      authorizedPublicationModes: ["proposal_only", "pull_request"],
     },
     runner: {
       runnerId: "runner_hosted",
@@ -192,6 +194,13 @@ async function hostedClaimFixture(request: HostedClaimRequestV1) {
       digest: controlDigest,
     },
     runnerId: "runner_hosted",
+    sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
+      aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: controlDigest,
+      payloadDigest: controlDigest },
+    queueClaimDeadline: "2026-08-09T00:00:00.000Z",
+    permissionCeiling: { allowedActionDescriptors: ["workspace.write"], digest: controlDigest },
+    publicationPolicy: { mode: "proposal_only" as const, digest: controlDigest },
+    completionContract: { mode: "proposal_ready" as const, digest: controlDigest },
     admissionPolicySnapshot: {
       snapshotId: "policy_1",
       digest: policyReceipt.receiptDigest,
@@ -227,6 +236,11 @@ async function hostedClaimFixture(request: HostedClaimRequestV1) {
       fencingToken,
       fencingTokenDigest,
       leaseExpiresAt: "2099-08-08T00:02:00.000Z",
+    },
+    sourceContentGrant: {
+      grantId: "grant_1", token: "grant_token_1", keyVersion: "test-v1",
+      fenceDigest: fencingTokenDigest, contentIds: ["content_1"],
+      purpose: "source_context", expiresAt: "2099-08-08T00:02:00.000Z",
     },
     authority: {
       organizationId: "org_1",
@@ -274,14 +288,8 @@ describe("opentagd runtime helpers", () => {
     });
   });
 
-  it("omits pull request options when GitHub PR creation is not configured", () => {
-    const {
-      githubToken: _githubToken,
-      preparePullRequestBranch: _preparePullRequestBranch,
-      allowAutoCreatePullRequest: _allowAutoCreatePullRequest,
-      ...configWithoutPullRequests
-    } = config;
-    expect(pullRequestOptionsFromConfig(configWithoutPullRequests)).toBeUndefined();
+  it("ignores legacy automatic-PR configuration", () => {
+    expect(pullRequestOptionsFromConfig(config)).toBeUndefined();
   });
 
   it("creates reusable daemon runtime input from daemon config", () => {
@@ -293,7 +301,7 @@ describe("opentagd runtime helpers", () => {
     expect(input.executors.codex.id).toBe("codex");
     expect(input.executors["claude-code"].id).toBe("claude-code");
     expect(input.security).toEqual(securityFromConfig(config));
-    expect(input.pullRequestOptions).toEqual({ githubToken: "ghs_test", preparePullRequestBranch: true, allowAutoCreatePullRequest: true });
+    expect(input).not.toHaveProperty("pullRequestOptions");
     expect(input.pollIntervalMs).toBe(1000);
     expect(input.heartbeatIntervalMs).toBe(15000);
     expect(input.runTimeoutMs).toBe(30_000);
@@ -346,10 +354,16 @@ describe("opentagd runtime helpers", () => {
               "relay.hosted-claim.v1",
               "relay.lifecycle.v1",
               "relay.readiness.v1",
+              "relay.source-content-redeem.v1",
             ],
             targets: [],
             observedAt: new Date().toISOString(),
           };
+      if (pathname.endsWith("/publication/claim-next")) {
+        const response = new Response(null, { status: 204 });
+        Object.defineProperty(response, "url", { value: requestUrl });
+        return response;
+      }
       const response = new Response(JSON.stringify(body), {
         status: pathname.endsWith("/hosted-claims")
           ? 200
@@ -374,6 +388,7 @@ describe("opentagd runtime helpers", () => {
       );
       expect(requests).toEqual([
         "GET /v1/runners/runner_hosted/control-context",
+        "POST /v1/runners/runner_hosted/publication/claim-next",
         "POST /v1/runners/runner_hosted/readiness",
         "POST /v1/runners/runner_hosted/hosted-claims",
         "POST /v1/runners/runner_hosted/runs/run_1/reject-start",

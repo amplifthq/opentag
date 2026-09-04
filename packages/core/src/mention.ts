@@ -155,7 +155,7 @@ function extractCommandText(afterMention: string, mention: string): string | nul
     return joinCommandLines(lines);
   }
 
-  return joinCommandLines(collectContinuationLines(remainingLines, mention, true));
+  return joinCommandLines(collectContinuationLines(remainingLines, mention));
 }
 
 function shouldConsumeContinuation(firstLine: string, remainingLines: string[]): boolean {
@@ -170,14 +170,12 @@ function shouldConsumeContinuation(firstLine: string, remainingLines: string[]):
   );
 }
 
-function collectContinuationLines(lines: string[], mention: string, skipLeadingBlank = false): string[] {
+function collectContinuationLines(lines: string[], mention: string): string[] {
   const collected: string[] = [];
-  let started = !skipLeadingBlank;
   const mentionPattern = new RegExp(`^${mention.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=[\\s:,.!?]|$)`, "i");
 
   for (const line of lines) {
     const trimmed = line.trim();
-    started = true;
     if (mentionPattern.test(trimmed)) {
       break;
     }

@@ -2,7 +2,27 @@
 
 ## Status
 
-Architecture baseline, 2026-06-24.
+Architecture baseline, 2026-06-24; current-scope note updated 2026-09-02.
+
+## Current product scope
+
+The supported team profile is `paired_relay`: a self-hosted relay on
+operator-chosen infrastructure, Slack Events API plus interactivity as the
+Source App, one paired local Runner, a GitHub Project Target, and a configured
+ACP executor. `local_direct` remains a trial/single-machine path with
+`offlineSafe=false`.
+
+The reference single-node relay is always `Relay-not-HA`. It can be described
+as `Runner-offline-safe` only after separate deterministic and installation
+certification gates pass. Source code, Compose, and local tests do not prove
+production activation, a managed OpenTag service, or high availability.
+
+Slack source-thread status and approval are projections of canonical lifecycle
+truth. One Run owns its Attempt lineage; provider delivery remains independent
+evidence. Material provider actions require exact current approval, and an
+ambiguous provider outcome remains `outcome_unknown` rather than triggering a
+blind retry. Ambient memory, scheduled work, unsupported Source Apps,
+multi-Runner fallback, and automatic merge are outside this profile.
 
 This document captures the original OpenTag system shape and package
 boundaries. For the current runtime-alignment work that matches the codebase,

@@ -23,6 +23,7 @@ const digest = (value: string) => `sha256:${createHash("sha256").update(value).d
 const stable = digest("stable");
 const intent = DeliveryIntentV2Schema.parse({
   contractVersion: 2,
+organizationId: "org_test",
   sideEffectIntentId: "intent_1",
   causalId: "cause_1",
   intentKind: "delivery",

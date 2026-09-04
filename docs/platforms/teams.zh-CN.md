@@ -241,14 +241,13 @@ Teams thread 中支持 `@OpenTag apply 1`，但创建 pull request 需要 GitHub
 }
 ```
 
-同时配置 GitHub token/apply token 并启用 branch preparation：
+同时配置精确、capability 授权发布流程所使用的 GitHub 凭据：
 
 ```json
 {
   "daemon": {
     "githubToken": "<redacted>",
-    "githubApplyToken": "<redacted>",
-    "preparePullRequestBranch": true
+    "githubApplyToken": "<redacted>"
   }
 }
 ```

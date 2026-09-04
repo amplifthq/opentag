@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildHostedLifecycleRequestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, HostedCompleteRequestV1Schema, RunnerReadinessReceiptEnvelopeV1Schema, type HostedClaimRequestV1 } from "@opentag/core";
+import { buildHostedLifecycleRequestV1, computeControlPayloadDigestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, HostedCompleteRequestV1Schema, RunnerReadinessReceiptEnvelopeV1Schema, type HostedClaimRequestV1 } from "@opentag/core";
 import { serveDaemon, type DaemonClient } from "../src/daemon.js";
-import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistrationV1, buildHostedClaimRequestV1, buildHostedCompletionMetadataForControlV1, buildHostedProgressMetadataForControlV1, buildRunnerReadinessReceipt, createHostedControlLoop, hasSameRunnerReadinessAuthorityV1, isRunnerControlContextFreshV1, pumpControlPlaneProjections, pumpHostedLifecycleOperations, runnerReadinessReuseWindowV1, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository, type HostedLifecycleOperationEntry, type HostedLifecycleRepository } from "../src/control-v1.js";
+import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistrationV1, buildHostedClaimRequestV1, buildHostedCompletionMetadataForControlV1, buildHostedProgressMetadataForControlV1, buildRunnerReadinessReceipt, createHostedControlLoop, hasSameRunnerReadinessAuthorityV1, isRunnerControlContextFreshV1, pumpControlPlaneProjections, pumpHostedLifecycleOperations, redeemHostedClaimSourceContentV1, runnerReadinessReuseWindowV1, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository, type HostedLifecycleOperationEntry, type HostedLifecycleRepository } from "../src/control-v1.js";
 
 const now = new Date("2026-08-09T00:00:00.000Z");
 
@@ -305,6 +305,17 @@ async function validHostedClaim(input: {
       digest: `sha256:${"a".repeat(64)}`,
     },
     runnerId: "runner_1",
+    sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
+      aadDigest: "1".repeat(64), keyVersion: "v1",
+      envelopeDigest: `sha256:${"1".repeat(64)}`,
+      payloadDigest: `sha256:${"1".repeat(64)}` },
+    queueClaimDeadline: "2026-08-10T00:00:00.000Z",
+    permissionCeiling: { allowedActionDescriptors: ["workspace.write"],
+      digest: `sha256:${"2".repeat(64)}` },
+    publicationPolicy: { mode: "proposal_only" as const,
+      digest: `sha256:${"3".repeat(64)}` },
+    completionContract: { mode: "proposal_ready" as const,
+      digest: `sha256:${"4".repeat(64)}` },
     admissionPolicySnapshot: {
       snapshotId: "policy_1",
       digest: `sha256:${"e".repeat(64)}`,
@@ -320,10 +331,11 @@ async function validHostedClaim(input: {
     requiredCapabilities: [
       "relay.claim-fence.v1",
       "relay.hosted-admission.v1",
-      "relay.hosted-claim.v1",
-      "relay.lifecycle.v1",
-      "relay.readiness.v1",
-    ] as const,
+        "relay.hosted-claim.v1",
+        "relay.lifecycle.v1",
+        "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
+      ] as const,
     requestId: input.request.requestId,
     operationId: input.request.operationId,
     organizationId: "org_1",
@@ -348,6 +360,12 @@ async function validHostedClaim(input: {
         await computeHostedClaimFencingTokenDigestV1(fencingToken),
       leaseExpiresAt: "2026-08-09T00:05:00.000Z",
     },
+    sourceContentGrant: {
+      grantId: "grant_1", token: "grant_token_1", keyVersion: "test-v1",
+      fenceDigest: await computeHostedClaimFencingTokenDigestV1(fencingToken),
+      contentIds: ["content_1"], purpose: "source_context" as const,
+      expiresAt: "2026-08-09T00:05:00.000Z",
+    },
     authority: {
       organizationId: "org_1",
       runnerId: "runner_1",
@@ -368,6 +386,65 @@ async function validHostedClaim(input: {
 }
 
 describe("Control V1 projection pump", () => {
+  it("redeems and verifies exact source content before returning an event for execution", async () => {
+    const request = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.claim-fence.v1", "relay.hosted-admission.v1",
+        "relay.hosted-claim.v1", "relay.lifecycle.v1", "relay.readiness.v1"] as const,
+      requestId: "request_claim", operationId: "operation_claim",
+      expectedAuthority: { credentialId: "credential_1", registrationGeneration: 1,
+        credentialGeneration: 1, runnerReadinessReceiptId: "readiness_1",
+        runnerReadinessReceiptDigest: `sha256:${"a".repeat(64)}` } };
+    const event = {
+      id: "789", source: "github", sourceEventId: "789", receivedAt: now.toISOString(),
+      actor: { provider: "github", providerUserId: "1001", handle: "octocat" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "fix this", intent: "fix", args: {} }, context: [],
+      permissions: [{ scope: "repo:write", reason: "fix the repository" }],
+      callback: { provider: "github", uri: "https://api.github.com/repos/acme/widget/issues/42/comments" },
+      workItem: { provider: "github", kind: "issue", externalId: "acme/widget#42",
+        uri: "https://github.com/acme/widget/issues/42",
+        ownerContainer: { id: "github:acme/widget", provider: "github", kind: "repository", externalId: "acme/widget",
+          uri: "https://github.com/acme/widget" } },
+      metadata: { owner: "acme", repo: "widget", repoProvider: "github",
+        issueNumber: 42, deliveryId: "delivery_1" },
+    } as const;
+    const sourceIdentityDigest = await import("@opentag/core").then(({ computeGitHubIssueCommentSourceIdentityDigestV1 }) =>
+      computeGitHubIssueCommentSourceIdentityDigestV1({ provider: "github",
+        repository: { providerRepositoryId: "123", owner: "acme", repo: "widget" },
+        sourceThread: { kind: "issue", providerThreadId: "456", number: 42 },
+        sourceEvent: { providerEventId: "789", kind: "issue_comment" },
+        actor: { providerUserId: "1001", login: "octocat" },
+        executionBearingCommentBody: "@opentag fix this" }));
+    const baseClaim = await validHostedClaim({ request, executorCapabilityDigest: `sha256:${"b".repeat(64)}` });
+    const admissionSeed = { ...baseClaim.hostedAdmission, sourceIdentityDigest,
+      envelopeDigest: `sha256:${"0".repeat(64)}` };
+    const executionPayload = { executionBearingCommentBody: "@opentag fix this", event };
+    const payloadDigest = await computeControlPayloadDigestV1(executionPayload);
+    const digestBoundAdmissionSeed = { ...admissionSeed,
+      sourceContextEnvelope: { ...admissionSeed.sourceContextEnvelope, payloadDigest } };
+    const claim = { ...baseClaim, hostedAdmission: { ...digestBoundAdmissionSeed,
+      envelopeDigest: await computeHostedAdmissionEnvelopeDigestV1(digestBoundAdmissionSeed) },
+      sourceContentGrant: { ...baseClaim.sourceContentGrant, keyVersion: "v1" } };
+    const redeem = vi.fn(async ({ request: redeemRequest }) => ({
+      kind: "hosted_source_content_redeemed" as const, schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const, requestId: redeemRequest.requestId,
+      operationId: redeemRequest.operationId, organizationId: claim.organizationId,
+      runnerId: claim.runnerId, runId: claim.runId,
+      attempt: redeemRequest.attempt,
+      admissionEnvelopeDigest: claim.hostedAdmission.envelopeDigest,
+      contentEnvelope: claim.hostedAdmission.sourceContextEnvelope,
+      content: { contentId: "content_1", payload: executionPayload },
+      payloadDigest,
+      redeemedAt: now.toISOString(),
+    }));
+
+    const redeemed = await redeemHostedClaimSourceContentV1({ claim: claim as never,
+      client: { redeemHostedSourceContentControlV1: redeem } as never,
+      requestId: "request_redeem", operationId: "operation_redeem", now: () => now });
+    expect(redeemed.event).toMatchObject({ id: "789", command: { rawText: "fix this" } });
+    expect(redeemed.receipt.eventDigest).toMatch(/^sha256:/u);
+    expect(redeem).toHaveBeenCalledOnce();
+  });
   it("keeps raw executor progress and completion evidence out of Cloud lifecycle metadata", async () => {
     const secret = "ghp_secret /Users/alice/private/repo/src/token.ts";
     const progress = await buildHostedProgressMetadataForControlV1({
@@ -764,6 +841,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -1022,6 +1100,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [],
       observedAt: now.toISOString(),
@@ -1169,6 +1248,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -1264,6 +1344,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -1444,6 +1525,17 @@ describe("Control V1 projection pump", () => {
           digest: `sha256:${"a".repeat(64)}`,
         },
         runnerId: "runner_1",
+        sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
+          aadDigest: "1".repeat(64), keyVersion: "v1",
+          envelopeDigest: `sha256:${"1".repeat(64)}`,
+          payloadDigest: `sha256:${"1".repeat(64)}` },
+        queueClaimDeadline: "2026-08-10T00:00:00.000Z",
+        permissionCeiling: { allowedActionDescriptors: ["workspace.write"],
+          digest: `sha256:${"2".repeat(64)}` },
+        publicationPolicy: { mode: "proposal_only" as const,
+          digest: `sha256:${"3".repeat(64)}` },
+        completionContract: { mode: "proposal_ready" as const,
+          digest: `sha256:${"4".repeat(64)}` },
         admissionPolicySnapshot: {
           snapshotId: "policy_1",
           digest: `sha256:${"e".repeat(64)}`,
@@ -1481,6 +1573,12 @@ describe("Control V1 projection pump", () => {
           fencingTokenDigest:
             await computeHostedClaimFencingTokenDigestV1(fencingToken),
           leaseExpiresAt: "2026-08-09T00:05:00.000Z",
+        },
+        sourceContentGrant: {
+          grantId: "grant_1", token: "grant_token_1", keyVersion: "test-v1",
+          fenceDigest: await computeHostedClaimFencingTokenDigestV1(fencingToken),
+          contentIds: ["content_1"], purpose: "source_context" as const,
+          expiresAt: "2026-08-09T00:05:00.000Z",
         },
         authority: {
           organizationId: "org_1",
@@ -1563,6 +1661,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-admission.v1",
         "relay.hosted-claim.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ],
     };
 
@@ -1650,6 +1749,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [],
       observedAt: now.toISOString(),
@@ -1775,6 +1875,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -2019,6 +2120,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -2204,6 +2306,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -3082,6 +3185,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [],
       observedAt: now.toISOString(),
@@ -3171,6 +3275,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -3321,6 +3426,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [],
       observedAt: now.toISOString(),
@@ -3382,7 +3488,7 @@ describe("Control V1 projection pump", () => {
     expect(executeClaimedRunImpl).not.toHaveBeenCalled();
   });
 
-  it("does not reject or import a claim when close wins a delayed refetch", async () => {
+  it("requires one-time redemption and never falls back to a GitHub refetch", async () => {
     const repository = {
       provider: "github",
       owner: "acme",
@@ -3414,6 +3520,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -3435,12 +3542,11 @@ describe("Control V1 projection pump", () => {
     const executorCapabilityDigest =
       readiness.payload.executors[0]?.capabilityDigest;
     expect(executorCapabilityDigest).toMatch(/^sha256:[0-9a-f]{64}$/u);
-    let rejectRefetch: ((reason: Error) => void) | undefined;
-    const delayedRefetch = new Promise<never>((_resolve, reject) => {
-      rejectRefetch = reject;
-    });
-    const refetchGitHubIssueCommentImpl = vi.fn(() => delayedRefetch);
-    const rejectHostedAttemptStartLocally = vi.fn();
+    const refetchGitHubIssueCommentImpl = vi.fn();
+    const rejectHostedAttemptStartLocally = vi.fn(async () => ({
+      outcome: "requeued" as const,
+      operation: { state: "acknowledged" as const },
+    }));
     const importHostedAssignedRun = vi.fn();
     const executeClaimedRunImpl = vi.fn();
     const closeStore = vi.fn();
@@ -3454,6 +3560,7 @@ describe("Control V1 projection pump", () => {
           operationId: request.operationId,
           requestId: request.requestId,
           request,
+          state: "pending" as const,
         },
       })),
       persistHostedClaimAuthorityShell: vi.fn(async () => ({
@@ -3515,28 +3622,13 @@ describe("Control V1 projection pump", () => {
       refetchGitHubIssueCommentImpl: refetchGitHubIssueCommentImpl as never,
       closeDrainTimeoutMs: 1,
     });
-    const iteration = loop!.beforeIteration();
-    await vi.waitFor(() => {
-      expect(refetchGitHubIssueCommentImpl).toHaveBeenCalledTimes(1);
-    });
-    expect(refetchGitHubIssueCommentImpl).toHaveBeenCalledWith(
-      expect.objectContaining({
-        apiOrigin: "http://127.0.0.1:43123",
-        token: "github_secret",
-      }),
+    await expect(loop!.beforeIteration()).rejects.toThrow(
+      "hosted_source_content_redeem_unavailable",
     );
-
-    await loop!.close();
-    expect(closeStore).not.toHaveBeenCalled();
-    rejectRefetch?.(new Error("refetch failed after close"));
-    await expect(iteration).resolves.toBe(false);
-    await vi.waitFor(() => {
-      expect(closeStore).toHaveBeenCalledTimes(1);
-    });
-    expect(rejectHostedAttemptStartLocally).not.toHaveBeenCalled();
-    expect(rejectHostedAttemptStartControlV1).not.toHaveBeenCalled();
+    expect(refetchGitHubIssueCommentImpl).not.toHaveBeenCalled();
     expect(importHostedAssignedRun).not.toHaveBeenCalled();
     expect(executeClaimedRunImpl).not.toHaveBeenCalled();
+    await loop!.close();
   });
 
   it("does not journal rejection when close wins delayed reject request construction", async () => {
@@ -3571,6 +3663,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -3761,6 +3854,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [],
       observedAt: now.toISOString(),
@@ -3853,5 +3947,242 @@ describe("Control V1 projection pump", () => {
       client,
     });
     expect(client.claim).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a hosted material receipt whose target differs from the pending permission", async () => {
+    const lease = { attemptId: "attempt_target_mismatch", fencingToken: "fence_target_mismatch" };
+    const targetFingerprint = `sha256:${"1".repeat(64)}`;
+    const mismatchedTargetFingerprint = `sha256:${"2".repeat(64)}`;
+    const repository = { provider: "github", owner: "acme", repo: "widget",
+      checkoutPath: process.cwd(), defaultExecutor: "reviewer", baseBranch: "main",
+      pushRemote: "origin", keepWorktree: "on_failure" as const };
+    const executor = { id: "reviewer", displayName: "Review Agent",
+      capability: { id: "reviewer", protocol: "acp" },
+      canRun: vi.fn(async () => ({ ready: true })) } as never;
+    const context = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const,
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      credentialId: "credential_1",
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      capabilities: ["relay.claim-fence.v1", "relay.hosted-admission.v1",
+        "relay.hosted-claim.v1", "relay.lifecycle.v1", "relay.material-receipt.v1",
+        "relay.permission.v1", "relay.readiness.v1"] as const,
+      targets: [{ projectTargetId: "target_1",
+        bindingDigest: `sha256:${"3".repeat(64)}`, provider: "github",
+        owner: "acme", repo: "widget", defaultExecutor: "reviewer",
+        defaultBranch: "main" }],
+      observedAt: now.toISOString(),
+    };
+    const readiness = await buildRunnerReadinessReceipt({ context,
+      executors: { reviewer: executor }, repositories: [repository], now: () => now });
+    const repo = {
+      ...emptyLifecycleRepository(),
+      getHostedAssignedRunForRecovery: vi.fn(async () => ({
+        claimed: { run: { id: "run_1" }, attemptId: lease.attemptId,
+          fencingToken: lease.fencingToken },
+        leaseExpiresAt: "2026-08-09T00:05:00.000Z",
+        hostedAuthority: {
+          organizationId: "org_1", runnerId: "runner_1", runId: "run_1",
+          credentialId: "credential_1", registrationGeneration: 1,
+          credentialGeneration: 1, projectTargetId: "target_1", bindingId: "binding_1",
+          targetBindingDigest: `sha256:${"3".repeat(64)}`,
+          admissionPolicyReceiptId: "policy_receipt_1",
+          admissionPolicySnapshotId: "policy_1",
+          admissionPolicySnapshotDigest: `sha256:${"4".repeat(64)}`,
+          runnerReadinessReceiptId: readiness.receiptId,
+          runnerReadinessReceiptDigest: readiness.receiptDigest,
+          targetReadinessReceiptId: readiness.receiptId,
+          targetReadinessReceiptDigest: readiness.receiptDigest,
+          executorId: "reviewer",
+          executorCapabilityDigest: readiness.payload.executors[0]!.capabilityDigest,
+          attemptId: lease.attemptId, attemptNumber: 1, epoch: 1,
+          fencingTokenDigest: `sha256:${"8".repeat(64)}`,
+          claimOperationId: "claim_operation_1", projectTargetVersion: 1,
+          admissionPolicySnapshotVersion: 1,
+          policyReceiptDigest: `sha256:${"9".repeat(64)}`,
+          importedAt: now.toISOString(),
+        },
+      })),
+      acquireHostedExecutionStart: vi.fn(async () => true),
+      isHostedExecutionCurrent: vi.fn(async () => true),
+      getHostedExecutionLease: vi.fn(async () => ({
+        leaseExpiresAt: "2026-08-09T00:05:00.000Z",
+      })),
+    } as never;
+    const authorizedReceipt = {
+      receiptId: "permission_receipt_1",
+      receiptDigest: `sha256:${"a".repeat(64)}`,
+      runId: "run_1",
+      observedAt: now.toISOString(),
+      attempt: { attemptId: lease.attemptId, attemptNumber: 1, epoch: 1,
+        fencingTokenDigest: `sha256:${"8".repeat(64)}` },
+      payload: {
+        state: "authorized" as const,
+        decision: "allow_once" as const,
+        decisionActorRef: "operator_1",
+        reasonCode: "human_approved" as const,
+        actionId: "action_unused",
+        permissionRequestId: "permission_unused",
+        riskTier: "high" as const,
+        requestedAt: now.toISOString(),
+        targetFingerprint,
+      },
+    };
+    const recordMaterialActionReceiptControlV1 = vi.fn(async () => ({
+      status: 201 as const, replayed: false as const, outcome: "accepted" as const,
+      receipt: { receiptId: "material_receipt_1" },
+    }));
+    const executeClaimedRunImpl = vi.fn(async (execution) => {
+      const permission = await execution.client.requestActionPermission("run_1", lease, {
+        toolCallId: "tool_target_mismatch", title: "Write target", kind: "execute",
+        permissionScopes: [], mode: "ask", connectionId: "connection_1",
+        operation: "write", resource: "resource_1", targetFingerprint,
+      });
+      await expect(execution.client.recordMaterialActionReceipt("run_1", lease,
+        permission.action.id, {
+          id: "material_receipt_1", actionId: permission.action.id,
+          provider: "github", connectionId: "connection_1",
+          targetFingerprint: mismatchedTargetFingerprint,
+          receiptRef: "provider_receipt_1", outcome: "succeeded",
+          observedAt: now.toISOString(),
+        })).rejects.toThrow("hosted_material_action_target_mismatch");
+      return true;
+    });
+    const loop = createHostedControlLoop({
+      config: { runnerId: "runner_1", dispatcherUrl: "https://control.example",
+        runnerToken: "runtime_secret", repositories: [repository], agents: {},
+        controlRegistration: { kind: "hosted_control_v1", state: "paired",
+          operationId: "pair_1", registration: { schemaVersion: 1,
+            protocolVersion: "1.0", organizationId: "org_1", runnerId: "runner_1",
+            credentialId: "credential_1", registrationGeneration: 1,
+            credentialGeneration: 1, credentialPurpose: "runtime",
+            createdAt: now.toISOString() } } } as never,
+      databasePath: ":memory:", executors: { reviewer: executor }, now: () => now,
+      controlClient: {
+        getRunnerControlContextV1: vi.fn(async () => context),
+        requestActionPermissionControlV1: vi.fn(async (request) => ({
+          status: 200 as const, replayed: false as const, outcome: "resolved" as const,
+          receipt: { ...authorizedReceipt, payload: { ...authorizedReceipt.payload,
+            actionId: request.actionId, actionDescriptor: request.actionDescriptor,
+            actionDescriptorDigest: request.actionDescriptorDigest,
+            permissionRequestId: request.permissionRequestId,
+            permissionRequestDigest: request.permissionRequestDigest,
+            policySnapshotRef: request.policySnapshotRef,
+            policySnapshotDigest: request.policySnapshotDigest } },
+        })),
+        beginMaterialActionControlV1: vi.fn(async () => ({ status: 201 as const,
+          replayed: false as const, outcome: "accepted" as const })),
+        recordMaterialActionReceiptControlV1,
+        getActionPermissionCurrentControlV1: vi.fn(async () => ({
+          status: 200 as const, outcome: "resolved" as const,
+          receipt: authorizedReceipt,
+        })),
+      } as never,
+      governanceStore: { repo, close: vi.fn() },
+      executeClaimedRunImpl: executeClaimedRunImpl as never,
+    });
+    await expect(loop?.beforeIteration()).resolves.toBe(true);
+    expect(recordMaterialActionReceiptControlV1).not.toHaveBeenCalled();
+    await loop?.close();
+  });
+
+  it("settles a durable proposal artifact before claiming more work", async () => {
+    const artifact = { id: "run_proposal:proposal-evidence", type: "patch_summary",
+      kind: "patch", title: "Immutable proposal evidence",
+      uri: "opentag://run/run_proposal/proposal-evidence", summary: "Content-free evidence.",
+      sourceRunId: "run_proposal", createdAt: now.toISOString(),
+      metadata: { artifactDigest: `sha256:${"a".repeat(64)}` } };
+    const repo = { ...emptyLifecycleRepository(),
+      getHostedProposalSettlementForRetry: vi.fn(async () => ({
+        runId: "run_proposal", attemptId: "attempt_proposal", attemptNumber: 2,
+        fencingToken: "fence_proposal", fencingTokenDigest: `sha256:${"b".repeat(64)}`,
+        candidateId: `candidate_${"a".repeat(48)}`, proposalArtifact: artifact,
+      })) } as never;
+    const settle = vi.fn(async () => ({ outcome: "settled" as const,
+      candidateId: `candidate_${"a".repeat(48)}`, candidateDigest: `sha256:${"c".repeat(64)}`,
+      status: "proposal_ready" as const }));
+    const context = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const, organizationId: "org_1", runnerId: "runner_1",
+      credentialId: "credential_1", registrationGeneration: 1, credentialGeneration: 1,
+      capabilities: [] as string[], targets: [], observedAt: now.toISOString() };
+    const loop = createHostedControlLoop({
+      config: { runnerId: "runner_1", dispatcherUrl: "https://control.example",
+        runnerToken: "runtime_secret", repositories: [], agents: {},
+        controlRegistration: { kind: "hosted_control_v1", state: "paired",
+          operationId: "pair_1", registration: { schemaVersion: 1,
+            protocolVersion: "1.0", organizationId: "org_1", runnerId: "runner_1",
+            credentialId: "credential_1", registrationGeneration: 1,
+            credentialGeneration: 1, credentialPurpose: "runtime",
+            createdAt: now.toISOString() } } } as never,
+      databasePath: ":memory:", executors: {}, now: () => now,
+      controlClient: { getRunnerControlContextV1: vi.fn(async () => context),
+        settleProposalCandidateControlV1: settle } as never,
+      governanceStore: { repo, close: vi.fn() },
+    });
+    await expect(loop?.beforeIteration()).resolves.toBe(true);
+    expect(settle).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "run_proposal", candidateId: `candidate_${"a".repeat(48)}`,
+      proposalArtifact: artifact,
+    }));
+    await loop?.close();
+  });
+
+  it("attests the exact local branch after pull-request proposal settlement", async () => {
+    const candidateId = `candidate_${"d".repeat(48)}`;
+    const proposalArtifact = { id: "run_publication:proposal-evidence",
+      metadata: { artifactDigest: `sha256:${"d".repeat(64)}` } };
+    const repo = { ...emptyLifecycleRepository(),
+      getHostedProposalSettlementForRetry: vi.fn(async () => ({
+        runId: "run_publication", attemptId: "attempt_publication", attemptNumber: 1,
+        fencingToken: "fence_publication", fencingTokenDigest: `sha256:${"e".repeat(64)}`,
+        runnerGeneration: 2, projectTargetId: "target_publication",
+        targetBindingDigest: `sha256:${"f".repeat(64)}`, candidateId,
+        branch: "opentag/run_publication", baseRevision: "a".repeat(40),
+        finalRevision: "b".repeat(40), finalTree: "c".repeat(40), proposalArtifact,
+      })) } as never;
+    const settle = vi.fn(async () => ({ outcome: "settled" as const, candidateId,
+      candidateDigest: `sha256:${"1".repeat(64)}`, status: "publication_pending" as const }));
+    const attest = vi.fn(async () => ({ ownershipId: "ownership_publication",
+      ownershipDigest: `sha256:${"2".repeat(64)}`, replayed: false }));
+    const context = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const, organizationId: "org_publication",
+      runnerId: "runner_publication", credentialId: "credential_publication",
+      registrationGeneration: 1, credentialGeneration: 2,
+      capabilities: ["relay.publication.v1"], observedAt: now.toISOString(),
+      targets: [{ projectTargetId: "target_publication",
+        bindingDigest: `sha256:${"f".repeat(64)}`, provider: "github",
+        owner: "acme", repo: "widget", defaultExecutor: "reviewer",
+        defaultBranch: "main" }] };
+    const repository = { provider: "github", owner: "acme", repo: "widget",
+      checkoutPath: process.cwd(), defaultExecutor: "reviewer", baseBranch: "main",
+      pushRemote: "origin", keepWorktree: "on_failure" as const };
+    const loop = createHostedControlLoop({
+      config: { runnerId: "runner_publication", dispatcherUrl: "https://control.example",
+        runnerToken: "runtime_secret", repositories: [repository], agents: {},
+        controlRegistration: { kind: "hosted_control_v1", state: "paired",
+          operationId: "pair_publication", registration: { schemaVersion: 1,
+            protocolVersion: "1.0", organizationId: "org_publication",
+            runnerId: "runner_publication", credentialId: "credential_publication",
+            registrationGeneration: 1, credentialGeneration: 2,
+            credentialPurpose: "runtime", createdAt: now.toISOString() } } } as never,
+      databasePath: ":memory:", executors: {}, now: () => now,
+      controlClient: { getRunnerControlContextV1: vi.fn(async () => context),
+        settleProposalCandidateControlV1: settle,
+        attestPublicationBranchOwnershipControlV1: attest } as never,
+      governanceStore: { repo, close: vi.fn() },
+    });
+    await expect(loop?.beforeIteration()).resolves.toBe(true);
+    expect(attest).toHaveBeenCalledWith(expect.objectContaining({ candidateId,
+      candidateDigest: `sha256:${"1".repeat(64)}`,
+      runId: "run_publication", attemptId: "attempt_publication",
+      projectTargetId: "target_publication", targetBindingDigest: `sha256:${"f".repeat(64)}`,
+      remote: "origin", baseBranch: "main", branch: "opentag/run_publication",
+      expectedHeadSha: "b".repeat(40), workspaceTreeDigest: "c".repeat(40),
+    }));
+    await loop?.close();
   });
 });

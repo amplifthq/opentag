@@ -38,6 +38,7 @@ const common = {
 
 const delivery = {
   ...common,
+  organizationId: 'org_test',
   intentKind: 'delivery',
   operation: 'create',
   deliveryKind: 'message',
@@ -47,7 +48,7 @@ const delivery = {
 describe('SideEffectIntentV2', () => {
   it('accepts only narrowly scoped runless source-thread control delivery', () => {
     const value = {
-      contractVersion: 2, sideEffectIntentId: 'intent_control', causalId: 'causal_control',
+      contractVersion: 2, organizationId: "org_test", sideEffectIntentId: 'intent_control', causalId: 'causal_control',
       intentKind: 'delivery', operation: 'control_reply', deliveryKind: 'message',
       presentationDigest: digest,
       provenance: {
@@ -72,6 +73,7 @@ describe('SideEffectIntentV2', () => {
     expect(api.DeliveryIntentV2Schema.parse(delivery)).toMatchObject({
       intentKind: 'delivery',
       contractVersion: 2,
+      organizationId: 'org_test',
     });
   });
 

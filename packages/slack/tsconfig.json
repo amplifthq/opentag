@@ -8,6 +8,7 @@
   "references": [
     { "path": "../client" },
     { "path": "../core" },
-    { "path": "../delivery-contract" }
+    { "path": "../delivery-contract" },
+    { "path": "../source-app-runtime" }
   ]
 }

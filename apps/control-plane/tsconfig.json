@@ -5,5 +5,14 @@
     "outDir": "dist"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/control-protocol" }]
+  "references": [
+    { "path": "../../packages/control-protocol" },
+    { "path": "../../packages/core" },
+    { "path": "../../packages/delivery-contract" },
+    { "path": "../../packages/delivery-runtime" },
+    { "path": "../../packages/github" },
+    { "path": "../../packages/governance" },
+    { "path": "../../packages/source-app-runtime" }
+    ,{ "path": "../../packages/slack" }
+  ]
 }

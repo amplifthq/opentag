@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { ProposalReadinessAssessmentSchema } from "@opentag/control-protocol";
 import {
   AcceptedProgressAttributionViewSchema,
   AgentAccessProfileSnapshotSchema,
   ActionHintSchema,
   ActionPermissionRequestSchema,
+  AttemptProposalEvidenceArtifactSchema,
   ApprovalDecisionSchema,
   ApplyPlanSchema,
   CapabilityContractSchema,
@@ -19,6 +21,7 @@ import {
   OpenTagRunSchema,
   PolicySnapshotProvenanceSchema,
   PolicyResolutionSchema,
+  PublicationCandidateSchema,
   RunAdmissionDecisionSchema,
   RunEventSchema,
   SuccessMetricNameSchema,
@@ -27,7 +30,8 @@ import {
   compareRfc3339Timestamps,
   reduceCompletionGateStates,
   runResultArtifactId,
-  runResultCreatedPullRequestArtifactId
+  runResultCreatedPullRequestArtifactId,
+  validateAttemptProposalEvidenceArtifact
 } from "../src/schema.js";
 
 describe("RFC3339 timestamp comparison", () => {
@@ -60,6 +64,153 @@ describe("RFC3339 timestamp comparison", () => {
     "2026-01-01T00:00:00+00:60"
   ])("rejects an invalid calendar or time value: %s", (value) => {
     expect(() => compareRfc3339Timestamps(value, value)).toThrow(TypeError);
+  });
+});
+
+describe("PublicationCandidate canonical contracts", () => {
+  const candidate = {
+    candidateId: "candidate_1",
+    runId: "run_1",
+    attemptId: "attempt_1",
+    projectTargetId: "target_1",
+    frozenBaseRevision: "a".repeat(40),
+    workspaceTreeDigest: "b".repeat(40),
+    patchDigest: `sha256:${"c".repeat(64)}`,
+    changedFiles: ["A.ts", "a.ts", "é.ts", "😀.ts"],
+    verificationEvidenceIds: [
+      `sha256:${"0".repeat(64)}`,
+      `sha256:${"a".repeat(64)}`,
+    ],
+    publicationPolicyDigest: `sha256:${"d".repeat(64)}`,
+    createdAt: "2026-08-31T01:02:03.004Z",
+  };
+
+  it("accepts only canonical Unicode identity-array order and exact UTC milliseconds", () => {
+    expect(PublicationCandidateSchema.safeParse(candidate).success).toBe(true);
+    expect(PublicationCandidateSchema.safeParse({
+      ...candidate,
+      changedFiles: ["😀.ts", "é.ts", "a.ts", "A.ts"],
+    }).success).toBe(false);
+    expect(PublicationCandidateSchema.safeParse({
+      ...candidate,
+      changedFiles: ["A.ts", "a.ts", "é.ts", "é.ts"],
+    }).success).toBe(false);
+    for (const changedFile of [
+      String.fromCharCode(0xd800) + ".ts",
+      String.fromCharCode(0xdc00) + ".ts",
+    ]) {
+      expect(PublicationCandidateSchema.safeParse({ ...candidate, changedFiles: [changedFile] }).success)
+        .toBe(false);
+    }
+    expect(PublicationCandidateSchema.safeParse({
+      ...candidate,
+      verificationEvidenceIds: [
+        `sha256:${"a".repeat(64)}`,
+        `sha256:${"0".repeat(64)}`,
+      ],
+    }).success).toBe(false);
+    expect(PublicationCandidateSchema.safeParse({
+      ...candidate,
+      verificationEvidenceIds: [
+        `sha256:${"0".repeat(64)}`,
+        `sha256:${"0".repeat(64)}`,
+      ],
+    }).success).toBe(false);
+    for (const createdAt of [
+      "0000-01-01T00:00:00.000Z",
+      "2026-08-31T01:02:03Z",
+      "2026-08-31T01:02:03.0Z",
+      "2026-08-31T01:02:03.00Z",
+      "2026-08-31T01:02:03.0000Z",
+      "2026-08-31T09:02:03.004+08:00",
+      "2026-02-30T01:02:03.004Z",
+    ]) {
+      expect(PublicationCandidateSchema.safeParse({ ...candidate, createdAt }).success).toBe(false);
+    }
+  });
+
+  it("requires exact UTC milliseconds for proposal-readiness assessments", () => {
+    const assessment = {
+      state: "proposal_ready" as const,
+      accepted: true,
+      candidateId: candidate.candidateId,
+      reasonCodes: ["proposal_ready" as const],
+      assessedAt: "2026-08-31T01:02:03.004Z",
+    };
+    expect(ProposalReadinessAssessmentSchema.safeParse(assessment).success).toBe(true);
+    for (const assessedAt of [
+      "2026-08-31T01:02:03Z",
+      "2026-08-31T01:02:03.00Z",
+      "2026-08-31T09:02:03.004+08:00",
+      "2026-02-30T01:02:03.004Z",
+    ]) {
+      expect(ProposalReadinessAssessmentSchema.safeParse({ ...assessment, assessedAt }).success).toBe(false);
+    }
+  });
+});
+
+describe("Task 7 proposal artifact Unicode admission", () => {
+  const artifact = {
+    id: "run_1:proposal-evidence",
+    type: "patch_summary" as const,
+    kind: "patch" as const,
+    title: "Immutable proposal evidence" as const,
+    uri: "opentag://run/run_1/proposal-evidence",
+    summary: "Proposal evidence for run_1.",
+    sourceRunId: "run_1",
+    createdAt: "2026-08-31T01:02:03.004Z",
+    metadata: {
+      proposalEvidence: {
+        schemaVersion: 1 as const,
+        kind: "attempt_proposal_evidence" as const,
+        attemptId: "attempt_1",
+        attemptNumber: 1,
+        workspaceId: "workspace_1",
+        workspacePathDigest: `sha256:${"1".repeat(64)}`,
+        branch: "opentag/run_1",
+        baseRevision: "a".repeat(40),
+        finalTree: "b".repeat(40),
+        diffDigest: `sha256:${"2".repeat(64)}`,
+        changedFilesDigest: `sha256:${"3".repeat(64)}`,
+        changedFiles: ["a.ts"],
+        verificationEvidenceDigests: [`sha256:${"4".repeat(64)}`],
+        limitations: [],
+        evidenceDigest: `sha256:${"5".repeat(64)}`,
+      },
+      evidenceDigest: `sha256:${"5".repeat(64)}`,
+      artifactDigest: `sha256:${"6".repeat(64)}`,
+      readiness: "not_assessed" as const,
+    },
+  };
+
+  it.each(["id", "uri", "summary", "sourceRunId"] as const)(
+    "rejects lone high and low surrogates in %s before digest validation",
+    async (field) => {
+      for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+        expect(() => AttemptProposalEvidenceArtifactSchema.safeParse({
+          ...artifact,
+          [field]: malformed,
+        })).not.toThrow();
+        expect(AttemptProposalEvidenceArtifactSchema.safeParse({
+          ...artifact,
+          [field]: malformed,
+        }).success).toBe(false);
+        await expect(validateAttemptProposalEvidenceArtifact({
+          ...artifact,
+          [field]: malformed,
+        })).rejects.toThrow(/well-formed Unicode/u);
+      }
+    },
+  );
+
+  it("accepts valid supplementary scalar text in every outer string field", () => {
+    expect(AttemptProposalEvidenceArtifactSchema.safeParse({
+      ...artifact,
+      id: "😀",
+      uri: "😀",
+      summary: "😀",
+      sourceRunId: "😀",
+    }).success).toBe(true);
   });
 });
 
@@ -742,6 +893,16 @@ describe("Completion governance schemas", () => {
       ...compatibilityContract,
       gates: [{ ...compatibilityContract.gates[0], id: "human_escalation:executor" }]
     })).toThrow(/reserved human_escalation/u);
+    for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+      expect(() => CompletionContractSchema.safeParse({
+        ...compatibilityContract,
+        gates: [{ ...compatibilityContract.gates[0], id: malformed }],
+      })).not.toThrow();
+      expect(CompletionContractSchema.safeParse({
+        ...compatibilityContract,
+        gates: [{ ...compatibilityContract.gates[0], id: malformed }],
+      }).success).toBe(false);
+    }
   });
 
   it("keeps execution success separate from attributed completion assessment", () => {
@@ -779,6 +940,35 @@ describe("Completion governance schemas", () => {
 
     expect(assessment.state).toBe("pending");
     expect(assessment.triggeredByRunId).toBe("run_1");
+    for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+      expect(() => CompletionAssessmentSchema.safeParse({
+        ...assessment,
+        gateResults: [{ ...assessment.gateResults[0], gateId: malformed }],
+      })).not.toThrow();
+      expect(CompletionAssessmentSchema.safeParse({
+        ...assessment,
+        gateResults: [{ ...assessment.gateResults[0], gateId: malformed }],
+      }).success).toBe(false);
+      expect(CompletionAssessmentSchema.safeParse({
+        ...assessment,
+        targetBindings: [{ ...assessment.targetBindings[0]!, key: malformed }],
+        gateResults: [{ ...assessment.gateResults[0], targetKey: malformed }],
+      }).success).toBe(false);
+      expect(() => CompletionGateResultSchema.safeParse({
+        ...assessment.gateResults[0],
+        evidenceIds: [malformed],
+      })).not.toThrow();
+      expect(CompletionGateResultSchema.safeParse({
+        ...assessment.gateResults[0],
+        evidenceIds: [malformed],
+      }).success).toBe(false);
+    }
+    expect(CompletionGateResultSchema.safeParse({
+      ...assessment.gateResults[0],
+      state: "passed",
+      reasonCode: "verification_passed",
+      evidenceIds: ["evidence_😀"],
+    }).success).toBe(true);
     expect(CompletionAssessmentSchema.parse({
       ...assessment,
       gateResults: [{
@@ -848,6 +1038,16 @@ describe("Completion governance schemas", () => {
     });
 
     expect(waived.waiver?.gateIds).toEqual(["checks"]);
+    for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+      expect(() => CompletionAssessmentSchema.safeParse({
+        ...waived,
+        waiver: { ...waived.waiver!, gateIds: [malformed] },
+      })).not.toThrow();
+      expect(CompletionAssessmentSchema.safeParse({
+        ...waived,
+        waiver: { ...waived.waiver!, gateIds: [malformed] },
+      }).success).toBe(false);
+    }
     for (const timestampPatch of [
       { waivedAt: "2026-02-30T00:00:00Z" },
       { expiresAt: "2026-02-30T00:00:00Z" }

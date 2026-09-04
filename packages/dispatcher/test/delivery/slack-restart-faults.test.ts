@@ -1,7 +1,7 @@
 import { DeliveryIntentV2Schema } from '@opentag/delivery-contract';
 import { describe, expect, it } from 'vitest';
-import { ProviderAdapterRegistry } from '../../src/delivery/provider-registry.js';
 import type { RegisteredProviderAdapter } from '../../src/delivery/provider-registry.js';
+import { providerRegistry } from './provider-registry-fixture.js';
 import {
   ProviderSideEffectKernel,
   type DeliveryKernelRepository,
@@ -11,6 +11,7 @@ import {
 type Request = { operation: 'create'; presentation: string };
 const digest = `sha256:${'2'.repeat(64)}`;
 const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2,
+organizationId: "org_test",
   sideEffectIntentId: 'slack-intent-1', causalId: 'cause-1', intentKind: 'delivery',
   operation: 'create', deliveryKind: 'message', presentationDigest: digest,
   provenance: { kind: 'business', repositoryIdentityDigest: digest,
@@ -45,7 +46,7 @@ function harness(finalizeStrandedBegun = async () => 0) {
     getIntent: async () => ({ outcome: 'hydrated' as const, intent, persistedPayload: {},
       journalIntentDigest: digest }),
     claimNext: async () => ({
-      attemptId: 'attempt-1', intentId: 'slack-intent-1', sequence: 1,
+      organizationId: 'org_test', attemptId: 'attempt-1', intentId: 'slack-intent-1', sequence: 1,
       leaseFence: 'fence-1', revision: 2, providerId: 'slack',
       providerInstanceId: 'team-1', providerBindingDigest: digest,
       providerConfigGeneration: 1, providerConfigGenerationDigest: digest,
@@ -73,7 +74,7 @@ const prepareRequest = () => ({
 describe('Slack restart faults', () => {
   it('settles a post-begin exception as outcome_unknown', async () => {
     const state = harness();
-    const registry = new ProviderAdapterRegistry<Request>().register(
+    const registry = providerRegistry<Request>(
       registered(async () => { throw new Error('connection reset'); }),
     );
     const result = await new ProviderSideEffectKernel({
@@ -88,7 +89,7 @@ describe('Slack restart faults', () => {
 
   it('settles a provider timeout as outcome_unknown', async () => {
     const state = harness();
-    const registry = new ProviderAdapterRegistry<Request>().register(
+    const registry = providerRegistry<Request>(
       registered(async () => new Promise(() => {})),
     );
     const result = await new ProviderSideEffectKernel({
@@ -104,7 +105,7 @@ describe('Slack restart faults', () => {
     let recovered = 0;
     const state = harness(async () => { recovered += 1; return 2; });
     let sends = 0;
-    const registry = new ProviderAdapterRegistry<Request>().register(
+    const registry = providerRegistry<Request>(
       registered(async () => {
           sends += 1;
           return { outcome: 'accepted', evidenceDigest: 'not-used' };

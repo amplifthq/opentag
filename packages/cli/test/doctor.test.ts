@@ -23,12 +23,11 @@ function relayConfig(relayUrl: string) {
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false,
       port: 3050
     }
   });
   built.runtime = {
-    mode: "relay",
+    mode: "paired_relay",
     relayUrl,
     relayProvider: "custom"
   };
@@ -58,6 +57,15 @@ describe("OpenTag CLI doctor relay checks", () => {
 
     expect(formatted).toContain("OpenTag doctor");
     expect(formatted).toContain("OK dispatcher health: https://relay.example");
+    expect(formatted).toContain("OK runtime mode profile: declared=paired_relay; offlineSafe=false; executionLocality=paired_runner");
+    expect(formatted).toContain("WARN relay deployment identity: unknown; configuration does not prove a relay deployment identity");
+    expect(formatted).toContain("OK Slack installation and binding: unsupported; Slack is not configured");
+    expect(formatted).toContain("WARN Runner credential and generation: credential=legacy_pairing_fallback; generation=unknown; readiness=unverified");
+    expect(formatted).toContain("WARN ACP executor and harness: declared=echo; harness=unverified");
+    expect(formatted).toContain("WARN queue deadline policy: disabled; runtime verification=unavailable");
+    expect(formatted).toContain("WARN execution isolation: declared by executor configuration only; runtime verification=unavailable");
+    expect(formatted).toContain("WARN delivery health: unknown; no provider delivery receipt was inspected");
+    expect(formatted).toContain("WARN installation certification: unverified; configuration and reachability are not installation certification");
     expect(formatted).toContain("OK hook ingest auth:");
     expect(formatted).toContain("Runner-scoped dispatcher token is configured");
     expect(formatted).toContain("OK credential sources:");
@@ -126,7 +134,7 @@ describe("OpenTag CLI doctor relay checks", () => {
 
   it("reports malformed relay URLs as doctor failures instead of throwing", () => {
     const malformed = relayConfig("https://relay.example");
-    malformed.runtime = { mode: "relay", relayUrl: "not a url", relayProvider: "custom" };
+    malformed.runtime = { mode: "paired_relay", relayUrl: "not a url", relayProvider: "custom" };
     malformed.daemon.dispatcherUrl = "not a url";
 
     const formatted = formatCliDoctorChecks(appendCliDoctorChecks(malformed, []));

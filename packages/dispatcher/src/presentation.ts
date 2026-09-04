@@ -1,6 +1,7 @@
 import {
   createFinalSummaryPresentation,
   createRunStatusPresentation,
+  composeTeamRelayThreadProjection,
   platformCapabilityForProvider,
   renderOpenTagPresentationPlainText,
   shouldDeliverProgressPresentation,
@@ -45,12 +46,14 @@ import {
   createSlackFinalSummaryBlocks,
   createSlackRunStatusBlocks,
   createSlackSourceThreadStatusBlocks,
+  createSlackTeamRelayProjectionBlocks,
   markdownToSlackMrkdwn,
   renderSlackActionReceiptPresentation,
   renderSlackApprovalPrompt,
   renderSlackAcknowledgement,
   renderSlackFinalSummaryPresentation,
   renderSlackRunStatusPresentation,
+  renderSlackTeamRelayProjection,
   type SlackBlock
 } from "@opentag/slack";
 import {
@@ -64,6 +67,8 @@ import {
 export type LarkRenderLocale = "en-US" | "zh-CN";
 
 export type PresentedProviderBody = { body: string; blocks?: SlackBlock[]; rich?: { provider: string; payload: unknown } };
+
+export { composeTeamRelayThreadProjection };
 
 export type ProviderPresentation = {
   shouldDeliverAcknowledgement(provider: string): boolean;
@@ -244,7 +249,7 @@ function renderSourceThreadStatus(provider: string, presentation: OpenTagSourceT
   return { body };
 }
 
-function renderActionReceipt(provider: string, presentation: OpenTagActionReceiptPresentation, options: { larkRenderLocale?: LarkRenderLocale } = {}): PresentedProviderBody {
+function renderActionReceipt(provider: string, presentation: OpenTagActionReceiptPresentation): PresentedProviderBody {
   const body =
     provider === "slack"
       ? renderSlackActionReceiptPresentation(presentation)
@@ -355,10 +360,15 @@ export function createDefaultProviderPresentation(): ProviderPresentation {
       if (input.presentation.kind === "source_thread_status") {
         return renderSourceThreadStatus(input.provider, input.presentation);
       }
+      if (input.presentation.kind === "source_thread_projection") {
+        if (input.provider === "slack") return {
+          body: renderSlackTeamRelayProjection(input.presentation),
+          blocks: createSlackTeamRelayProjectionBlocks(input.presentation)
+        };
+        return { body: renderOpenTagPresentationPlainText(input.presentation) };
+      }
       if (input.presentation.kind === "action_receipt") {
-        return renderActionReceipt(input.provider, input.presentation, {
-          ...(input.larkRenderLocale ? { larkRenderLocale: input.larkRenderLocale } : {})
-        });
+        return renderActionReceipt(input.provider, input.presentation);
       }
       return {
         body: renderOpenTagPresentationPlainText(input.presentation)

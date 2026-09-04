@@ -1,11 +1,13 @@
 import { parseOpenTagMention } from "./mention.js";
-import type {
-  ApprovalMode,
-  Grant,
-  MutationIntent,
-  NormalizedMaterialAction,
-  OpenTagRunResult,
-  SuggestedChangesSnapshot
+import {
+  compareCanonicalUnicodeStrings,
+  sortCanonicalUnicodeStrings,
+  type ApprovalMode,
+  type Grant,
+  type MutationIntent,
+  type NormalizedMaterialAction,
+  type OpenTagRunResult,
+  type SuggestedChangesSnapshot
 } from "./schema.js";
 
 export type MaterialActionRequestInput = {
@@ -32,7 +34,8 @@ const CANONICAL_TARGET_KEYS = new Set([
 ]);
 
 function normalizedRecord(value: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
+  return Object.fromEntries(Object.entries(value)
+    .sort(([left], [right]) => compareCanonicalUnicodeStrings(left, right)));
 }
 
 function targetExtensions(value: Record<string, unknown> | undefined): Record<string, unknown> {
@@ -43,7 +46,9 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
   const title = input.title.trim().replace(/\s+/gu, " ").slice(0, 240) || "untitled action";
   const kind = input.kind?.trim().toLowerCase().replace(/[^a-z0-9._:-]+/gu, "_") || "tool";
   const actionFamily = kind === "tool" ? title.toLowerCase().split(/\s+/u).slice(0, 3).join("_").replace(/[^a-z0-9._:-]+/gu, "_") : kind;
-  const permissionScopes = [...new Set(input.permissionScopes ?? [])].map((scope) => scope.trim()).filter(Boolean).sort();
+  const permissionScopes = sortCanonicalUnicodeStrings(
+    [...new Set(input.permissionScopes ?? [])].map((scope) => scope.trim()).filter(Boolean)
+  );
   const provider = input.provider?.trim().toLowerCase() || "acp";
   const connectionId = input.connectionId?.trim() || `${provider}:agent-managed`;
   const operation = input.operation?.trim().toLowerCase() || actionFamily || kind;
@@ -100,7 +105,7 @@ function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => compareCanonicalUnicodeStrings(left, right))
       .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
       .join(",")}}`;
   }

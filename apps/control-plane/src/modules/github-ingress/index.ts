@@ -15,10 +15,12 @@ import {
 } from "@opentag/control-protocol";
 import type { Pool } from "pg";
 import { z } from "zod";
+import { normalizeGitHubIssueComment } from "@opentag/github";
 import { withPostgresTransaction } from "../../database/postgres.js";
 import { recordManagementAudit } from "../audit/index.js";
 import type { ConsolePrincipal } from "../identity/index.js";
 import type { HostedRunCoordinator } from "../hosted-runs/index.js";
+import type { RelayContentCustody } from "../source-content/index.js";
 
 const HOSTED_CAPABILITIES = [
   "relay.claim-fence.v1",
@@ -26,6 +28,7 @@ const HOSTED_CAPABILITIES = [
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 const DELIVERY_PROCESSING_LEASE_MS = 60_000;
 
@@ -179,6 +182,7 @@ export function createGithubIngress(input: {
   hosted: HostedRunCoordinator;
   clock: { now(): Date };
   masterSecret: string;
+  sourceContent: Pick<RelayContentCustody, "store">;
 }) {
   if (Buffer.byteLength(input.masterSecret, "utf8") < 32) {
     throw new Error("invalid_github_ingress_master_secret");
@@ -217,7 +221,7 @@ export function createGithubIngress(input: {
     payloadDigest: string,
     eventName: string,
   ): Promise<
-    | { owner: true; processingToken: string }
+    | { owner: true; processingToken: string; receivedAt: Date }
     | { owner: false; outcome: GithubIngressOutcome }
   > => {
     const processingToken = randomBytes(24).toString("base64url");
@@ -246,15 +250,16 @@ export function createGithubIngress(input: {
           now,
         ],
       );
-      if (inserted.rows[0]) return { owner: true, processingToken };
+      if (inserted.rows[0]) return { owner: true, processingToken, receivedAt: now };
       const replay = await client.query<{
         payload_digest: string;
         event_name: string;
         normalized_outcome: unknown;
         processing_expires_at: Date | null;
+        received_at: Date;
       }>(
         `SELECT payload_digest, event_name, normalized_outcome,
-                processing_expires_at
+                processing_expires_at, received_at
          FROM cp_github_delivery
          WHERE organization_id = $1 AND binding_id = $2 AND delivery_id = $3
          FOR UPDATE`,
@@ -285,7 +290,7 @@ export function createGithubIngress(input: {
             processingExpiresAt,
           ],
         );
-        return { owner: true, processingToken };
+        return { owner: true, processingToken, receivedAt: row.received_at };
       }
       return { owner: false, outcome: replayOutcome(row.normalized_outcome) };
     });
@@ -572,7 +577,7 @@ export function createGithubIngress(input: {
         return finish({ kind: "runner_not_ready" } as const);
       }
 
-      const receivedAt = input.clock.now().toISOString();
+      const receivedAt = reservation.receivedAt.toISOString();
       const sourceIdentityDigest = await computeGitHubIssueCommentSourceIdentityDigestV1({
         provider: "github",
         repository: {
@@ -600,6 +605,47 @@ export function createGithubIngress(input: {
       const operationId = `operation_admit_${identitySuffix}`;
       const snapshotId = `policy_${identitySuffix}`;
       const authorizationRef = `github_${binding.binding_id}_${parsed.data.sender.id}`;
+      const proposedQueueClaimDeadline = new Date(
+        new Date(receivedAt).getTime() + 8 * 60 * 60 * 1_000,
+      ).toISOString();
+      const executionBearingCommentBody = parsed.data.comment.body.trim();
+      const event = normalizeGitHubIssueComment({
+        id: parsed.data.comment.id,
+        commentBody: executionBearingCommentBody,
+        commentUrl: `https://github.com/${binding.owner}/${binding.repo}/issues/${parsed.data.issue.number}#issuecomment-${parsed.data.comment.id}`,
+        apiCommentsUrl: `https://api.github.com/repos/${binding.owner}/${binding.repo}/issues/${parsed.data.issue.number}/comments`,
+        issueUrl: `https://github.com/${binding.owner}/${binding.repo}/issues/${parsed.data.issue.number}`,
+        issueNumber: parsed.data.issue.number,
+        threadKind: parsed.data.issue.pull_request ? "pull_request" : "issue",
+        owner: binding.owner,
+        repo: binding.repo,
+        actorId: Number(parsed.data.sender.id),
+        actorLogin: parsed.data.sender.login,
+        private: parsed.data.repository.private === true,
+        receivedAt,
+        deliveryId: command.deliveryId,
+        signatureVerified: true,
+      });
+      if (!event) return finish({ kind: "invalid_payload" } as const);
+      const executionPayload = { executionBearingCommentBody, event };
+      const contentRef = await input.sourceContent.store({
+        organizationId: binding.organization_id,
+        installationId: binding.binding_id,
+        sourceAppId: "github",
+        sourceDeliveryId: command.deliveryId,
+        sourceMessageId: parsed.data.comment.id,
+        sourceVersionRef: `github_comment_${parsed.data.comment.id}`,
+        purpose: "source_context",
+        contentId: `github_delivery_${identitySuffix}`,
+        payload: executionPayload,
+        expiresAt: new Date(proposedQueueClaimDeadline),
+      });
+      if (!contentRef.expiresAt) throw new Error("source_content_expiry_missing");
+      const { expiresAt: queueClaimDeadline, ...sourceEnvelopeRef } = contentRef;
+      const sourceContextEnvelope = {
+        ...sourceEnvelopeRef,
+        envelopeDigest: await computeControlPayloadDigestV1(sourceEnvelopeRef),
+      };
       const policyPayload = {
         snapshotId,
         capturedAt: receivedAt,
@@ -615,6 +661,7 @@ export function createGithubIngress(input: {
           bindingId: binding.binding_id,
           providerRepositoryId: binding.provider_repository_id,
           defaultBranch: binding.default_branch ?? "main",
+          authorizedPublicationModes: ["proposal_only", "pull_request"] as const,
         },
         runner: {
           runnerId: binding.runner_id,
@@ -709,6 +756,26 @@ export function createGithubIngress(input: {
           digest: binding.binding_digest,
         },
         runnerId: binding.runner_id,
+        sourceContextEnvelope,
+        queueClaimDeadline,
+        permissionCeiling: {
+          allowedActionDescriptors: ["workspace.write" as const],
+          digest: await computeControlPayloadDigestV1(["workspace.write"]),
+        },
+        publicationPolicy: {
+          mode: "proposal_only" as const,
+          digest: await computeControlPayloadDigestV1({
+            bindingId: binding.binding_id,
+            mode: "proposal_only",
+          }),
+        },
+        completionContract: {
+          mode: "proposal_ready" as const,
+          digest: await computeControlPayloadDigestV1({
+            bindingId: binding.binding_id,
+            mode: "proposal_ready",
+          }),
+        },
         admissionPolicySnapshot: {
           snapshotId,
           digest: policy.receiptDigest,

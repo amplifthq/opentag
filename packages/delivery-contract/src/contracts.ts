@@ -182,11 +182,15 @@ function assertBusinessEnvelope(
 const BusinessDeliveryIntentV2Schema = z
   .object({
     ...businessEnvelope,
+    organizationId: safeId,
     intentKind: z.literal('delivery'),
     operation: z.enum(['create', 'update']),
     deliveryKind: z.enum(['message', 'reaction']),
     presentationDigest: digest,
     statusMessageId: safeId.optional(),
+    projectionRevision: positiveInteger.optional(),
+    projectionPurpose: z.enum(['external','anchor_create','anchor_update']).optional(),
+    projectionEventSequence: z.number().int().nonnegative().optional(),
   })
   .strict()
   .superRefine(assertBusinessEnvelope);
@@ -194,6 +198,7 @@ const BusinessDeliveryIntentV2Schema = z
 const SourceThreadControlDeliveryIntentV2Schema = z
   .object({
     contractVersion: z.literal(2), sideEffectIntentId: safeId, causalId: safeId,
+    organizationId: safeId,
     intentKind: z.literal('delivery'),
     operation: z.literal('control_reply'),
     deliveryKind: z.literal('message'), presentationDigest: digest,

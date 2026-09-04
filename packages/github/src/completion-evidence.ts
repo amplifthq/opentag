@@ -21,12 +21,44 @@ export type GitHubVerifiedPullRequestSnapshot = {
   payloadDigest: string;
 };
 
+export type ExactPullRequestReadinessReason =
+  | "repository_mismatch" | "head_mismatch" | "base_mismatch"
+  | "pull_request_not_open" | "checks_incomplete" | "configured_check_missing"
+  | "configured_check_not_passed";
+
+export function assessExactPullRequestReadiness(input: {
+  snapshot: GitHubVerifiedPullRequestSnapshot;
+  expectedRepository: { owner: string; repo: string };
+  expectedHeadSha: string;
+  expectedBaseBranch: string;
+  requiredChecks: readonly string[];
+}): { ready: boolean; reasonCodes: ExactPullRequestReadinessReason[] } {
+  const reasons: ExactPullRequestReadinessReason[] = [];
+  if (input.snapshot.repository.owner.toLowerCase() !== input.expectedRepository.owner.toLowerCase()
+    || input.snapshot.repository.repo.toLowerCase() !== input.expectedRepository.repo.toLowerCase()) {
+    reasons.push("repository_mismatch");
+  }
+  if (input.snapshot.pullRequest.headSha !== input.expectedHeadSha) reasons.push("head_mismatch");
+  if (input.snapshot.pullRequest.baseBranch !== input.expectedBaseBranch) reasons.push("base_mismatch");
+  if (input.snapshot.pullRequest.state !== "open") reasons.push("pull_request_not_open");
+  if (!input.snapshot.checksComplete) reasons.push("checks_incomplete");
+  const required = [...new Set(input.requiredChecks)].sort();
+  if (required.some((check) => input.snapshot.checks[check] === undefined)) {
+    reasons.push("configured_check_missing");
+  } else if (required.some((check) => input.snapshot.checks[check] !== "passed")) {
+    reasons.push("configured_check_not_passed");
+  }
+  return { ready: reasons.length === 0, reasonCodes: reasons };
+}
+
 export type GitHubCompletionApi = {
   getPullRequest(input: { owner: string; repo: string; pullRequestNumber: number }): Promise<{
     number: number;
     state: string;
     merged: boolean;
-    head: { sha: string };
+    draft?: boolean;
+    htmlUrl?: string;
+    head: { sha: string; ref?: string; repo?: { full_name?: string } | null };
     base: { ref: string; sha: string; repo?: { full_name?: string } | null };
   }>;
   listCheckRunsForRef(input: { owner: string; repo: string; ref: string }): Promise<{
@@ -268,15 +300,23 @@ export function createGitHubCompletionApi(input: {
       const value = await request(`/repos/${segment(owner)}/${segment(repo)}/pulls/${segment(pullRequestNumber)}`);
       if (!isRecord(value) || !positiveInteger(value["number"]) || !isRecord(value["head"]) || !nonEmptyString(value["head"]["sha"])
         || !isRecord(value["base"]) || !nonEmptyString(value["base"]["ref"]) || !nonEmptyString(value["base"]["sha"])
-        || typeof value["merged"] !== "boolean" || typeof value["state"] !== "string") {
+        || typeof value["merged"] !== "boolean"
+        || (value["draft"] !== undefined && typeof value["draft"] !== "boolean")
+        || (value["html_url"] !== undefined && !nonEmptyString(value["html_url"]))
+        || typeof value["state"] !== "string") {
         throw new Error("GitHub pull request reconciliation returned an invalid response.");
       }
       const baseRepo = isRecord(value["base"]["repo"]) ? nonEmptyString(value["base"]["repo"]["full_name"]) : null;
+      const headRepo = isRecord(value["head"]["repo"]) ? nonEmptyString(value["head"]["repo"]["full_name"]) : null;
       return {
         number: value["number"] as number,
         state: value["state"],
         merged: value["merged"],
-        head: { sha: value["head"]["sha"] as string },
+        ...(typeof value["draft"] === "boolean" ? { draft: value["draft"] } : {}),
+        ...(typeof value["html_url"] === "string" ? { htmlUrl: value["html_url"] } : {}),
+        head: { sha: value["head"]["sha"] as string,
+          ...(typeof value["head"]["ref"] === "string" ? { ref: value["head"]["ref"] } : {}),
+          ...(headRepo ? { repo: { full_name: headRepo } } : {}) },
         base: {
           ref: value["base"]["ref"] as string,
           sha: value["base"]["sha"] as string,

@@ -8,7 +8,8 @@ import {
   type ActionReceiptPrimaryDecision,
   type ActionReceiptState
 } from "./action.js";
-import { OpenTagRunResultSchema, type OpenTagRunResult } from "./schema.js";
+import { compareCanonicalUnicodeStrings, OpenTagRunResultSchema, PublicationCandidateSchema,
+  type OpenTagRunResult, type PublicationCandidate } from "./schema.js";
 import { isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
 
 const CredentialSafePresentationTextSchema = z.string().min(1).refine(isCredentialSafeText);
@@ -103,6 +104,39 @@ export const OpenTagSourceThreadStatusPresentationSchema = z.object({
   detailHint: z.string().min(1).optional()
 });
 
+export const OpenTagSourceThreadProjectionPresentationSchema = z.object({
+  kind: z.literal("source_thread_projection"),
+  runId: CredentialSafePresentationTextSchema,
+  generation: z.number().int().positive(),
+  state: z.enum(["waiting_for_runner", "assigned", "running", "waiting_for_approval",
+    "publication_pending", "proposal_ready", "ready_for_review", "failed", "cancelled",
+    "interrupted", "timed_out"]),
+  title: CredentialSafePresentationTextSchema,
+  summary: CredentialSafePresentationTextSchema,
+  runOutcome: z.enum(["pending", "succeeded", "failed", "cancelled", "interrupted", "timed_out"]),
+  controls: z.array(z.object({
+    kind: z.enum(["status", "cancel", "approve", "reject", "publication_approve"]),
+    actionId: CredentialSafePresentationTextSchema,
+    generation: z.number().int().positive()
+  }).strict()).max(4),
+  providerDelivery: z.object({
+    state: z.enum(["pending", "accepted", "rejected", "outcome_unknown", "attention"]),
+    reasonCode: z.enum(["provider_adapter_not_registered", "delivery_request_preparation_failed",
+      "delivery_request_digest_mismatch", "delivery_payload_custody_unavailable",
+      "provider_binding_mismatch", "invalid_delivery_shape", "provider_5xx",
+      "malformed_response", "slack_rejected", "ambiguous_response", "deadline_exceeded",
+      "transport_error", "provider_delivery_timeout", "provider_delivery_exception",
+      "provider_result_invalid", "delivery_settlement_stale", "delivery_restart_after_begin",
+      "delivery_deadline_exceeded", "delivery_superseded"]).optional(),
+    message: CredentialSafePresentationTextSchema
+  }).strict().optional()
+}).strict().superRefine((value, context) => {
+  value.controls.forEach((control, index) => {
+    if (control.generation !== value.generation) context.addIssue({ code: "custom",
+      path: ["controls", index, "generation"], message: "source_thread_control_generation_stale" });
+  });
+});
+
 export const OpenTagActionReceiptPresentationSchema = z.object({
   kind: z.literal("action_receipt"),
   title: z.string().min(1),
@@ -124,12 +158,33 @@ export const OpenTagFinalSummaryPresentationSchema = z.object({
   result: OpenTagRunResultSchema.refine(isCredentialSafeValue)
 });
 
+export const OpenTagProposalReadyPresentationSchema = z.object({
+  kind: z.literal("publication_candidate"),
+  state: z.enum(["proposal_ready", "publication_pending"]),
+  candidate: PublicationCandidateSchema,
+  summary: CredentialSafePresentationTextSchema,
+  changedFiles: z.array(CredentialSafePresentationTextSchema).min(1),
+  verification: z.array(CredentialSafePresentationTextSchema).min(1),
+  limitations: z.array(CredentialSafePresentationTextSchema),
+  nextAction: CredentialSafePresentationTextSchema,
+  absentClaims: z.tuple([
+    z.literal("branch_not_published"),
+    z.literal("pull_request_not_created"),
+    z.literal("checks_not_observed"),
+    z.literal("review_not_observed"),
+    z.literal("merge_not_observed"),
+    z.literal("deployment_not_observed"),
+  ]),
+}).strict();
+
 export const OpenTagPresentationSchema = z.discriminatedUnion("kind", [
   OpenTagRunStatusPresentationSchema,
   OpenTagApprovalPromptPresentationSchema,
   OpenTagDoctorSummaryPresentationSchema,
   OpenTagSourceThreadStatusPresentationSchema,
+  OpenTagSourceThreadProjectionPresentationSchema,
   OpenTagActionReceiptPresentationSchema,
+  OpenTagProposalReadyPresentationSchema,
   OpenTagFinalSummaryPresentationSchema
 ]);
 
@@ -141,13 +196,66 @@ export type OpenTagDoctorSummaryPresentation = z.infer<typeof OpenTagDoctorSumma
 export type OpenTagSourceThreadStatusRun = z.infer<typeof OpenTagSourceThreadStatusRunSchema>;
 export type OpenTagSourceThreadQueuedFollowUp = z.infer<typeof OpenTagSourceThreadQueuedFollowUpSchema>;
 export type OpenTagSourceThreadStatusPresentation = z.infer<typeof OpenTagSourceThreadStatusPresentationSchema>;
+export type OpenTagSourceThreadProjectionPresentation = z.infer<typeof OpenTagSourceThreadProjectionPresentationSchema>;
 export type OpenTagActionReceiptPresentation = z.infer<typeof OpenTagActionReceiptPresentationSchema>;
 export type OpenTagFinalSummaryPresentation = z.infer<typeof OpenTagFinalSummaryPresentationSchema>;
+export type OpenTagProposalReadyPresentation = z.infer<typeof OpenTagProposalReadyPresentationSchema>;
 export type OpenTagPresentation = z.infer<typeof OpenTagPresentationSchema>;
 export type OpenTagPresentationDeliveryTier = "silent" | "status" | "attention_required" | "terminal";
 
+type TeamRelayState = OpenTagSourceThreadProjectionPresentation["state"];
+const TEAM_RELAY_COPY: Record<TeamRelayState, { title: string; summary: string;
+  runOutcome: OpenTagSourceThreadProjectionPresentation["runOutcome"] }> = {
+  waiting_for_runner: { title: "Waiting for your paired Runner",
+    summary: "OpenTag will start automatically if the paired Runner becomes eligible before the claim deadline.", runOutcome: "pending" },
+  assigned: { title: "Assigned", summary: "A paired Runner has claimed this Run.", runOutcome: "pending" },
+  running: { title: "Running", summary: "The paired Runner has reported a current running receipt.", runOutcome: "pending" },
+  waiting_for_approval: { title: "Waiting for approval", summary: "An exact current action needs approval before execution can continue.", runOutcome: "pending" },
+  publication_pending: { title: "Publication approval required", summary: "The governed Candidate is ready, but publication has not been approved or observed.", runOutcome: "pending" },
+  proposal_ready: { title: "Proposal ready", summary: "The governed proposal is complete. No publication is claimed.", runOutcome: "succeeded" },
+  ready_for_review: { title: "Ready for review", summary: "The exact draft pull request publication was observed.", runOutcome: "succeeded" },
+  failed: { title: "Failed", summary: "The Run failed under its completion contract.", runOutcome: "failed" },
+  cancelled: { title: "Cancelled", summary: "The Run was cancelled and cannot be revived by this projection.", runOutcome: "cancelled" },
+  interrupted: { title: "Interrupted", summary: "The Run was interrupted; unresolved effects remain governed separately.", runOutcome: "interrupted" },
+  timed_out: { title: "Timed out", summary: "The Run reached its canonical deadline.", runOutcome: "timed_out" }
+};
+
+export function composeTeamRelayThreadProjection(input: {
+  runId: string; generation: number; state: TeamRelayState;
+  controls: OpenTagSourceThreadProjectionPresentation["controls"];
+  providerDelivery?: { state: "pending" | "accepted" | "rejected" | "outcome_unknown" | "attention";
+    reasonCode?: NonNullable<OpenTagSourceThreadProjectionPresentation["providerDelivery"]>["reasonCode"] };
+}): OpenTagSourceThreadProjectionPresentation {
+  const copy = TEAM_RELAY_COPY[input.state];
+  const deliveryMessage = input.providerDelivery?.state === "outcome_unknown"
+    ? "Slack status delivery outcome is unknown."
+    : input.providerDelivery?.state === "attention" || input.providerDelivery?.state === "rejected"
+      ? "Slack status delivery needs attention."
+      : input.providerDelivery?.state === "pending" ? "Slack status delivery is pending."
+        : input.providerDelivery?.state === "accepted" ? "Slack status delivery was accepted." : undefined;
+  return OpenTagSourceThreadProjectionPresentationSchema.parse({
+    kind: "source_thread_projection", runId: input.runId, generation: input.generation,
+    state: input.state, ...copy, controls: input.controls,
+    ...(input.providerDelivery && deliveryMessage ? { providerDelivery: {
+      state: input.providerDelivery.state,
+      ...(input.providerDelivery.reasonCode ? { reasonCode: input.providerDelivery.reasonCode } : {}),
+      message: deliveryMessage
+    } } : {})
+  });
+}
+
 export function presentationDeliveryTier(presentation: OpenTagPresentation): OpenTagPresentationDeliveryTier {
-  if (presentation.kind === "final_summary") return "terminal";
+  if (presentation.kind === "final_summary"
+    || (presentation.kind === "publication_candidate" && presentation.state === "proposal_ready")
+    || (presentation.kind === "source_thread_projection"
+      && ["proposal_ready", "ready_for_review", "failed", "cancelled", "interrupted", "timed_out"].includes(presentation.state))) {
+    return "terminal";
+  }
+  if (presentation.kind === "publication_candidate") return "attention_required";
+  if (presentation.kind === "source_thread_projection") {
+    return presentation.state === "waiting_for_approval" || presentation.state === "publication_pending"
+      ? "attention_required" : "status";
+  }
   if (presentation.kind === "approval_prompt" || presentation.kind === "action_receipt") return "attention_required";
   if (presentation.kind === "run_status") {
     if (presentation.detailVisibility === "audit") return "silent";
@@ -156,6 +264,34 @@ export function presentationDeliveryTier(presentation: OpenTagPresentation): Ope
     return "status";
   }
   return "status";
+}
+
+export function buildPublicationCandidatePresentation(input: {
+  state: "proposal_ready" | "publication_pending";
+  candidate: PublicationCandidate;
+  summary: string;
+  verification: string[];
+  limitations?: string[];
+  nextAction: string;
+}): OpenTagProposalReadyPresentation {
+  return OpenTagProposalReadyPresentationSchema.parse({
+    kind: "publication_candidate",
+    state: input.state,
+    candidate: input.candidate,
+    summary: input.summary,
+    changedFiles: input.candidate.changedFiles,
+    verification: input.verification,
+    limitations: input.limitations ?? [],
+    nextAction: input.nextAction,
+    absentClaims: ["branch_not_published", "pull_request_not_created",
+      "checks_not_observed", "review_not_observed", "merge_not_observed",
+      "deployment_not_observed"],
+  });
+}
+
+export function buildProposalReadyPresentation(input: Omit<Parameters<
+  typeof buildPublicationCandidatePresentation>[0], "state">): OpenTagProposalReadyPresentation {
+  return buildPublicationCandidatePresentation({ ...input, state: "proposal_ready" });
 }
 
 export function renderMarkdownArtifactLines(presentation: Pick<OpenTagFinalSummaryPresentation, "artifacts">): string[] {
@@ -553,6 +689,28 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
     if (presentation.auditRunId) lines.push(`Audit: opentag status --run ${presentation.auditRunId}`);
     return lines.join("\n");
   }
+  if (presentation.kind === "publication_candidate") {
+    return [
+      presentation.state === "proposal_ready" ? "Proposal ready" : "Publication pending",
+      presentation.summary,
+      `Candidate: ${presentation.candidate.candidateId}`,
+      "Changed files:",
+      ...presentation.changedFiles.map((file) => `- ${file}`),
+      "Verification:",
+      ...presentation.verification.map((check) => `- ${check}`),
+      ...(presentation.limitations.length
+        ? ["Limitations:", ...presentation.limitations.map((item) => `- ${item}`)] : []),
+      `Next action: ${presentation.nextAction}`,
+      ...(presentation.state === "publication_pending"
+        ? ["Exact approval and publication evidence are still required."] : []),
+      "No branch, pull request, checks, review, merge, deployment, or production behavior is claimed.",
+    ].join("\n");
+  }
+  if (presentation.kind === "source_thread_projection") {
+    return [presentation.title, presentation.summary, `Run: ${presentation.runId}`,
+      ...(presentation.providerDelivery ? [`Provider delivery: ${presentation.providerDelivery.message}`] : [])]
+      .join("\n");
+  }
   return [
     `Finished: ${presentation.outcome}`,
     presentation.summary,
@@ -580,7 +738,7 @@ function stablePresentationJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stablePresentationJson).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => compareCanonicalUnicodeStrings(left, right))
       .map(([key, child]) => `${JSON.stringify(key)}:${stablePresentationJson(child)}`)
       .join(",")}}`;
   }
@@ -589,7 +747,7 @@ function stablePresentationJson(value: unknown): string {
 
 export function renderApprovalRunScope(scope: Record<string, unknown>): string {
   return Object.entries(scope)
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareCanonicalUnicodeStrings(left, right))
     .map(([key, value]) => `${key}=${stablePresentationJson(value)}`)
     .join(", ");
 }

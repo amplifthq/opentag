@@ -25,7 +25,6 @@ type MessageKey =
   | "githubToken"
   | "githubWebhookSecret"
   | "githubPort"
-  | "githubAutoCreatePr"
   | "gitlabProject"
   | "gitlabToken"
   | "gitlabPort"
@@ -78,7 +77,6 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     githubToken: "GitHub token for comments and `apply 1` pull requests",
     githubWebhookSecret: "GitHub webhook secret",
     githubPort: "Local GitHub webhook port",
-    githubAutoCreatePr: "Create pull requests immediately after runs? (advanced)",
     gitlabProject: "GitLab project (group/project or group/subgroup/project)",
     gitlabToken: "GitLab access token for source-thread replies",
     gitlabPort: "Local GitLab webhook port",
@@ -130,7 +128,6 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     githubToken: "GitHub token（用于回写评论和 apply 1 创建 PR）",
     githubWebhookSecret: "GitHub webhook secret",
     githubPort: "本地 GitHub webhook 端口",
-    githubAutoCreatePr: "run 结束后立刻自动创建 pull request 吗？（高级选项）",
     gitlabProject: "GitLab 项目（group/project 或 group/subgroup/project）",
     gitlabToken: "GitLab access token（用于回写 source thread）",
     gitlabPort: "本地 GitLab webhook 端口",

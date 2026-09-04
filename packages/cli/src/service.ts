@@ -82,7 +82,7 @@ export type ServiceStatusSummary = ServicePaths & {
   relayUrl?: string;
   relaySecurity: string[];
   running: "running" | "stopped" | "unknown";
-  runtimeMode: "local" | "relay" | "unknown";
+  runtimeMode: "local_direct" | "paired_relay" | "unknown";
   runtimeReadiness: "ready" | "starting" | "degraded" | "stale_heartbeat" | "unreachable" | "unverified" | "stopped" | "unknown";
   runtimeReadinessDetail?: string;
   runtimeDiagnostics?: string[];
@@ -715,7 +715,7 @@ export function disableServiceAutostart(options: ServiceCommandOptions = {}, dep
   return paths;
 }
 
-function serviceAutostart(paths: ServicePaths, dependencies: ServiceDependencies, isInstalled: boolean): ServiceStatusSummary["autostart"] {
+function serviceAutostart(dependencies: ServiceDependencies, isInstalled: boolean): ServiceStatusSummary["autostart"] {
   if (!isInstalled) return "disabled";
   const controller = serviceControllerFrom(dependencies);
   if (controller === "systemd") {
@@ -784,7 +784,7 @@ export function getServiceStatus(options: ServiceCommandOptions = {}, dependenci
     secrets,
     capabilities,
     serviceHardening: formatServiceHardening(paths),
-    autostart: serviceAutostart(paths, dependencies, isInstalled)
+    autostart: serviceAutostart(dependencies, isInstalled)
   };
 }
 

@@ -8,6 +8,7 @@ import { UnifiedDeliveryProducer } from '../../src/delivery/producer.js';
 const digest = `sha256:${'b'.repeat(64)}`;
 const intent = DeliveryIntentV2Schema.parse({
   contractVersion: 2,
+organizationId: "org_test",
   sideEffectIntentId: 'intent-control-1',
   causalId: 'thread-action-1',
   intentKind: 'delivery',

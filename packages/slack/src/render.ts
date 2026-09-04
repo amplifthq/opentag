@@ -9,6 +9,8 @@ import {
   type OpenTagPresentationAction,
   type OpenTagRunStatusPresentation,
   type OpenTagSourceThreadStatusPresentation,
+  type OpenTagSourceThreadProjectionPresentation,
+  OpenTagSourceThreadProjectionPresentationSchema,
   createFinalSummaryPresentation,
   type OpenTagRunResult
 } from "@opentag/core";
@@ -246,6 +248,40 @@ export function renderSlackRunStatusPresentation(presentation: OpenTagRunStatusP
 
 export function createSlackRunStatusBlocks(presentation: OpenTagRunStatusPresentation): SlackBlock[] {
   return [slackSection(renderSlackRunStatusPresentation(presentation))];
+}
+
+export function renderSlackTeamRelayProjection(presentation: OpenTagSourceThreadProjectionPresentation): string {
+  return [
+    `*OpenTag: ${markdownToSlackMrkdwn(presentation.title)}*`,
+    markdownToSlackMrkdwn(presentation.summary),
+    `Run: \`${escapeSlackText(presentation.runId)}\``,
+    ...(presentation.providerDelivery ? [markdownToSlackMrkdwn(presentation.providerDelivery.message)] : [])
+  ].join("\n");
+}
+
+export function createSlackTeamRelayProjectionBlocks(
+  presentation: OpenTagSourceThreadProjectionPresentation
+): SlackBlock[] {
+  presentation = OpenTagSourceThreadProjectionPresentationSchema.parse(presentation);
+  const labels = { status: "Status", cancel: "Cancel", approve: "Allow once", reject: "Deny",
+    publication_approve: "Approve publication" } as const;
+  const blocks: SlackBlock[] = [slackSection(renderSlackTeamRelayProjection(presentation))];
+  if (presentation.controls.length > 0) blocks.push({
+    type: "actions",
+    block_id: `opentag_projection_${presentation.runId}_${presentation.generation}`,
+    elements: presentation.controls.map((control) => ({
+      type: "button",
+      text: { type: "plain_text", text: labels[control.kind], emoji: true },
+      action_id: `opentag:decision:${control.kind === "approve" ? "allow_once"
+        : control.kind === "reject" ? "deny" : control.kind}`,
+      value: control.actionId,
+      ...(control.kind === "approve" || control.kind === "publication_approve"
+        ? { style: "primary" as const } : {}),
+      ...(control.kind === "cancel" || control.kind === "reject"
+        ? { style: "danger" as const } : {})
+    }))
+  });
+  return blocks;
 }
 
 export function slackSourceReceiptReactionName(state: SlackSourceReceiptState): string {

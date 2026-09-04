@@ -5863,7 +5863,7 @@ describe("dispatcher API", () => {
     expect(githubRequests).toEqual([
       "https://api.github.com/repos/acme/demo/issues/1",
       "https://api.github.com/repos/acme/demo/branches/opentag%2Fmissing-branch",
-      "https://api.github.com/repos/acme/demo/branches/main"
+      "https://api.github.com/repos/acme/demo/branches/main",
     ]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
     expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
@@ -7178,38 +7178,18 @@ describe("dispatcher API", () => {
           {
             intentId: "intent_create_pr",
             outcome: "applied",
-            externalUri: "https://github.com/acme/demo/pull/42"
+            externalUri: "https://github.com/acme/demo/pull/42",
           }
         ]
       }
     });
-    expect(githubRequests).toEqual([
-      {
-        url: "https://api.github.com/repos/acme/demo/pulls",
-        method: "POST",
-        authorization: "Bearer gh_test",
-        body: {
-          title: "OpenTag run run_thread_create_pr",
-          body: [
-            "PR body",
-            "",
-            "## Changed Files",
-            "- `src/demo.ts`",
-            "",
-            "## Risks",
-            "- Review before merge.",
-            "",
-            "## Verification",
-            "- `pnpm test`: passed",
-            "",
-            "## Executor Conditions",
-            "- isolated branch exists"
-          ].join("\n"),
-          head: "opentag/run_thread_create_pr",
-          base: "main"
-        }
-      }
-    ]);
+    expect(githubRequests).toEqual([{ url: "https://api.github.com/repos/acme/demo/pulls",
+      method: "POST", authorization: "Bearer gh_test", body: {
+        title: "OpenTag run run_thread_create_pr",
+        body: ["PR body", "", "## Changed Files", "- `src/demo.ts`", "", "## Risks",
+          "- Review before merge.", "", "## Verification", "- `pnpm test`: passed", "",
+          "## Executor Conditions", "- isolated branch exists"].join("\n"),
+        head: "opentag/run_thread_create_pr", base: "main", draft: true } }]);
     expect(delivered.some((message) => message.kind === "final"
       && hasExactRenderedUrl(message.body, "https://github.com/acme/demo/pull/42"))).toBe(true);
   });
@@ -7273,7 +7253,8 @@ describe("dispatcher API", () => {
         }
       ]
     });
-    expect(delivered.some((message) => message.kind === "final" && message.body.includes("Ready to apply"))).toBe(true);
+    expect(delivered.some((message) => message.kind === "final"
+      && message.body.includes("Ready to apply"))).toBe(true);
     githubRequests.length = 0;
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
@@ -7295,7 +7276,7 @@ describe("dispatcher API", () => {
           {
             intentId: "intent_create_pr_failed",
             outcome: "failed",
-            error: "create pull request failed: 422 Validation Failed: pull request already exists for this head; token [redacted]; path [redacted local path]"
+            error: "create pull request failed: 422 Validation Failed: pull request already exists for this head; token [redacted]; path [redacted local path]",
           }
         ]
       },
@@ -7304,19 +7285,12 @@ describe("dispatcher API", () => {
         sourceProposalId: "proposal_thread_create_pr_failed"
       }
     });
-    expect(githubRequests).toEqual([
-      {
-        url: "https://api.github.com/repos/acme/demo/pulls",
-        method: "POST",
-        authorization: "Bearer gh_test",
-        body: {
-          title: "OpenTag run run_thread_create_pr_failed",
-          body: ["PR body", "", "## Changed Files", "- `src/demo.ts`", "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
-          head: "opentag/run_thread_create_pr_failed",
-          base: "main"
-        }
-      }
-    ]);
+    expect(githubRequests).toEqual([{ url: "https://api.github.com/repos/acme/demo/pulls",
+      method: "POST", authorization: "Bearer gh_test", body: {
+        title: "OpenTag run run_thread_create_pr_failed",
+        body: ["PR body", "", "## Changed Files", "- `src/demo.ts`", "",
+          "## Executor Conditions", "- isolated branch exists"].join("\n"),
+        head: "opentag/run_thread_create_pr_failed", base: "main", draft: true } }]);
     const finalMessage = delivered.at(-1)?.body ?? "";
     expect(finalMessage).toContain("Needs setup before OpenTag can apply this action directly.");
     expect(finalMessage).toContain("Child run:");
@@ -7977,24 +7951,17 @@ describe("dispatcher API", () => {
           {
             intentId: "intent_slack_create_pr",
             outcome: "applied",
-            externalUri: "https://github.com/acme/demo/pull/43"
+            externalUri: "https://github.com/acme/demo/pull/43",
           }
         ]
       }
     });
-    expect(githubRequests).toEqual([
-      {
-        url: "https://api.github.com/repos/acme/demo/pulls",
-        method: "POST",
-        authorization: "Bearer gh_test",
-        body: {
-          title: "OpenTag run run_slack_create_pr",
-          body: ["PR body", "", "## Changed Files", "- `README.md`", "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
-          head: "opentag/run_slack_create_pr",
-          base: "main"
-        }
-      }
-    ]);
+    expect(githubRequests).toEqual([{ url: "https://api.github.com/repos/acme/demo/pulls",
+      method: "POST", authorization: "Bearer gh_test", body: {
+        title: "OpenTag run run_slack_create_pr",
+        body: ["PR body", "", "## Changed Files", "- `README.md`", "",
+          "## Executor Conditions", "- isolated branch exists"].join("\n"),
+        head: "opentag/run_slack_create_pr", base: "main", draft: true } }]);
     const finalMessage = delivered.find((message) => message.kind === "final"
       && hasExactRenderedUrl(message.body, "https://github.com/acme/demo/pull/43"));
     expect(finalMessage?.body).toContain("Applied: Create PR for branch opentag/run_slack_create_pr.");

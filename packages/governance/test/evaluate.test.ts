@@ -4,12 +4,15 @@ import type {
   HumanEscalation,
   OpenTagRunResult
 } from "@opentag/core";
+import { buildPublicationCandidatePresentation, presentationDeliveryTier,
+  renderOpenTagPresentationPlainText } from "@opentag/core";
 import { describe, expect, it } from "vitest";
 import {
   completionInputDigest,
   createOpenTagGovernance,
   deriveWorkLoopView,
   evaluateCompletion,
+  evaluateProposalReadiness,
   type CompletionArtifact,
   type CompletionEvaluationSnapshot,
   type CompletionEvidenceFact,
@@ -66,6 +69,20 @@ function compatibilityContract(): CompletionContract {
 }
 
 const successResult: OpenTagRunResult = { conclusion: "success", summary: "Created pull request." };
+
+const proposalCandidate = {
+  candidateId: "candidate_run-1_attempt-1",
+  runId: "run-1",
+  attemptId: "attempt-1",
+  projectTargetId: "target-1",
+  frozenBaseRevision: "a".repeat(40),
+  workspaceTreeDigest: "b".repeat(40),
+  patchDigest: `sha256:${"c".repeat(64)}`,
+  changedFiles: ["packages/core/src/schema.ts"],
+  verificationEvidenceIds: [`sha256:${"d".repeat(64)}`],
+  publicationPolicyDigest: `sha256:${"e".repeat(64)}`,
+  createdAt: t2,
+} as const;
 
 function prArtifact(input: { ref?: string; version?: string; id?: string } = {}): CompletionArtifact {
   return {
@@ -132,6 +149,237 @@ function baseInput() {
 }
 
 describe("evaluateCompletion", () => {
+  const unicodeIds = ["e\u0301", "é", "😀", "A", "a", "ab"];
+  const canonicalUnicodeIds = ["A", "a", "ab", "e\u0301", "é", "😀"];
+
+  it("uses scalar identity order for hashing, replay, target selection, and evidence presentation", () => {
+    const artifacts = unicodeIds.map((id) => prArtifact({ id }));
+    const checks = unicodeIds.map((id) => evidence({
+      id,
+      kind: "source_control.required_checks",
+      predicate: "checks",
+      outcome: "passed",
+      observations: { test: "passed", build: "passed" },
+    }));
+    const input = {
+      ...baseInput(),
+      artifacts,
+      evidence: checks,
+      evaluatedAt: t3,
+    };
+    const forward = evaluateCompletion(input);
+    const reversed = evaluateCompletion({
+      ...input,
+      artifacts: [...artifacts].reverse(),
+      evidence: [...checks].reverse(),
+    });
+
+    expect(reversed.inputDigest).toBe(forward.inputDigest);
+    expect(reversed.id).toBe(forward.id);
+    expect(reversed).toEqual(forward);
+    expect(forward.targetBindings[0]?.artifactId).toBe("A");
+    expect(forward.gateResults.find((gate) => gate.gateId === "pr")?.evidenceIds)
+      .toEqual(canonicalUnicodeIds);
+  });
+
+  it("rejects malformed identities at the exported digest and proposal-readiness boundaries", () => {
+    for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+      expect(() => completionInputDigest({
+        ...baseInput(),
+        evidence: [evidence({ id: malformed, kind: "source_control.required_checks",
+          predicate: "checks", outcome: "passed" })],
+      })).toThrow(/well-formed Unicode/u);
+      expect(() => evaluateProposalReadiness({
+        executorConclusion: "success",
+        publicationMode: "proposal_only",
+        completionMode: "proposal_ready",
+        publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+        candidate: { ...proposalCandidate, candidateId: malformed },
+        unresolvedMaterialOutcomes: [],
+        assessedAt: t3,
+      })).toThrow(/well-formed Unicode/u);
+    }
+  });
+
+  it.each([
+    ["run result id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.runResults[0] = { ...input.runResults[0]!, runId: malformed };
+    }],
+    ["artifact id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.artifacts[0] = { ...input.artifacts[0]!, id: malformed };
+    }],
+    ["evidence id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.evidence = [evidence({ id: malformed, kind: "source_control.required_checks",
+        predicate: "checks", outcome: "passed" })];
+    }],
+    ["material receipt id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.materialActionReceipts = [{ id: malformed, actionId: "action-1", provider: "github",
+        receiptRef: "receipt:1", outcome: "unknown", observedAt: t2 }];
+    }],
+    ["waiver id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.waivers = [{ id: malformed, contractId: "contract-github-1", contractVersion: 1,
+        cycle: 1, actor: { provider: "github", providerUserId: "owner-1" }, reason: "Bounded waiver.",
+        scope: "selected_gates", policyScope: "work_context_owner_container", gateIds: ["checks"], waivedAt: t2 }];
+    }],
+    ["escalation id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.blockingEscalations = [{ id: malformed, workThreadId: "thread-1", class: "verification",
+        audience: "repo_owner", subjectRef: "github:acme/demo:pull_request:7", state: "open",
+        blocking: true, summary: "Review required.", reason: "Missing evidence.", openedAt: t2 }];
+    }],
+  ] as const)("rejects a malformed sortable %s without comparator throws", (_label, mutate) => {
+    for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+      const input = baseInput();
+      mutate(input, malformed);
+      expect(() => evaluateCompletion(input)).toThrow(/well-formed Unicode/u);
+    }
+  });
+
+  it("accepts supplementary scalar values in sortable identifiers", () => {
+    const input = baseInput();
+    input.runResults[0] = { ...input.runResults[0]!, runId: "run-😀" };
+    input.artifacts[0] = { ...input.artifacts[0]!, id: "artifact-😀" };
+    expect(evaluateCompletion(input).triggeredByRunId).toBe("run-😀");
+  });
+
+  it("requires immutable verified proposal evidence beyond executor success", () => {
+    const base = {
+      executorConclusion: "success" as const,
+      publicationMode: "proposal_only" as const,
+      completionMode: "proposal_ready" as const,
+      publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+      unresolvedMaterialOutcomes: [] as string[],
+      assessedAt: t3,
+    };
+
+    expect(evaluateProposalReadiness(base)).toMatchObject({
+      state: "pending",
+      accepted: false,
+      reasonCodes: ["publication_candidate_missing"],
+    });
+    expect(evaluateProposalReadiness({
+      ...base,
+      candidate: { ...proposalCandidate, verificationEvidenceIds: [] },
+    })).toMatchObject({
+      state: "pending",
+      accepted: false,
+      reasonCodes: ["verification_missing"],
+    });
+    expect(evaluateProposalReadiness({
+      ...base,
+      candidate: proposalCandidate,
+      unresolvedMaterialOutcomes: ["external_operation:push:outcome_unknown"],
+    })).toMatchObject({
+      state: "blocked",
+      accepted: false,
+      reasonCodes: ["material_action_unknown"],
+    });
+  });
+
+  it("accepts only an admission-frozen proposal-only candidate and keeps pull-request publication nonterminal", () => {
+    const proposalOnly = evaluateProposalReadiness({
+      executorConclusion: "success",
+      publicationMode: "proposal_only",
+      completionMode: "proposal_ready",
+      publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+      candidate: proposalCandidate,
+      unresolvedMaterialOutcomes: [],
+      assessedAt: t3,
+    });
+    expect(proposalOnly).toEqual({
+      state: "proposal_ready",
+      accepted: true,
+      candidateId: proposalCandidate.candidateId,
+      reasonCodes: ["proposal_ready"],
+      assessedAt: t3,
+    });
+
+    expect(evaluateProposalReadiness({
+      executorConclusion: "success",
+      publicationMode: "pull_request",
+      completionMode: "pull_request_ready",
+      publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+      candidate: proposalCandidate,
+      unresolvedMaterialOutcomes: [],
+      assessedAt: t3,
+    })).toEqual({
+      state: "publication_pending",
+      accepted: false,
+      candidateId: proposalCandidate.candidateId,
+      reasonCodes: ["publication_evidence_missing"],
+      assessedAt: t3,
+    });
+  });
+
+  it("rejects noncanonical proposal-readiness assessment timestamps instead of normalizing them", () => {
+    expect(() => evaluateProposalReadiness({
+      executorConclusion: "success",
+      publicationMode: "proposal_only",
+      completionMode: "proposal_ready",
+      publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+      candidate: proposalCandidate,
+      unresolvedMaterialOutcomes: [],
+      assessedAt: "2026-07-21T10:03:00Z",
+    })).toThrow(/canonical UTC instant/u);
+  });
+
+  it("renders candidate, verification, limitations, and exact next action without publication claims", () => {
+    const presentation = buildPublicationCandidatePresentation({
+      state: "proposal_ready",
+      candidate: proposalCandidate,
+      summary: "A verified local proposal is ready for inspection.",
+      verification: ["governance tests passed"],
+      limitations: ["No provider publication was attempted."],
+      nextAction: "Review the local candidate.",
+    });
+    const rendered = renderOpenTagPresentationPlainText(presentation);
+    expect(rendered).toContain(proposalCandidate.candidateId);
+    expect(rendered).toContain("packages/core/src/schema.ts");
+    expect(rendered).toContain("governance tests passed");
+    expect(rendered).toContain("No provider publication was attempted.");
+    expect(rendered).toContain("Next action: Review the local candidate.");
+    expect(rendered).toContain("No branch, pull request, checks, review, merge, deployment, or production behavior is claimed.");
+    expect(presentation).toMatchObject({ kind: "publication_candidate", state: "proposal_ready" });
+    expect(presentationDeliveryTier(presentation)).toBe("terminal");
+
+    const pending = buildPublicationCandidatePresentation({
+      state: "publication_pending",
+      candidate: proposalCandidate,
+      summary: "A verified local proposal awaits exact publication approval.",
+      verification: ["governance tests passed"],
+      limitations: ["No provider publication was attempted."],
+      nextAction: "Approve the exact Candidate for publication.",
+    });
+    expect(pending).toMatchObject({ kind: "publication_candidate", state: "publication_pending" });
+    expect(presentationDeliveryTier(pending)).toBe("attention_required");
+    expect(renderOpenTagPresentationPlainText(pending)).toContain(
+      "Exact approval and publication evidence are still required.");
+  });
+
+  it("fails closed on policy mismatch and rejects malformed mutable candidate identities", () => {
+    expect(evaluateProposalReadiness({
+      executorConclusion: "success",
+      publicationMode: "proposal_only",
+      completionMode: "proposal_ready",
+      publicationPolicyDigest: `sha256:${"f".repeat(64)}`,
+      candidate: proposalCandidate,
+      unresolvedMaterialOutcomes: [],
+      assessedAt: t3,
+    })).toMatchObject({
+      state: "blocked",
+      accepted: false,
+      reasonCodes: ["publication_policy_mismatch"],
+    });
+
+    expect(() => evaluateProposalReadiness({
+      executorConclusion: "success",
+      publicationMode: "proposal_only",
+      completionMode: "proposal_ready",
+      publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+      candidate: { ...proposalCandidate, changedFiles: ["b.ts", "a.ts"] },
+      unresolvedMaterialOutcomes: [],
+      assessedAt: t3,
+    })).toThrow(/PublicationCandidate/u);
+  });
   it("keeps compatibility execution success out of evidence-backed completion metrics", () => {
     const assessment = evaluateCompletion({
       ...baseInput(),
@@ -646,6 +894,70 @@ describe("evaluateCompletion", () => {
 });
 
 describe("deriveWorkLoopView", () => {
+  it("orders material action and receipt identities by Unicode scalar value across permutations", () => {
+    const actionIds = ["e\u0301", "é", "😀", "A", "a", "ab"];
+    const expectedActionIds = ["A", "a", "ab", "e\u0301", "é", "😀"];
+    const contract: CompletionContract = {
+      ...strictContract(),
+      targetSelectors: [],
+      gates: actionIds.map((actionId) => ({
+        id: `gate:${actionId}`,
+        kind: "material_action" as const,
+        actionFamily: `family:${actionId}`,
+        requiredOutcome: "succeeded" as const,
+      })),
+    };
+    const receipts = actionIds.flatMap((actionId) => [
+      {
+        id: `${actionId}:e\u0301`, actionId, provider: "github", receiptRef: `${actionId}:1`,
+        outcome: "failed" as const, observedAt: t2, metadata: { actionFamily: `family:${actionId}` },
+      },
+      {
+        id: `${actionId}:😀`, actionId, provider: "github", receiptRef: `${actionId}:2`,
+        outcome: "unknown" as const, observedAt: t2, metadata: { actionFamily: `family:${actionId}` },
+      },
+    ]);
+    const render = (materialActionReceipts: typeof receipts) => {
+      const assessment = evaluateCompletion({
+        ...baseInput(), contract, artifacts: [], materialActionReceipts, evaluatedAt: t3,
+      });
+      return deriveWorkLoopView({
+        contract,
+        runResults: baseInput().runResults,
+        materialActionReceipts,
+        assessment,
+      }).nextAction.causes.filter((cause) => cause.kind === "material_action");
+    };
+    const forward = render(receipts);
+    const reversed = render([...receipts].reverse());
+
+    expect(reversed).toEqual(forward);
+    expect(forward.map((cause) => cause.kind === "material_action" ? cause.actionId : ""))
+      .toEqual(expectedActionIds);
+    for (const cause of forward) {
+      if (cause.kind !== "material_action") continue;
+      expect(cause.receiptIds).toEqual([`${cause.actionId}:e\u0301`, `${cause.actionId}:😀`]);
+    }
+  });
+
+  it("rejects malformed action identities before view ordering", () => {
+    const assessment = evaluateCompletion(baseInput());
+    const malformed = String.fromCharCode(0xd800);
+    expect(() => deriveWorkLoopView({
+      contract: strictContract(),
+      runResults: baseInput().runResults,
+      materialActionReceipts: [{
+        id: "receipt-valid",
+        actionId: malformed,
+        provider: "github",
+        receiptRef: "receipt:valid",
+        outcome: "unknown",
+        observedAt: t2,
+      }],
+      assessment,
+    })).toThrow(/well-formed Unicode/u);
+  });
+
   it("turns completion state into structured native action hints and explicit causes", () => {
     const pendingAssessment = evaluateCompletion(baseInput());
     const pending = deriveWorkLoopView({

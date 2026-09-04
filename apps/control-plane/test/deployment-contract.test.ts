@@ -7,16 +7,18 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../.
 const read = (path: string) => readFile(resolve(repositoryRoot, path), "utf8");
 
 describe("Control Plane deployment contract", () => {
-  it("uses one OCI image for migrations, bootstrap, HTTP, and durable jobs", async () => {
+  it("uses one OCI image for migrations, bootstraps, HTTP, and durable jobs", async () => {
     const compose = await read("deploy/compose/compose.yaml");
     expect(compose).toContain("postgres:");
     expect(compose).toContain("migrate:");
     expect(compose).toContain("bootstrap-admin:");
+    expect(compose).toContain("bootstrap-slack:");
     expect(compose).toContain("control-plane:");
     expect(compose).toContain("jobs:");
-    expect(compose.match(/image: opentag-control-plane:local/gu)).toHaveLength(4);
+    expect(compose.match(/image: opentag-control-plane:local/gu)).toHaveLength(5);
     expect(compose).toContain('["node", "apps/control-plane/dist/index.js", "migrate"]');
     expect(compose).toContain('["node", "apps/control-plane/dist/index.js", "jobs"]');
+    expect(compose).toContain('["node", "apps/control-plane/dist/index.js", "bootstrap-slack"]');
     expect(compose).toContain("<<: *control-plane-environment");
     expect(compose).toContain("${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}");
     expect(compose).not.toContain("local-only-change-me");
@@ -27,6 +29,152 @@ describe("Control Plane deployment contract", () => {
     expect(compose.indexOf("OPENTAG_BOOTSTRAP_ADMIN_PASSWORD:")).toBeGreaterThan(
       compose.indexOf("bootstrap-admin:"),
     );
+    expect(compose.indexOf("bootstrap-slack:")).toBeGreaterThan(
+      compose.indexOf("bootstrap-admin:"),
+    );
+    expect(compose.indexOf("\n  control-plane:")).toBeGreaterThan(
+      compose.indexOf("bootstrap-slack:"),
+    );
+  });
+
+  it("mounts the relay-content KEK only as a Docker secret with immutable references", async () => {
+    const [compose, example, composeReadme, deployment] = await Promise.all([
+      read("deploy/compose/compose.yaml"),
+      read("deploy/compose/.env.example"),
+      read("deploy/compose/README.md"),
+      read("docs/control-plane-deployment.md"),
+    ]);
+
+    expect(compose).toContain("opentag_relay_content_kek:");
+    expect(compose).toContain(
+      "file: ${OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE:?set OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE to the KEK file path}",
+    );
+    expect(compose).toContain(
+      "OPENTAG_RELAY_CONTENT_KEK_FILE: /run/secrets/opentag_relay_content_kek",
+    );
+    expect(compose).toContain("OPENTAG_RELAY_CONTENT_KEY_VERSION: v1");
+    expect(compose.match(/^\s+secrets: \*control-plane-runtime-secrets$/gmu)).toHaveLength(2);
+    expect(example).toContain(
+      "OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE=replace-with-path-to-32-byte-kek-file",
+    );
+    for (const text of [compose, example]) {
+      expect(text).not.toMatch(/^\s*OPENTAG_RELAY_CONTENT_KEK=/gmu);
+    }
+    expect(example).not.toContain("OPENTAG_RELAY_CONTENT_KEK_FILE=");
+    expect(example).not.toContain("OPENTAG_RELAY_CONTENT_KEY_VERSION=");
+    expect(composeReadme).toMatch(/Missing files make\s+Compose refuse the deployment/u);
+    expect(composeReadme).toMatch(/malformed or placeholder content makes relay\s+readiness fail closed/u);
+    expect(composeReadme).toContain("mode-`0700` directory");
+    expect(composeReadme).toContain("container UID/GID `10001`");
+    expect(deployment).toMatch(/Compose implements file-backed secrets as\s+bind\s+mounts/u);
+    expect(deployment).toContain("Never add an inline `OPENTAG_RELAY_CONTENT_KEK` variable");
+  });
+
+  it("bootstraps Slack with purpose-separated file secrets and no credential plaintext", async () => {
+    const [compose, example, composeReadme, deployment] = await Promise.all([
+      read("deploy/compose/compose.yaml"),
+      read("deploy/compose/.env.example"),
+      read("deploy/compose/README.md"),
+      read("docs/control-plane-deployment.md"),
+    ]);
+    expect(compose).toContain("opentag_slack_signing_secret:");
+    expect(compose).toContain("opentag_slack_bot_token:");
+    expect(compose).toContain(
+      "OPENTAG_SLACK_SIGNING_SECRET_REF: file:/run/secrets/opentag_slack_signing_secret",
+    );
+    expect(compose).toContain(
+      "OPENTAG_SLACK_BOT_TOKEN_REF: file:/run/secrets/opentag_slack_bot_token",
+    );
+    expect(compose.match(/^\s+secrets: \*slack-bootstrap-secrets$/gmu)).toHaveLength(1);
+    expect(example).toContain("OPENTAG_SLACK_SIGNING_SECRET_SOURCE_FILE=");
+    expect(example).toContain("OPENTAG_SLACK_BOT_TOKEN_SOURCE_FILE=");
+    expect(example).not.toMatch(/^OPENTAG_SLACK_SIGNING_SECRET=/gmu);
+    expect(example).not.toMatch(/^OPENTAG_SLACK_BOT_TOKEN=/gmu);
+    expect(composeReadme).toContain("creates the generic installation, binding, and Slack");
+    expect(deployment).toContain("create-or-exact-replay");
+    expect(deployment).toContain("never writes credential plaintext");
+  });
+
+  it("provisions an ephemeral relay-content KEK file for browser E2E", async () => {
+    const e2e = await read("scripts/test/control-plane-browser-e2e.mjs");
+
+    expect(e2e).toContain("const relayContentKekFile = join(temporaryDirectory, \"relay-content-kek\")");
+    expect(e2e).toContain("const slackSigningSecretFile = join(temporaryDirectory, \"slack-signing-secret\")");
+    expect(e2e).toContain("const slackBotTokenFile = join(temporaryDirectory, \"slack-bot-token\")");
+    expect(e2e).toContain("await writeFile(relayContentKekFile, randomBytes(32), { mode: 0o644 })");
+    expect(e2e).toContain("await chmod(temporaryDirectory, 0o700)");
+    expect(e2e).toContain("`OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE=${relayContentKekFile}`");
+    expect(e2e).toContain("`OPENTAG_SLACK_SIGNING_SECRET_SOURCE_FILE=${slackSigningSecretFile}`");
+    expect(e2e).toContain("`OPENTAG_SLACK_BOT_TOKEN_SOURCE_FILE=${slackBotTokenFile}`");
+    expect(e2e).not.toContain("OPENTAG_RELAY_CONTENT_KEK=");
+  });
+
+  it("registers every capability required by the browser E2E hosted claim", async () => {
+    const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
+    const registrationCapabilities = e2e.match(
+      /const capabilities = \[[\s\S]*?\] as const;/u,
+    )?.[0];
+
+    expect(registrationCapabilities).toContain("relay.source-content-redeem.v1");
+  });
+
+  it("attests the browser E2E workspace before requesting material permission", async () => {
+    const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
+    const runningAt = e2e.indexOf("markHostedRunRunningControlV1");
+    const permissionAt = e2e.indexOf("requestActionPermissionControlV1");
+
+    expect(runningAt).toBeGreaterThan(0);
+    expect(permissionAt).toBeGreaterThan(runningAt);
+    expect(e2e).toContain("workspaceAttestationDigest");
+    expect(e2e).toContain('const actionDescriptor = "workspace.write"');
+    expect(e2e).not.toContain('const actionDescriptor = "github.pull_request.merge"');
+  });
+
+  it("begins the authorized browser E2E material action before recording its receipt", async () => {
+    const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
+    const beginAt = e2e.indexOf("beginMaterialActionControlV1");
+    const receiptAt = e2e.indexOf("recordMaterialActionReceiptControlV1");
+
+    expect(beginAt).toBeGreaterThan(0);
+    expect(receiptAt).toBeGreaterThan(beginAt);
+    expect(e2e).toContain('kind: "permission_resolution"');
+    expect(e2e).toContain("resolutionReceiptDigest: resolved.receipt.receiptDigest");
+  });
+
+  it("carries the accepted workspace attestation into browser E2E cancellation", async () => {
+    const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
+    const cancellation = e2e.slice(
+      e2e.indexOf("const cancellation ="),
+      e2e.indexOf("const cancelled ="),
+    );
+
+    expect(cancellation).toContain("workspaceAttestation");
+  });
+
+  it("documents one Postgres-and-KEK recovery set without claiming HA or certification", async () => {
+    const [compose, composeReadme, deployment] = await Promise.all([
+      read("deploy/compose/compose.yaml"),
+      read("deploy/compose/README.md"),
+      read("docs/control-plane-deployment.md"),
+    ]);
+
+    expect(compose).toContain("io.opentag.profile-envelope: Runner-offline-safe");
+    expect(compose).toContain("io.opentag.availability: Relay-not-HA");
+    expect(composeReadme).toContain("required certification checks");
+    expect(deployment).toContain("required certification target");
+    expect(deployment).toContain("not evidence that a particular installation has passed certification");
+    expect(deployment).toContain("PostgreSQL data, the exact relay-content KEK file, and immutable key version");
+    expect(deployment).toMatch(/Losing the KEK makes all retained ciphertext\s+unrecoverable/u);
+    expect(deployment).toMatch(/Do not rotate or replace the KEK/u);
+    expect(deployment).toContain("explicit migration");
+    expect(composeReadme).toContain("Relay-not-HA");
+    expect(deployment).toContain("Slack installation identity");
+    expect(deployment).toContain("paired Runner identity");
+    expect(deployment).toContain("GitHub Project Target binding");
+    expect(deployment).toContain("named ACP executor declaration");
+    for (const forbiddenService of ["redis:", "kafka:", "rabbitmq:", "minio:"]) {
+      expect(compose.toLowerCase()).not.toContain(forbiddenService);
+    }
   });
 
   it("makes the PostgreSQL lifecycle corpus mandatory in CI", async () => {
@@ -55,6 +203,25 @@ describe("Control Plane deployment contract", () => {
     );
     expect(dockerfile).toContain(
       "COPY packages/core/package.json packages/core/package.json",
+    );
+    for (const workspace of [
+      "control-protocol",
+      "core",
+      "client",
+      "delivery-contract",
+      "delivery-runtime",
+      "github",
+      "governance",
+      "source-app-runtime",
+      "slack",
+    ]) {
+      expect(dockerfile).toContain(
+        `COPY packages/${workspace}/package.json packages/${workspace}/package.json`,
+      );
+      expect(dockerfile).toContain(`COPY packages/${workspace} packages/${workspace}`);
+    }
+    expect(dockerfile).toContain(
+      "pnpm --filter @opentag/control-plane^... build",
     );
     expect(dockerfile).toContain('CMD ["node", "apps/control-plane/dist/index.js", "serve"]');
     for (const forbidden of ["cloudflare", "wrangler", "sqlite", "redis", "kafka"] ) {

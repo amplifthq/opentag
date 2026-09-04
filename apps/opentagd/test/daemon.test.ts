@@ -458,9 +458,8 @@ describe("opentagd", () => {
     expect(calls).toEqual(["claim", "running:run_1:echo", "complete:run_1:failure:Echo failed: executor exploded"]);
   });
 
-  it("does not recommit codex changes from the claimed run row when preparing a PR branch", async () => {
+  it("completes self-committing executor results without automatic PR preparation", async () => {
     const checkoutPath = "/tmp/demo";
-    const commands: string[] = [];
     let completed: OpenTagRunResult | undefined;
 
     const didWork = await runOneDaemonIteration({
@@ -478,18 +477,6 @@ describe("opentagd", () => {
           },
           async run() {
             return { conclusion: "success", summary: "Changed README.md.", changedFiles: ["README.md"] };
-          }
-        }
-      },
-      pullRequestOptions: {
-        preparePullRequestBranch: true,
-        commandRunner: {
-          async run(command, args, options) {
-            commands.push(`${options?.cwd ?? ""}: ${command} ${args.join(" ")}`);
-            if (command === "git" && args[0] === "commit" && options?.cwd === checkoutPath) {
-              return { exitCode: 1, stdout: "", stderr: "nothing to commit" };
-            }
-            return { exitCode: 0, stdout: "", stderr: "" };
           }
         }
       },
@@ -524,12 +511,10 @@ describe("opentagd", () => {
     });
 
     expect(didWork).toBe(true);
-    expect(commands).toEqual(["/tmp/demo: git push -u origin opentag/run_1"]);
     expect(completed).toMatchObject({ conclusion: "success", changedFiles: ["README.md"] });
   });
 
-  it("completes with needs_human when preparing the PR action branch fails", async () => {
-    const commands: string[] = [];
+  it("preserves proposed publication changes for the exact publication flow", async () => {
     let completed: OpenTagRunResult | undefined;
     const executorResult: OpenTagRunResult = {
       conclusion: "success",
@@ -572,18 +557,6 @@ describe("opentagd", () => {
           }
         }
       },
-      pullRequestOptions: {
-        preparePullRequestBranch: true,
-        commandRunner: {
-          async run(command, args) {
-            commands.push(`${command} ${args.join(" ")}`);
-            if (args[0] === "push") {
-              return { exitCode: 128, stdout: "", stderr: "network unavailable" };
-            }
-            return { exitCode: 0, stdout: "", stderr: "" };
-          }
-        }
-      },
       client: {
         async claim() {
           return {
@@ -615,15 +588,12 @@ describe("opentagd", () => {
     });
 
     expect(didWork).toBe(true);
-    expect(commands).toEqual(["git add -- README.md", "git commit -m OpenTag run run_1", "git push -u origin opentag/run_1"]);
     expect(completed).toMatchObject({
-      conclusion: "needs_human",
+      conclusion: "success",
       changedFiles: ["README.md"],
-      nextAction: "Fix branch push or pull request credentials, then retry the run before applying the PR action."
     });
-    expect(completed?.summary).toContain("could not prepare the pull request action");
-    expect(completed?.summary).toContain("network unavailable");
-    expect(completed?.suggestedChanges).toBeUndefined();
+    expect(completed?.summary).toBe("Changed README.md.");
+    expect(completed?.suggestedChanges).toEqual(executorResult.suggestedChanges);
   });
 
   it("logs and continues the daemon loop after an iteration-level failure", async () => {

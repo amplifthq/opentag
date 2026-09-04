@@ -155,17 +155,81 @@ const SecretStringSchema = z.union([z.string().min(1), SecretRefSchema]).transfo
 const RuntimeConfigSchema = z.discriminatedUnion("mode", [
   z
     .object({
-      mode: z.literal("local")
+      mode: z.literal("local_direct")
     })
     .strict(),
   z
     .object({
-      mode: z.literal("relay"),
+      mode: z.literal("paired_relay"),
       relayUrl: z.string().url(),
-      relayProvider: z.string().min(1).optional()
+      relayProvider: z.string().min(1).optional(),
+      localProcessEndpoint: z.string().url().optional()
     })
     .strict()
 ]);
+
+function canonicalizeLegacyRuntimeMode(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const raw = value as Record<string, unknown>;
+  if (!raw.runtime || typeof raw.runtime !== "object" || Array.isArray(raw.runtime)) return value;
+  const runtime = raw.runtime as Record<string, unknown>;
+  if (runtime.mode !== "local" && runtime.mode !== "relay") return value;
+  return {
+    ...raw,
+    runtime: {
+      ...runtime,
+      mode: runtime.mode === "local" ? "local_direct" : "paired_relay"
+    }
+  };
+}
+
+function isLocalProcessHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/gu, "");
+  if (
+    normalized === "localhost"
+    || normalized === "0.0.0.0"
+    || normalized === "::"
+    || normalized === "::1"
+    || normalized.endsWith(".localhost")
+  ) return true;
+  const octets = normalized.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+    return false;
+  }
+  return octets[0] === 127;
+}
+
+export function assertRemotePairedRelayEndpoint(input: {
+  relayUrl: string;
+  localProcessEndpoint?: string;
+}): void {
+  const relay = new URL(input.relayUrl);
+  if (isLocalProcessHostname(relay.hostname)) {
+    throw new Error("paired_relay requires a distinct relay process; loopback and unspecified relay hosts are not allowed.");
+  }
+  if (input.localProcessEndpoint) {
+    const local = new URL(input.localProcessEndpoint);
+    if (relay.origin === local.origin) {
+      throw new Error("paired_relay relay origin must not equal runtime.localProcessEndpoint.");
+    }
+  }
+}
+
+function assertPairedRelayEndpointSeparation(value: unknown): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const raw = value as Record<string, unknown>;
+  if (!raw.runtime || typeof raw.runtime !== "object" || Array.isArray(raw.runtime)) return;
+  const runtime = raw.runtime as Record<string, unknown>;
+  const mode = runtime.mode === "relay" ? "paired_relay" : runtime.mode;
+  if (mode !== "paired_relay") return;
+  if (typeof runtime.relayUrl !== "string") return;
+  assertRemotePairedRelayEndpoint({
+    relayUrl: runtime.relayUrl,
+    ...(typeof runtime.localProcessEndpoint === "string"
+      ? { localProcessEndpoint: runtime.localProcessEndpoint }
+      : {})
+  });
+}
 
 const RepositoryBindingSchema = z
   .object({
@@ -540,7 +604,7 @@ const PreferencesSchema = z
   })
   .strict();
 
-export const OpenTagCliConfigSchema = z
+const CanonicalOpenTagCliConfigSchema = z
   .object({
     schemaVersion: z.literal(1),
     state: z
@@ -578,11 +642,11 @@ export const OpenTagCliConfigSchema = z
       }
       return;
     }
-    if (config.runtime?.mode !== "relay") {
+    if (config.runtime?.mode !== "paired_relay") {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["runtime", "mode"],
-        message: "Hosted Control V1 configuration requires runtime.mode=relay."
+        message: "Hosted Control V1 configuration requires runtime.mode=paired_relay."
       });
       return;
     }
@@ -620,6 +684,11 @@ export const OpenTagCliConfigSchema = z
     }
   });
 
+export const OpenTagCliConfigSchema = z.preprocess(
+  canonicalizeLegacyRuntimeMode,
+  CanonicalOpenTagCliConfigSchema
+);
+
 export type OpenTagCliConfig = Omit<z.infer<typeof OpenTagCliConfigSchema>, "daemon"> & {
   daemon: OpenTagDaemonConfig & {
     completionPolicies?: GitHubCompletionPolicyConfig[];
@@ -633,6 +702,10 @@ export type OpenTagCliLanguage = CliLanguage;
 export type OpenTagCliPlatform = PlatformId;
 export type OpenTagCliExecutor = string;
 export type OpenTagRuntimeMode = NonNullable<OpenTagCliConfig["runtime"]>["mode"];
+export type OpenTagRuntimeModeProfile = {
+  offlineSafe: false;
+  executionLocality: "local" | "paired_runner";
+};
 
 export type PathEnvironment = Partial<
   Record<"OPENTAG_CONFIG_PATH" | "OPENTAG_CONFIG_HOME" | "OPENTAG_STATE_DIR" | "XDG_CONFIG_HOME" | "XDG_STATE_HOME", string>
@@ -674,11 +747,12 @@ function assertHostedControlRawTrust(value: unknown): void {
   if (daemon.controlRegistration === undefined) return;
 
   if (!raw.runtime || typeof raw.runtime !== "object" || Array.isArray(raw.runtime)) {
-    throw new Error("Hosted Control V1 requires runtime.mode=relay before secrets or network access.");
+    throw new Error("Hosted Control V1 requires runtime.mode=paired_relay before secrets or network access.");
   }
   const runtime = raw.runtime as Record<string, unknown>;
-  if (runtime.mode !== "relay") {
-    throw new Error("Hosted Control V1 requires runtime.mode=relay before secrets or network access.");
+  const canonicalMode = runtime.mode === "relay" ? "paired_relay" : runtime.mode;
+  if (canonicalMode !== "paired_relay") {
+    throw new Error("Hosted Control V1 requires runtime.mode=paired_relay before secrets or network access.");
   }
   const relayUrl = z.string().url().parse(runtime.relayUrl);
   const dispatcherUrl = z.string().url().parse(daemon.dispatcherUrl);
@@ -696,6 +770,7 @@ function assertHostedControlRawTrust(value: unknown): void {
 }
 
 export function parseCliConfig(value: unknown): OpenTagCliConfig {
+  assertPairedRelayEndpointSeparation(value);
   assertHostedControlRawTrust(value);
   const parsed = OpenTagCliConfigSchema.parse(value);
   return {
@@ -715,11 +790,17 @@ export function parseCliConfig(value: unknown): OpenTagCliConfig {
 export { hostedRunnerAuthProblem, runnerDispatcherToken };
 
 export function runtimeModeFromConfig(config: OpenTagCliConfig): OpenTagRuntimeMode {
-  return config.runtime?.mode ?? "local";
+  return config.runtime?.mode ?? "local_direct";
+}
+
+export function runtimeModeProfileFromConfig(config: OpenTagCliConfig): OpenTagRuntimeModeProfile {
+  return runtimeModeFromConfig(config) === "paired_relay"
+    ? { offlineSafe: false, executionLocality: "paired_runner" }
+    : { offlineSafe: false, executionLocality: "local" };
 }
 
 export function relayUrlFromConfig(config: OpenTagCliConfig): string | undefined {
-  return config.runtime?.mode === "relay" ? config.runtime.relayUrl : undefined;
+  return config.runtime?.mode === "paired_relay" ? config.runtime.relayUrl : undefined;
 }
 
 export function readCliConfig(path = defaultConfigPath()): OpenTagCliConfig {
@@ -1134,8 +1215,8 @@ function validateHostedControlRawConfig(value: unknown): void {
   const raw = requireRawConfigObject(value);
   OpenTagCliRawConfigSchema.parse(raw);
   const runtime = RuntimeConfigSchema.parse(raw.runtime);
-  if (runtime.mode !== "relay") {
-    throw new Error("Hosted Control V1 config requires runtime.mode=relay.");
+  if (runtime.mode !== "paired_relay") {
+    throw new Error("Hosted Control V1 config requires runtime.mode=paired_relay.");
   }
   const daemon = requireRawConfigObject(raw.daemon);
   const dispatcherUrl = z.string().url().parse(daemon.dispatcherUrl);
@@ -1181,7 +1262,7 @@ export function writeHostedControlConfigAtomic(
     const patched: Record<string, unknown> = {
       ...raw,
       runtime: {
-        mode: "relay",
+        mode: "paired_relay",
         relayUrl: patch.relayUrl,
         ...(patch.relayProvider ? { relayProvider: patch.relayProvider } : {})
       },
