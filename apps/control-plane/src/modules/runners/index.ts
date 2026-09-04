@@ -27,11 +27,16 @@ type TokenFactory = () => string;
 
 const UPSERT_PROJECT_TARGET_SQL = `
   INSERT INTO cp_project_target(
-    organization_id, project_target_id, runner_id, binding_digest,
+    organization_id, project_target_id, runner_id, binding_digest, binding_generation,
     provider, owner, repo, default_executor, default_branch, updated_at
-  ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  ) VALUES($1, $2, $3, $4, 1, $5, $6, $7, $8, $9, $10)
   ON CONFLICT (organization_id, project_target_id) DO UPDATE SET
     runner_id = EXCLUDED.runner_id,
+    binding_generation = CASE
+      WHEN cp_project_target.binding_digest = EXCLUDED.binding_digest
+        THEN cp_project_target.binding_generation
+      ELSE cp_project_target.binding_generation + 1
+    END,
     binding_digest = EXCLUDED.binding_digest,
     provider = EXCLUDED.provider,
     owner = EXCLUDED.owner,
@@ -151,13 +156,14 @@ export function createRunnerDirectory(input: {
     const targets = await input.pool.query<{
       project_target_id: string;
       binding_digest: string;
+      binding_generation: number;
       provider: string;
       owner: string;
       repo: string;
       default_executor: string;
       default_branch: string | null;
     }>(
-      `SELECT project_target_id, binding_digest, provider, owner, repo,
+      `SELECT project_target_id, binding_digest, binding_generation, provider, owner, repo,
               default_executor, default_branch
        FROM cp_project_target
        WHERE organization_id = $1 AND runner_id = $2
@@ -177,6 +183,7 @@ export function createRunnerDirectory(input: {
       targets: targets.rows.map((target) => ({
         projectTargetId: target.project_target_id,
         bindingDigest: target.binding_digest,
+        bindingGeneration: target.binding_generation,
         provider: target.provider,
         owner: target.owner,
         repo: target.repo,

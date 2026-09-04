@@ -184,8 +184,9 @@ earlier observation directly.
   Adapter-specific evidence policy;
 - provider rejection or failure does not by itself prove absence and therefore
   becomes `outcome_unknown` or `attention`; the first Effect kind has no
-  caller-asserted failed evidence and only exact scoped absence can authorize a
-  successor mutation;
+  caller-asserted failed evidence, and a GitHub absence observed after local
+  provider-I/O begin cannot rule out an in-flight timed-out request, so it also
+  cannot authorize a successor mutation;
 - an operator annotation explains attention but does not prove success,
   absence, or authorize an automatic successor. Any future break-glass release
   requires a separate accepted decision and audit contract.
@@ -265,7 +266,11 @@ requested
 
 outcome_unknown
   -> read-only observation
-  -> succeeded | retry_eligible | still_unknown
+  -> succeeded | attention | still_unknown
+
+permit_issued
+  -> intact local not-started proof
+  -> retry_eligible
 ```
 
 The Runner transaction journal for a local material or publication effect is:
@@ -292,11 +297,11 @@ The following guarantees are mandatory:
    reusing an identity with a different payload fails closed.
 4. Provider timeout or transport ambiguity records `outcome_unknown` and does
    not authorize automatic mutation retry.
-5. A read-only observation may make a successor attempt eligible only when the
-   `EffectKind` has a tested absence-evidence policy and the observation proves
-   exact absence under that policy. Only `EffectAuthority` can issue the
-   successor permit. Effects without such a policy remain attention or
-   `outcome_unknown` and are never automatically repeated.
+5. The first `EffectKind` never turns a post-begin provider absence into an
+   automatic mutation retry: a timed-out create request may still be in flight.
+   Only intact local not-started proof can make a successor execute attempt
+   eligible. Any future kind with stronger provider idempotency or absence
+   guarantees requires a separate tested policy decision.
 6. Matching evidence for an already issued permit and transaction-owner begin
    may arrive after lease expiry or Work cancellation. It updates Effect
    evidence without reviving a cancelled Work or authorizing new mutation.
@@ -506,9 +511,8 @@ The replacement is acceptable only when tests demonstrate:
    receipt-upload loss through the same operation identity and readback,
    without another mutation;
 6. timeout preserving `outcome_unknown` and blocking automatic retry;
-7. every `EffectKind` that permits an automatic successor defining and testing
-   an Adapter-specific exact-absence policy; kinds without one never receive
-   an automatic successor permit;
+7. post-begin GitHub absence remaining non-retryable, and only intact local
+   not-started proof producing an automatic successor permit;
 8. late evidence after cancellation being recorded without reviving Work;
 9. Runner restart recovering the local effect journal;
 10. Runner journal loss failing closed;

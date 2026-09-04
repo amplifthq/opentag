@@ -203,6 +203,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0020_projection_lineage_serialization.sql",
       "0021_projection_job_v2_fence.sql",
       "0022_job_terminal_state.sql",
+      "0023_effect_authority.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();
@@ -222,6 +223,9 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     expect(tableNames).toEqual([
       "control_plane_migrations",
       "cp_api_key",
+      "cp_effect",
+      "cp_effect_attempt",
+      "cp_effect_evidence",
       "cp_hosted_attempt",
       "cp_hosted_audit_event",
       "cp_hosted_lifecycle_receipt",
@@ -245,14 +249,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "cp_projection_job_v2_authority",
       "cp_provider_delivery_intent",
       "cp_provider_delivery_truth_lock",
-      "cp_publication_begin",
-      "cp_publication_branch_ownership",
       "cp_publication_candidate",
-      "cp_publication_capability",
-      "cp_publication_completion",
-      "cp_publication_intent",
-      "cp_publication_receipt",
-      "cp_publication_reconciliation",
       "cp_runner",
       "cp_runner_credential",
       "cp_runner_operation",
@@ -600,161 +597,209 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     }finally{await legacy.close();}
   });
 
-  it("keeps every 0014 publication authority family fail-closed in the schema catalog", async () => {
+  it("converges publication authority to three fail-closed Effect tables", async () => {
     await fixture.migrate();
-    const tables = ["cp_publication_branch_ownership", "cp_publication_intent",
+    const oldTables = ["cp_publication_branch_ownership", "cp_publication_intent",
       "cp_publication_capability", "cp_publication_begin", "cp_publication_receipt",
       "cp_publication_reconciliation", "cp_publication_completion"];
-    for (const table of tables) {
-      const columns = await fixture.pool.query<{ column_name: string; is_nullable: string; column_default: string | null }>(
-        `SELECT column_name,is_nullable,column_default FROM information_schema.columns
-         WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`, [fixture.schema, table]);
-      expect(columns.rows).toEqual(expect.arrayContaining([
-        expect.objectContaining({ column_name: "organization_id", is_nullable: "NO" }),
-      ]));
-      const constraints = await fixture.pool.query<{ constraint_type: string }>(
-        `SELECT constraint_type FROM information_schema.table_constraints WHERE table_schema=$1 AND table_name=$2`,
+    const relations = await fixture.pool.query<{ name: string; relation: string | null }>(
+      `SELECT name,to_regclass(name)::text AS relation
+       FROM unnest($1::text[]) old_table(name)`, [oldTables]);
+    expect(relations.rows.every(({ relation }) => relation === null)).toBe(true);
+    for (const table of ["cp_effect", "cp_effect_attempt", "cp_effect_evidence"]) {
+      const columns = await fixture.pool.query<{ column_name: string; is_nullable: string }>(
+        `SELECT column_name,is_nullable FROM information_schema.columns
+         WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`,
         [fixture.schema, table]);
-      expect(constraints.rows.map((row) => row.constraint_type)).toContain("PRIMARY KEY");
-      const trigger = await fixture.pool.query<{ trigger_name: string }>(
-        `SELECT DISTINCT trigger_name FROM information_schema.triggers
-         WHERE event_object_schema=$1 AND event_object_table=$2
-           AND trigger_name=${"'"}cp_publication_${"'"} || regexp_replace($2, '^cp_publication_', '') || '_immutable'`,
+      expect(columns.rows).toContainEqual({ column_name: "organization_id", is_nullable: "NO" });
+      const primaryKey = await fixture.pool.query(
+        `SELECT 1 FROM information_schema.table_constraints
+         WHERE table_schema=$1 AND table_name=$2 AND constraint_type='PRIMARY KEY'`,
         [fixture.schema, table]);
-      expect(trigger.rows).toHaveLength(1);
+      expect(primaryKey.rowCount).toBe(1);
     }
-    const capability = await fixture.pool.query<{ column_name: string; is_nullable: string }>(
-      `SELECT column_name,is_nullable FROM information_schema.columns WHERE table_schema=$1
-       AND table_name='cp_publication_capability' AND column_name IN ('attempt_number','capability_digest','capability')`,
-      [fixture.schema]);
-    expect(capability.rows).toHaveLength(3);
-    expect(capability.rows.every((column) => column.is_nullable === "NO")).toBe(true);
+    const targetGeneration = await fixture.pool.query(
+      `SELECT is_nullable,column_default FROM information_schema.columns
+       WHERE table_schema=$1 AND table_name='cp_project_target'
+         AND column_name='binding_generation'`, [fixture.schema]);
+    expect(targetGeneration.rows).toEqual([{ is_nullable: "NO", column_default: null }]);
   });
 
-  it.each([
-    ["receipt nullability", "ALTER TABLE cp_publication_receipt ALTER COLUMN receipt_digest DROP NOT NULL"],
-    ["capability attempt uniqueness", `DO $$ DECLARE constraint_name text; BEGIN
-      SELECT conname INTO constraint_name FROM pg_constraint
-       WHERE conrelid='cp_publication_capability'::regclass AND contype='u'
-         AND conkey=ARRAY[1,3,6,7]::smallint[];
-      EXECUTE format('ALTER TABLE cp_publication_capability DROP CONSTRAINT %I', constraint_name);
-      END $$;
-      ALTER TABLE cp_publication_capability
-      ADD CONSTRAINT cp_publication_capability_organization_id_intent_id_step_attempt_number_key
-      UNIQUE (organization_id,intent_id,step,capability_id)`],
-    ["authority trigger disabled", "ALTER TABLE cp_publication_completion DISABLE TRIGGER cp_publication_completion_immutable"],
-  ] as const)("fails readiness closed for tampered 0014 %s", async (_label, tamperSql) => {
-    const tampered = await createIsolatedPostgres();
+  it("backfills an existing Project Target to binding generation one", async () => {
+    const upgrade = await createIsolatedPostgres();
     try {
-      await tampered.migrate();
-      await tampered.pool.query(tamperSql);
-      await expect(checkMigrationReadiness(tampered.pool, tampered.migrations))
-        .resolves.toEqual({ ready: false, reason: "migrations_pending" });
-    } finally { await tampered.close(); }
+      await runMigrations(upgrade.pool,
+        migrationsBefore(upgrade.migrations, "0023_effect_authority.sql"));
+      await upgrade.pool.query(
+        "INSERT INTO cp_organization(organization_id,display_name) VALUES('org_effect_upgrade','Effect upgrade')",
+      );
+      await upgrade.pool.query(
+        `INSERT INTO cp_runner(organization_id,runner_id,registration_generation,
+           credential_generation,current_credential_id,capabilities,created_at,updated_at)
+         VALUES('org_effect_upgrade','runner_effect_upgrade',1,1,'credential_effect_upgrade',
+           '[]'::jsonb,$1,$1)`, [new Date("2026-08-15T07:00:00.000Z")],
+      );
+      await upgrade.pool.query(
+        `INSERT INTO cp_project_target(organization_id,project_target_id,runner_id,binding_digest,
+           provider,owner,repo,default_executor,default_branch,updated_at)
+         VALUES('org_effect_upgrade','target_effect_upgrade','runner_effect_upgrade',$1,
+           'github','acme','demo','executor_acp','main',$2)`,
+        [`sha256:${"e".repeat(64)}`, new Date("2026-08-15T07:00:00.000Z")],
+      );
+      await runMigrations(upgrade.pool, upgrade.migrations);
+      expect((await upgrade.pool.query(
+        `SELECT binding_generation FROM cp_project_target
+         WHERE organization_id='org_effect_upgrade'`,
+      )).rows).toEqual([{ binding_generation: 1 }]);
+      await expect(checkMigrationReadiness(upgrade.pool, upgrade.migrations))
+        .resolves.toEqual({ ready: true });
+    } finally { await upgrade.close(); }
+  });
+
+  it("rolls back the Effect cutover when a legacy publication capability exists", async () => {
+    const cutover = await createIsolatedPostgres();
+    const at = new Date("2026-08-15T07:00:00.000Z");
+    const sha = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+    try {
+      await runMigrations(cutover.pool,
+        migrationsBefore(cutover.migrations, "0023_effect_authority.sql"));
+      const runners = createRunnerDirectory({ pool: cutover.pool, clock: { now: () => at },
+        tokenFactory: () => "runtime_effect_cutover_secret",
+        idFactory: () => "credential_effect_cutover" });
+      await runners.register({ organizationId: "org_effect_cutover",
+        organizationName: "Effect cutover", request: { schemaVersion: 1,
+          protocolVersion: "1.0", requiredCapabilities: ["relay.registration.v1"],
+          requestId: "request_effect_cutover", operationId: "operation_effect_cutover",
+          runnerId: "runner_effect_cutover", capabilities: [...HOSTED_CAPABILITIES] } });
+      const authenticated = await runners.authenticate("runtime_effect_cutover_secret");
+      if (authenticated.kind !== "authenticated") throw new Error("cutover auth failed");
+      await recordHostedReadiness({ pool: cutover.pool, organizationId: "org_effect_cutover",
+        runnerId: "runner_effect_cutover" });
+      const hosted = createHostedRunCoordinator({ pool: cutover.pool, clock: { now: () => at },
+        leaseDurationMs: 60_000, idFactory: () => "attempt_effect_cutover",
+        tokenFactory: () => "fence_effect_cutover",
+        issueSourceContentGrantInTransaction: hostedGrantIssuerFixture });
+      const admission = await hostedAdmissionFixture({ runId: "run_effect_cutover",
+        suffix: "effect_cutover", organizationId: "org_effect_cutover",
+        runnerId: "runner_effect_cutover", publicationMode: "pull_request",
+        queueClaimDeadline: new Date(at.getTime() + 60 * 60_000).toISOString() });
+      await hosted.admit({ runId: "run_effect_cutover", admission: admission.admission,
+        policy: admission.policy });
+      const claimed = await hosted.claim({ principal: authenticated.principal,
+        request: hostedClaimRequest({ operationId: "operation_claim_effect_cutover",
+          requestId: "request_claim_effect_cutover",
+          credentialId: "credential_effect_cutover" }) });
+      if (claimed.kind !== "claimed") throw new Error("cutover claim failed");
+      const candidate = { candidateId: "candidate_effect_cutover",
+        runId: "run_effect_cutover", attemptId: claimed.claim.attempt.id,
+        projectTargetId: admission.admission.projectTarget.projectTargetId,
+        frozenBaseRevision: "a".repeat(40), workspaceTreeDigest: "b".repeat(40),
+        patchDigest: sha("cutover-patch"), changedFiles: ["cutover.ts"],
+        verificationEvidenceIds: [sha("cutover-verification")],
+        publicationPolicyDigest: admission.admission.publicationPolicy.digest,
+        createdAt: at.toISOString() };
+      const candidateDigest = sha(JSON.stringify(candidate));
+      await cutover.pool.query(
+        `INSERT INTO cp_publication_candidate(organization_id,candidate_id,run_id,attempt_id,
+           attempt_number,project_target_id,frozen_base_revision,workspace_tree_digest,
+           patch_digest,changed_files,verification_evidence_ids,publication_policy_digest,
+           candidate,completion_assessment,created_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15)`,
+        ["org_effect_cutover", candidate.candidateId, candidate.runId, candidate.attemptId,
+          claimed.claim.attempt.number, candidate.projectTargetId,
+          candidate.frozenBaseRevision, candidate.workspaceTreeDigest, candidate.patchDigest,
+          candidate.changedFiles, candidate.verificationEvidenceIds,
+          candidate.publicationPolicyDigest, JSON.stringify(candidate),
+          JSON.stringify({ state: "proposal_ready", accepted: false,
+            candidateId: candidate.candidateId, reasonCodes: ["publication_pending"],
+            assessedAt: at.toISOString() }), at],
+      );
+      await cutover.pool.query(
+        `INSERT INTO cp_publication_branch_ownership(organization_id,ownership_id,run_id,
+           attempt_id,attempt_number,fencing_token_digest,runner_id,runner_generation,
+           candidate_id,candidate_digest,project_target_id,target_binding_digest,provider,
+           owner,repo,remote,base_branch,frozen_base_revision,workspace_tree_digest,branch,
+           expected_head_sha,attestation_digest,attested_at,created_at)
+         VALUES($1,'ownership_effect_cutover',$2,$3,$4,$5,$6,1,$7,$8,$9,$10,
+           'github','acme','demo','origin','main',$11,$12,$13,$14,$15,$16,$16)`,
+        ["org_effect_cutover", candidate.runId, candidate.attemptId,
+          claimed.claim.attempt.number, claimed.claim.attempt.fencingTokenDigest,
+          "runner_effect_cutover", candidate.candidateId, candidateDigest,
+          candidate.projectTargetId, admission.admission.projectTarget.digest,
+          candidate.frozenBaseRevision, candidate.workspaceTreeDigest,
+          `opentag/${candidate.runId}`, "c".repeat(40), sha("cutover-attestation"), at],
+      );
+      await cutover.pool.query(
+        `INSERT INTO cp_publication_intent(organization_id,intent_id,run_id,attempt_id,
+           attempt_number,candidate_id,candidate_digest,ownership_id,ownership_digest,
+           approval_id,approver_id,approval_digest,repository,branch,expected_head_sha,
+           runner_id,runner_generation,approved_at,expires_at,created_at)
+         VALUES($1,'intent_effect_cutover',$2,$3,$4,$5,$6,'ownership_effect_cutover',$7,
+           'approval_effect_cutover','human_effect_cutover',$8,$9::jsonb,$10,$11,$12,1,
+           $13,$14,$13)`,
+        ["org_effect_cutover", candidate.runId, candidate.attemptId,
+          claimed.claim.attempt.number, candidate.candidateId, candidateDigest,
+          sha("cutover-attestation"), sha("cutover-approval"), JSON.stringify({
+            provider: "github", owner: "acme", repo: "demo", remote: "origin",
+            baseBranch: "main" }), `opentag/${candidate.runId}`, "c".repeat(40),
+          "runner_effect_cutover", at, new Date(at.getTime() + 15 * 60_000)],
+      );
+      await cutover.pool.query(
+        `INSERT INTO cp_publication_capability(organization_id,capability_id,intent_id,
+           operation_id,idempotency_key,step,attempt_number,capability_digest,capability,
+           issued_at,expires_at)
+         VALUES($1,'capability_effect_cutover','intent_effect_cutover',
+           'operation_publication_effect_cutover','publication:effect-cutover',
+           'create_draft_pull_request',1,$2,'{}'::jsonb,$3,$4)`,
+        ["org_effect_cutover", sha("cutover-capability"), at,
+          new Date(at.getTime() + 60_000)],
+      );
+
+      await expect(runMigrations(cutover.pool, cutover.migrations))
+        .rejects.toThrow("effect_authority_cutover_reconciliation_required");
+      expect((await cutover.pool.query(
+        `SELECT count(*)::int AS count FROM cp_publication_capability
+         WHERE organization_id='org_effect_cutover'`,
+      )).rows[0]).toEqual({ count: 1 });
+      expect((await cutover.pool.query(
+        "SELECT to_regclass('cp_publication_capability')::text AS legacy, to_regclass('cp_effect')::text AS effect",
+      )).rows).toEqual([{ legacy: "cp_publication_capability", effect: null }]);
+      expect((await cutover.pool.query(
+        `SELECT count(*)::int AS count FROM control_plane_migrations
+         WHERE name='0023_effect_authority.sql'`,
+      )).rows[0]).toEqual({ count: 0 });
+      expect((await cutover.pool.query(
+        `SELECT count(*)::int AS count FROM information_schema.columns
+         WHERE table_schema=current_schema() AND table_name='cp_project_target'
+           AND column_name='binding_generation'`,
+      )).rows[0]).toEqual({ count: 0 });
+    } finally { await cutover.close(); }
   });
 
   it.each([
-    ["branch ownership head type", "ALTER TABLE cp_publication_branch_ownership ALTER COLUMN expected_head_sha TYPE varchar(64)"],
-    ["intent repository type", "ALTER TABLE cp_publication_intent ALTER COLUMN repository TYPE text USING repository::text"],
-    ["capability payload type", "ALTER TABLE cp_publication_capability ALTER COLUMN capability TYPE text USING capability::text"],
-    ["begin timestamp type", "ALTER TABLE cp_publication_begin ALTER COLUMN begun_at TYPE text USING begun_at::text"],
-    ["receipt payload type", "ALTER TABLE cp_publication_receipt ALTER COLUMN receipt TYPE text USING receipt::text"],
-    ["reconciliation payload type", "ALTER TABLE cp_publication_reconciliation ALTER COLUMN observation TYPE text USING observation::text"],
-    ["completion payload type", "ALTER TABLE cp_publication_completion ALTER COLUMN observation TYPE text USING observation::text"],
-    ["permissive immutable function body", `CREATE OR REPLACE FUNCTION cp_reject_publication_authority_mutation()
+    ["effect projection trigger", "ALTER TABLE cp_effect DISABLE TRIGGER cp_effect_projection"],
+    ["effect transition trigger", "ALTER TABLE cp_effect DISABLE TRIGGER cp_effect_state_transition"],
+    ["effect attempt trigger", "ALTER TABLE cp_effect_attempt DISABLE TRIGGER cp_effect_attempt_immutable"],
+    ["effect evidence trigger", "ALTER TABLE cp_effect_evidence DISABLE TRIGGER cp_effect_evidence_immutable"],
+    ["effect immutable function", `CREATE OR REPLACE FUNCTION cp_reject_effect_authority_mutation()
       RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`],
-  ] as const)("fails readiness closed for every 0014 descriptor tamper: %s", async (_label, tamperSql) => {
-    const tampered = await createIsolatedPostgres();
-    try {
-      await tampered.migrate();
-      await tampered.pool.query(tamperSql);
-      await expect(checkMigrationReadiness(tampered.pool, tampered.migrations))
-        .resolves.toEqual({ ready: false, reason: "migrations_pending" });
-    } finally { await tampered.close(); }
-  });
-
-  it.each([
-    ["retargeted intent ownership FK", `ALTER TABLE cp_publication_intent
-      DROP CONSTRAINT cp_publication_intent_organization_id_ownership_id_fkey;
-      ALTER TABLE cp_publication_intent
-      ADD CONSTRAINT cp_publication_intent_organization_id_ownership_id_fkey
-      FOREIGN KEY (organization_id,ownership_id)
-      REFERENCES cp_publication_branch_ownership(organization_id,candidate_id)`],
-    ["dropped receipt FK", `ALTER TABLE cp_publication_receipt
-      DROP CONSTRAINT cp_publication_receipt_organization_id_capability_id_fkey`],
-    ["not-valid ownership attempt FK", `ALTER TABLE cp_publication_branch_ownership
-      DROP CONSTRAINT cp_publication_branch_ownersh_organization_id_run_id_attem_fkey;
-      ALTER TABLE cp_publication_branch_ownership
-      ADD CONSTRAINT cp_publication_branch_ownersh_organization_id_run_id_attem_fkey
-      FOREIGN KEY (organization_id,run_id,attempt_number,attempt_id)
-      REFERENCES cp_hosted_attempt(organization_id,run_id,attempt_number,attempt_id) NOT VALID`],
-    ["changed FK actions and deferrability", `ALTER TABLE cp_publication_begin
-      DROP CONSTRAINT cp_publication_begin_organization_id_capability_id_fkey;
-      ALTER TABLE cp_publication_begin
-      ADD CONSTRAINT cp_publication_begin_organization_id_capability_id_fkey
-      FOREIGN KEY (organization_id,capability_id)
-      REFERENCES cp_publication_capability(organization_id,capability_id)
-      MATCH FULL ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED`],
-    ["weakened ownership digest CHECK", `ALTER TABLE cp_publication_branch_ownership
-      DROP CONSTRAINT cp_publication_branch_ownership_attestation_digest_check;
-      ALTER TABLE cp_publication_branch_ownership
-      ADD CONSTRAINT cp_publication_branch_ownership_attestation_digest_check
-      CHECK (attestation_digest <> '')`],
-    ["dropped capability expiry CHECK", `ALTER TABLE cp_publication_capability
-      DROP CONSTRAINT cp_publication_capability_check`],
-    ["no-inherit receipt outcome CHECK", `ALTER TABLE cp_publication_receipt
-      DROP CONSTRAINT cp_publication_receipt_outcome_check;
-      ALTER TABLE cp_publication_receipt
-      ADD CONSTRAINT cp_publication_receipt_outcome_check
-      CHECK (outcome IN ('succeeded','failed','outcome_unknown')) NO INHERIT`],
-    ["changed capability primary key", `ALTER TABLE cp_publication_capability
-      DROP CONSTRAINT cp_publication_capability_pkey CASCADE;
-      ALTER TABLE cp_publication_capability
-      ADD CONSTRAINT cp_publication_capability_pkey
-      PRIMARY KEY (organization_id,capability_id,operation_id)`],
-    ["changed ownership candidate uniqueness", `ALTER TABLE cp_publication_branch_ownership
-      DROP CONSTRAINT cp_publication_branch_ownershi_organization_id_candidate_id_key CASCADE;
-      ALTER TABLE cp_publication_branch_ownership
-      ADD CONSTRAINT cp_publication_branch_ownershi_organization_id_candidate_id_key
-      UNIQUE (organization_id,candidate_id,ownership_id)`],
-    ["changed intent candidate uniqueness", `ALTER TABLE cp_publication_intent
-      DROP CONSTRAINT cp_publication_intent_organization_id_candidate_id_key;
-      ALTER TABLE cp_publication_intent
-      ADD CONSTRAINT cp_publication_intent_organization_id_candidate_id_key
-      UNIQUE (organization_id,candidate_id,intent_id)`],
-    ["dropped intent approval uniqueness", `ALTER TABLE cp_publication_intent
-      DROP CONSTRAINT cp_publication_intent_organization_id_approval_id_key`],
-    ["changed capability attempt uniqueness", `ALTER TABLE cp_publication_capability
-      DROP CONSTRAINT cp_publication_capability_organization_id_intent_id_step_at_key;
-      ALTER TABLE cp_publication_capability
-      ADD CONSTRAINT cp_publication_capability_organization_id_intent_id_step_at_key
-      UNIQUE (organization_id,intent_id,step,attempt_number,capability_id)`],
-    ["changed begin uniqueness", `ALTER TABLE cp_publication_begin
-      DROP CONSTRAINT cp_publication_begin_pkey;
-      ALTER TABLE cp_publication_begin
-      ADD CONSTRAINT cp_publication_begin_pkey
-      PRIMARY KEY (organization_id,capability_id,operation_id)`],
-    ["dropped receipt capability uniqueness", `ALTER TABLE cp_publication_receipt
-      DROP CONSTRAINT cp_publication_receipt_organization_id_capability_id_key`],
-    ["unexpected reconciliation capability uniqueness", `ALTER TABLE cp_publication_reconciliation
-      ADD CONSTRAINT cp_publication_reconciliation_organization_id_capability_id_key
-      UNIQUE (organization_id,capability_id)`],
-    ["changed completion run uniqueness", `ALTER TABLE cp_publication_completion
-      DROP CONSTRAINT cp_publication_completion_organization_id_run_id_key;
-      ALTER TABLE cp_publication_completion
-      ADD CONSTRAINT cp_publication_completion_organization_id_run_id_key
-      UNIQUE (organization_id,run_id,completion_id)`],
-    ["changed ownership expression index expression", `DROP INDEX cp_publication_branch_owner_key;
-      CREATE UNIQUE INDEX cp_publication_branch_owner_key ON cp_publication_branch_ownership(
-        organization_id,lower(provider),lower(owner),lower(repo),branch)`],
-    ["changed ownership expression index uniqueness", `DROP INDEX cp_publication_branch_owner_key;
-      CREATE INDEX cp_publication_branch_owner_key ON cp_publication_branch_ownership(
-        organization_id,lower(provider),lower(owner),lower(repo),lower(branch))`],
-    ["changed ownership expression index predicate", `DROP INDEX cp_publication_branch_owner_key;
-      CREATE UNIQUE INDEX cp_publication_branch_owner_key ON cp_publication_branch_ownership(
-        organization_id,lower(provider),lower(owner),lower(repo),lower(branch))
-      WHERE organization_id <> ''`],
-  ] as const)("fails readiness closed for exact 0014 catalog tamper: %s", async (_label, tamperSql) => {
+    ["effect projection function", `CREATE OR REPLACE FUNCTION cp_project_effect_change()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`],
+    ["binding generation constraint", `ALTER TABLE cp_project_target
+      DROP CONSTRAINT cp_project_target_binding_generation_check`],
+    ["same-name weakened projection check", `ALTER TABLE cp_effect
+      DROP CONSTRAINT cp_effect_projection_shape_check;
+      ALTER TABLE cp_effect ADD CONSTRAINT cp_effect_projection_shape_check CHECK (true)`],
+    ["logical Effect uniqueness", "ALTER TABLE cp_effect DROP CONSTRAINT cp_effect_logical_key"],
+    ["Effect candidate foreign key", `ALTER TABLE cp_effect
+      DROP CONSTRAINT cp_effect_organization_id_candidate_id_fkey`],
+    ["request digest nullability", "ALTER TABLE cp_effect ALTER COLUMN request_digest DROP NOT NULL"],
+    ["dispatch index definition", `DROP INDEX cp_effect_dispatch_idx;
+      CREATE INDEX cp_effect_dispatch_idx ON cp_effect(organization_id)`],
+    ["projection trigger event", `DROP TRIGGER cp_effect_projection ON cp_effect;
+      CREATE TRIGGER cp_effect_projection AFTER INSERT ON cp_effect
+      FOR EACH ROW EXECUTE FUNCTION cp_project_effect_change()`],
+  ] as const)("fails readiness closed for tampered EffectAuthority %s", async (_label, tamperSql) => {
     const tampered = await createIsolatedPostgres();
     try {
       await tampered.migrate();

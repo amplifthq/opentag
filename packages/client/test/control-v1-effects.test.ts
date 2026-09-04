@@ -95,7 +95,7 @@ function effectView(state: "requested" | "retry_eligible" = "requested"): Effect
       state,
       currentAttemptNumber: 1,
       currentEvidenceDigest: digest("9"),
-      reasonCode: "github.exact_absence_observed",
+      reasonCode: "local.provider_io_not_begun",
       updatedAt: "2026-09-05T01:02:04.004Z",
     };
   }

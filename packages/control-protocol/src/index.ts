@@ -631,7 +631,7 @@ export const EffectViewV1Schema = z.discriminatedUnion("state", [
     state: z.literal("retry_eligible"),
     currentAttemptNumber: z.number().int().positive(),
     currentEvidenceDigest: ReceiptDigestSchema,
-    reasonCode: z.literal("github.exact_absence_observed"),
+    reasonCode: z.literal("local.provider_io_not_begun"),
   }).strict(),
   EffectViewV1BaseSchema.extend({
     state: z.literal("succeeded"),
@@ -695,6 +695,7 @@ const EffectPermitDigestInputV1BaseSchema = z.object({
   requestDigest: ReceiptDigestSchema,
   targetDigest: ReceiptDigestSchema,
   approvalDigest: ReceiptDigestSchema,
+  predecessorEvidenceDigest: ReceiptDigestSchema.optional(),
   candidate: z.object({
     candidateId: MaterialActionStableIdV1Schema,
     candidateDigest: ReceiptDigestSchema,
@@ -863,12 +864,31 @@ const EffectEvidenceEnvelopeDigestInputV1BaseSchema = z.object({
   payloadDigest: ReceiptDigestSchema,
 }).strict();
 
+function effectEvidenceObservationTimeMatches(envelope: {
+  observedAt: string;
+  evidence: z.infer<typeof EffectEvidenceV1Schema>;
+}): boolean {
+  if (envelope.evidence.kind === "present") {
+    return envelope.evidence.observation.observedAt === envelope.observedAt;
+  }
+  if (envelope.evidence.kind === "absent") {
+    return envelope.evidence.observationScope.observedAt === envelope.observedAt;
+  }
+  return true;
+}
+
 export const EffectEvidenceEnvelopeDigestInputV1Schema =
-  EffectEvidenceEnvelopeDigestInputV1BaseSchema;
+  EffectEvidenceEnvelopeDigestInputV1BaseSchema.refine(effectEvidenceObservationTimeMatches, {
+    path: ["observedAt"],
+    message: "Effect evidence envelope time must equal its provider observation time.",
+  });
 export const EffectEvidenceEnvelopeV1Schema =
   EffectEvidenceEnvelopeDigestInputV1BaseSchema.extend({
     evidenceDigest: ReceiptDigestSchema,
-  }).strict();
+  }).strict().refine(effectEvidenceObservationTimeMatches, {
+    path: ["observedAt"],
+    message: "Effect evidence envelope time must equal its provider observation time.",
+  });
 
 export function computeEffectRequestDigestV1(
   request: z.input<typeof EffectRequestDigestInputV1Schema>,
@@ -1428,6 +1448,7 @@ const RunnerProjectTargetReadbackV1Schema = z
   .object({
     projectTargetId: NonEmptyIdSchema.max(200),
     bindingDigest: ReceiptDigestSchema,
+    bindingGeneration: z.number().int().positive(),
     provider: z.literal("github"),
     owner: CanonicalGitHubProjectTargetSegmentV1Schema,
     repo: CanonicalGitHubProjectTargetSegmentV1Schema,

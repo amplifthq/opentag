@@ -267,220 +267,197 @@ export async function checkMigrationReadiness(
             AND regexp_replace(pg_get_triggerdef(trigger_row.oid),
               '[[:space:]]+', '', 'g') LIKE
               'CREATETRIGGERcp_publication_candidate_immutableBEFOREDELETEORUPDATEON%FOREACHROWEXECUTEFUNCTION%cp_reject_publication_candidate_mutation()')
-        AND (SELECT count(*) FROM pg_class table_row
-          WHERE table_row.relnamespace = current_schema()::regnamespace
-            AND table_row.relkind = 'r'
-            AND table_row.relname = ANY(ARRAY[
-              'cp_publication_intent', 'cp_publication_branch_ownership',
-              'cp_publication_capability', 'cp_publication_begin',
-              'cp_publication_receipt', 'cp_publication_reconciliation',
-              'cp_publication_completion'
-            ])) = 7
-        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position)
-             FROM information_schema.columns
-             WHERE table_schema=current_schema() AND table_name='cp_publication_branch_ownership')
-          = ARRAY['organization_id','ownership_id','run_id','attempt_id','attempt_number',
-            'fencing_token_digest','runner_id','runner_generation','candidate_id','candidate_digest',
-            'project_target_id','target_binding_digest','provider','owner','repo','remote','base_branch',
-            'frozen_base_revision','workspace_tree_digest','branch','expected_head_sha',
-            'attestation_digest','attested_at','created_at']
-        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position)
-             FROM information_schema.columns
-             WHERE table_schema=current_schema() AND table_name='cp_publication_capability')
-          = ARRAY['organization_id','capability_id','intent_id','operation_id','idempotency_key',
-            'step','attempt_number','capability_digest','capability','issued_at','expires_at']
-        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
-             WHERE table_schema=current_schema() AND table_name='cp_publication_intent')
-          = ARRAY['organization_id','intent_id','run_id','attempt_id','attempt_number','candidate_id','candidate_digest','ownership_id','ownership_digest','approval_id','approver_id','approval_digest','repository','branch','expected_head_sha','runner_id','runner_generation','approved_at','expires_at','created_at']
-        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
-             WHERE table_schema=current_schema() AND table_name='cp_publication_begin')
-          = ARRAY['organization_id','capability_id','operation_id','begun_at']
-        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
-             WHERE table_schema=current_schema() AND table_name='cp_publication_receipt')
-          = ARRAY['organization_id','receipt_id','capability_id','operation_id','outcome','receipt_digest','receipt','observed_at']
-        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
-             WHERE table_schema=current_schema() AND table_name='cp_publication_reconciliation')
-          = ARRAY['organization_id','reconciliation_id','capability_id','operation_id','sequence','observation','observed_at']
-        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
-             WHERE table_schema=current_schema() AND table_name='cp_publication_completion')
-          = ARRAY['organization_id','completion_id','run_id','attempt_id','attempt_number','fencing_token_digest','candidate_id','candidate_digest','intent_id','ownership_id','push_operation_id','push_receipt_digest','pull_request_operation_id','pull_request_receipt_digest','pull_request_external_id','pull_request_external_digest','repository','remote','base_branch','branch','expected_head_sha','observed_head_sha','required_check_names','evidence_digest','completion_decision','observation','created_at']
-        AND EXISTS (SELECT 1 FROM pg_indexes
-          WHERE schemaname=current_schema() AND tablename='cp_publication_branch_ownership'
-            AND indexname='cp_publication_branch_owner_key'
-            AND regexp_replace(indexdef, '[[:space:]\"]+', '', 'g')
-              LIKE '%lower(provider),lower(owner),lower(repo),lower(branch)%')
-        AND EXISTS (SELECT 1 FROM pg_indexes
-          WHERE schemaname=current_schema() AND tablename='cp_publication_reconciliation'
-            AND indexname='cp_publication_reconciliation_capability_idx')
-        AND EXISTS (SELECT 1 FROM pg_trigger trigger_row
-          JOIN pg_proc function_row ON function_row.oid = trigger_row.tgfoid
-          WHERE trigger_row.tgrelid = 'cp_publication_completion'::regclass
-            AND trigger_row.tgname = 'cp_publication_completion_immutable'
-            AND trigger_row.tgenabled = 'O' AND NOT trigger_row.tgisinternal
-            AND function_row.proname = 'cp_reject_publication_authority_mutation'
-            AND function_row.pronamespace = current_schema()::regnamespace)
-        AND NOT EXISTS (SELECT 1 FROM (VALUES
-          ('cp_publication_intent','cp_publication_intent_immutable'),
-          ('cp_publication_branch_ownership','cp_publication_branch_ownership_immutable'),
-          ('cp_publication_capability','cp_publication_capability_immutable'),
-          ('cp_publication_begin','cp_publication_begin_immutable'),
-          ('cp_publication_receipt','cp_publication_receipt_immutable'),
-          ('cp_publication_reconciliation','cp_publication_reconciliation_immutable'),
-          ('cp_publication_completion','cp_publication_completion_immutable')
-        ) expected(table_name, trigger_name)
-        WHERE NOT EXISTS (SELECT 1 FROM pg_trigger trigger_row JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
-          WHERE trigger_row.tgrelid=to_regclass(expected.table_name) AND trigger_row.tgname=expected.trigger_name
-            AND trigger_row.tgenabled='O' AND NOT trigger_row.tgisinternal AND trigger_row.tgtype=27
-            AND function_row.proname='cp_reject_publication_authority_mutation'
-            AND function_row.pronamespace=current_schema()::regnamespace))
       ) AS schema_ready`,
     );
-    // 0014 is durable authority, not a representative-table migration.  Keep
-    // this catalog separate from the older 0013 check so every authority
-    // family must remain immutable and structurally complete at startup.
-    const publicationOperations = await pool.query<{ schema_ready: boolean }>(
-      `WITH expected_spec(table_name, column_names, column_types) AS (VALUES
-         ('cp_publication_branch_ownership', ARRAY['organization_id','ownership_id','run_id','attempt_id','attempt_number','fencing_token_digest','runner_id','runner_generation','candidate_id','candidate_digest','project_target_id','target_binding_digest','provider','owner','repo','remote','base_branch','frozen_base_revision','workspace_tree_digest','branch','expected_head_sha','attestation_digest','attested_at','created_at'], ARRAY['text','text','text','text','integer','text','text','integer','text','text','text','text','text','text','text','text','text','text','text','text','text','text','timestamp with time zone','timestamp with time zone']),
-         ('cp_publication_intent', ARRAY['organization_id','intent_id','run_id','attempt_id','attempt_number','candidate_id','candidate_digest','ownership_id','ownership_digest','approval_id','approver_id','approval_digest','repository','branch','expected_head_sha','runner_id','runner_generation','approved_at','expires_at','created_at'], ARRAY['text','text','text','text','integer','text','text','text','text','text','text','text','jsonb','text','text','text','integer','timestamp with time zone','timestamp with time zone','timestamp with time zone']),
-         ('cp_publication_capability', ARRAY['organization_id','capability_id','intent_id','operation_id','idempotency_key','step','attempt_number','capability_digest','capability','issued_at','expires_at'], ARRAY['text','text','text','text','text','text','integer','text','jsonb','timestamp with time zone','timestamp with time zone']),
-         ('cp_publication_begin', ARRAY['organization_id','capability_id','operation_id','begun_at'], ARRAY['text','text','text','timestamp with time zone']),
-         ('cp_publication_receipt', ARRAY['organization_id','receipt_id','capability_id','operation_id','outcome','receipt_digest','receipt','observed_at'], ARRAY['text','text','text','text','text','text','jsonb','timestamp with time zone']),
-         ('cp_publication_reconciliation', ARRAY['organization_id','reconciliation_id','capability_id','operation_id','sequence','observation','observed_at'], ARRAY['text','text','text','text','integer','jsonb','timestamp with time zone']),
-         ('cp_publication_completion', ARRAY['organization_id','completion_id','run_id','attempt_id','attempt_number','fencing_token_digest','candidate_id','candidate_digest','intent_id','ownership_id','push_operation_id','push_receipt_digest','pull_request_operation_id','pull_request_receipt_digest','pull_request_external_id','pull_request_external_digest','repository','remote','base_branch','branch','expected_head_sha','observed_head_sha','required_check_names','evidence_digest','completion_decision','observation','created_at'], ARRAY['text','text','text','text','integer','text','text','text','text','text','text','text','text','text','text','text','jsonb','text','text','text','text','text','text[]','text','jsonb','jsonb','timestamp with time zone'])
-       ), expected AS (
-         SELECT spec.table_name,column_name,ordinal::integer AS ordinal,column_type
-         FROM expected_spec spec CROSS JOIN LATERAL unnest(spec.column_names,spec.column_types)
-           WITH ORDINALITY AS column_spec(column_name,column_type,ordinal)
-       ), expected_constraint(constraint_name,constraint_type,source_table,target_table,
-            source_columns,target_columns,validated,match_type,update_action,delete_action,
-            is_deferrable,is_deferred,noinherit,check_definition) AS (VALUES
-         ('cp_publication_branch_ownership_attestation_digest_check','c','cp_publication_branch_ownership',NULL,ARRAY['attestation_digest'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (attestation_digest ~ ''^sha256:[a-f0-9]{64}$''::text)'),
-         ('cp_publication_branch_ownership_candidate_digest_check','c','cp_publication_branch_ownership',NULL,ARRAY['candidate_digest'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (candidate_digest ~ ''^sha256:[a-f0-9]{64}$''::text)'),
-         ('cp_publication_branch_ownership_check','c','cp_publication_branch_ownership',NULL,ARRAY['provider','owner','repo'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (provider = lower(provider) AND owner = lower(owner) AND repo = lower(repo))'),
-         ('cp_publication_branch_ownership_expected_head_sha_check','c','cp_publication_branch_ownership',NULL,ARRAY['expected_head_sha'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (expected_head_sha ~ ''^[a-f0-9]{40,64}$''::text)'),
-         ('cp_publication_branch_ownership_fencing_token_digest_check','c','cp_publication_branch_ownership',NULL,ARRAY['fencing_token_digest'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (fencing_token_digest ~ ''^sha256:[a-f0-9]{64}$''::text)'),
-         ('cp_publication_branch_ownership_frozen_base_revision_check','c','cp_publication_branch_ownership',NULL,ARRAY['frozen_base_revision'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (frozen_base_revision ~ ''^[a-f0-9]{40,64}$''::text)'),
-         ('cp_publication_branch_ownership_runner_generation_check','c','cp_publication_branch_ownership',NULL,ARRAY['runner_generation'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (runner_generation > 0)'),
-         ('cp_publication_branch_ownership_target_binding_digest_check','c','cp_publication_branch_ownership',NULL,ARRAY['target_binding_digest'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (target_binding_digest ~ ''^sha256:[a-f0-9]{64}$''::text)'),
-         ('cp_publication_branch_ownership_workspace_tree_digest_check','c','cp_publication_branch_ownership',NULL,ARRAY['workspace_tree_digest'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (workspace_tree_digest ~ ''^[a-f0-9]{40,64}$''::text)'),
-         ('cp_publication_branch_ownersh_organization_id_run_id_attem_fkey','f','cp_publication_branch_ownership','cp_hosted_attempt',ARRAY['organization_id','run_id','attempt_number','attempt_id'],ARRAY['organization_id','run_id','attempt_number','attempt_id'],true,'s','a','a',false,false,true,NULL),
-         ('cp_publication_branch_ownership_pkey','p','cp_publication_branch_ownership',NULL,ARRAY['organization_id','ownership_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_branch_ownershi_organization_id_candidate_id_key','u','cp_publication_branch_ownership',NULL,ARRAY['organization_id','candidate_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_intent_approval_digest_check','c','cp_publication_intent',NULL,ARRAY['approval_digest'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (approval_digest ~ ''^sha256:[a-f0-9]{64}$''::text)'),
-         ('cp_publication_intent_candidate_digest_check','c','cp_publication_intent',NULL,ARRAY['candidate_digest'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (candidate_digest ~ ''^sha256:[a-f0-9]{64}$''::text)'),
-         ('cp_publication_intent_check','c','cp_publication_intent',NULL,ARRAY['expires_at','approved_at'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (expires_at > approved_at)'),
-         ('cp_publication_intent_expected_head_sha_check','c','cp_publication_intent',NULL,ARRAY['expected_head_sha'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (expected_head_sha ~ ''^[a-f0-9]{40,64}$''::text)'),
-         ('cp_publication_intent_ownership_digest_check','c','cp_publication_intent',NULL,ARRAY['ownership_digest'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (ownership_digest ~ ''^sha256:[a-f0-9]{64}$''::text)'),
-         ('cp_publication_intent_runner_generation_check','c','cp_publication_intent',NULL,ARRAY['runner_generation'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (runner_generation > 0)'),
-         ('cp_publication_intent_organization_id_fkey','f','cp_publication_intent','cp_organization',ARRAY['organization_id'],ARRAY['organization_id'],true,'s','a','a',false,false,true,NULL),
-         ('cp_publication_intent_organization_id_ownership_id_fkey','f','cp_publication_intent','cp_publication_branch_ownership',ARRAY['organization_id','ownership_id'],ARRAY['organization_id','ownership_id'],true,'s','a','a',false,false,true,NULL),
-         ('cp_publication_intent_organization_id_run_id_attempt_numbe_fkey','f','cp_publication_intent','cp_hosted_attempt',ARRAY['organization_id','run_id','attempt_number','attempt_id'],ARRAY['organization_id','run_id','attempt_number','attempt_id'],true,'s','a','a',false,false,true,NULL),
-         ('cp_publication_intent_pkey','p','cp_publication_intent',NULL,ARRAY['organization_id','intent_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_intent_organization_id_approval_id_key','u','cp_publication_intent',NULL,ARRAY['organization_id','approval_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_intent_organization_id_candidate_id_key','u','cp_publication_intent',NULL,ARRAY['organization_id','candidate_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_capability_attempt_number_check','c','cp_publication_capability',NULL,ARRAY['attempt_number'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (attempt_number > 0)'),
-         ('cp_publication_capability_check','c','cp_publication_capability',NULL,ARRAY['expires_at','issued_at'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (expires_at > issued_at AND expires_at <= (issued_at + ''00:05:00''::interval))'),
-         ('cp_publication_capability_step_check','c','cp_publication_capability',NULL,ARRAY['step'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (step = ANY (ARRAY[''push_owned_branch''::text, ''create_draft_pull_request''::text]))'),
-         ('cp_publication_capability_organization_id_intent_id_fkey','f','cp_publication_capability','cp_publication_intent',ARRAY['organization_id','intent_id'],ARRAY['organization_id','intent_id'],true,'s','a','a',false,false,true,NULL),
-         ('cp_publication_capability_pkey','p','cp_publication_capability',NULL,ARRAY['organization_id','capability_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_capability_organization_id_intent_id_step_at_key','u','cp_publication_capability',NULL,ARRAY['organization_id','intent_id','step','attempt_number'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_begin_organization_id_capability_id_fkey','f','cp_publication_begin','cp_publication_capability',ARRAY['organization_id','capability_id'],ARRAY['organization_id','capability_id'],true,'s','a','a',false,false,true,NULL),
-         ('cp_publication_begin_pkey','p','cp_publication_begin',NULL,ARRAY['organization_id','capability_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_receipt_outcome_check','c','cp_publication_receipt',NULL,ARRAY['outcome'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (outcome = ANY (ARRAY[''succeeded''::text, ''failed''::text, ''outcome_unknown''::text]))'),
-         ('cp_publication_receipt_organization_id_capability_id_fkey','f','cp_publication_receipt','cp_publication_capability',ARRAY['organization_id','capability_id'],ARRAY['organization_id','capability_id'],true,'s','a','a',false,false,true,NULL),
-         ('cp_publication_receipt_pkey','p','cp_publication_receipt',NULL,ARRAY['organization_id','receipt_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_receipt_organization_id_capability_id_key','u','cp_publication_receipt',NULL,ARRAY['organization_id','capability_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_reconciliation_organization_id_capability_i_fkey','f','cp_publication_reconciliation','cp_publication_capability',ARRAY['organization_id','capability_id'],ARRAY['organization_id','capability_id'],true,'s','a','a',false,false,true,NULL),
-         ('cp_publication_reconciliation_sequence_check','c','cp_publication_reconciliation',NULL,ARRAY['sequence'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (sequence > 0)'),
-         ('cp_publication_reconciliation_pkey','p','cp_publication_reconciliation',NULL,ARRAY['organization_id','reconciliation_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_reconciliation_capability_sequence_key','u','cp_publication_reconciliation',NULL,ARRAY['organization_id','capability_id','sequence'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_completion_check','c','cp_publication_completion',NULL,ARRAY['candidate_digest','fencing_token_digest','push_receipt_digest','pull_request_receipt_digest','pull_request_external_digest','evidence_digest'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (candidate_digest ~ ''^sha256:[a-f0-9]{64}$''::text AND fencing_token_digest ~ ''^sha256:[a-f0-9]{64}$''::text AND push_receipt_digest ~ ''^sha256:[a-f0-9]{64}$''::text AND pull_request_receipt_digest ~ ''^sha256:[a-f0-9]{64}$''::text AND pull_request_external_digest ~ ''^sha256:[a-f0-9]{64}$''::text AND evidence_digest ~ ''^sha256:[a-f0-9]{64}$''::text)'),
-         ('cp_publication_completion_organization_id_intent_id_fkey','f','cp_publication_completion','cp_publication_intent',ARRAY['organization_id','intent_id'],ARRAY['organization_id','intent_id'],true,'s','a','a',false,false,true,NULL),
-         ('cp_publication_completion_organization_id_ownership_id_fkey','f','cp_publication_completion','cp_publication_branch_ownership',ARRAY['organization_id','ownership_id'],ARRAY['organization_id','ownership_id'],true,'s','a','a',false,false,true,NULL),
-         ('cp_publication_completion_pkey','p','cp_publication_completion',NULL,ARRAY['organization_id','completion_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_completion_organization_id_run_id_key','u','cp_publication_completion',NULL,ARRAY['organization_id','run_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL)
-       ), actual_constraint AS (
-         SELECT constraint_row.conname::text AS constraint_name,
-           constraint_row.contype::text AS constraint_type,
-           constraint_row.conrelid::regclass::text AS source_table,
-           CASE WHEN constraint_row.confrelid=0 THEN NULL ELSE constraint_row.confrelid::regclass::text END AS target_table,
-           ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.conkey) WITH ORDINALITY key(attnum,ordinal)
-             JOIN pg_attribute attribute ON attribute.attrelid=constraint_row.conrelid AND attribute.attnum=key.attnum ORDER BY ordinal) AS source_columns,
-           ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.confkey) WITH ORDINALITY key(attnum,ordinal)
-             JOIN pg_attribute attribute ON attribute.attrelid=constraint_row.confrelid AND attribute.attnum=key.attnum ORDER BY ordinal) AS target_columns,
-           constraint_row.convalidated AS validated,constraint_row.confmatchtype::text AS match_type,
-           constraint_row.confupdtype::text AS update_action,constraint_row.confdeltype::text AS delete_action,
-           constraint_row.condeferrable AS is_deferrable,constraint_row.condeferred AS is_deferred,
-           constraint_row.connoinherit AS noinherit,
-           CASE WHEN constraint_row.contype='c' THEN regexp_replace(
-             pg_get_constraintdef(constraint_row.oid,true),'\\s+',' ','g') ELSE NULL END AS check_definition
+    // EffectAuthority replaces the seven-table publication operation ledger.
+    // Startup checks both the positive shape and the absence of the superseded
+    // authority so an old image cannot silently become a second writer.
+    const effectAuthority = await pool.query<{ schema_ready: boolean }>(
+      `WITH legacy_table(name) AS (VALUES
+         ('cp_publication_branch_ownership'),('cp_publication_intent'),
+         ('cp_publication_capability'),('cp_publication_begin'),
+         ('cp_publication_receipt'),('cp_publication_reconciliation'),
+         ('cp_publication_completion')
+       ), expected_columns(table_name,column_names) AS (VALUES
+         ('cp_effect',ARRAY['organization_id','effect_id','idempotency_key','effect_kind',
+           'request_id','request_digest','runner_id','runner_generation','run_id',
+           'run_attempt_id','run_attempt_number','fencing_token_digest','candidate_id',
+           'candidate_digest','project_target_id','target_binding_digest',
+           'target_binding_generation','target_digest','target','policy_snapshot_id',
+           'policy_snapshot_digest','approval_request_id','approval_request_digest',
+           'approval_expires_at','approval_id','approval_digest','approval','state',
+           'current_attempt_number','current_evidence_digest','external_resource','reason_code',
+           'requested_at','created_at','updated_at']),
+         ('cp_effect_attempt',ARRAY['organization_id','permit_id','effect_id',
+           'effect_attempt_number','permit_kind','original_execute_permit_id',
+           'acquire_request_id','acquire_journal_digest','runner_id','runner_generation',
+           'request_digest','target_digest','approval_digest','permit_digest','permit',
+           'issued_at','expires_at','created_at']),
+         ('cp_effect_evidence',ARRAY['organization_id','evidence_id','effect_id','permit_id',
+           'effect_attempt_number','sequence','predecessor_evidence_digest','payload_digest',
+           'evidence_digest','evidence','observed_at','created_at'])
+       ), required_constraint(table_name,constraint_name,constraint_type) AS (VALUES
+         ('cp_project_target','cp_project_target_binding_generation_check','c'),
+         ('cp_effect','cp_effect_pkey','p'),
+         ('cp_effect','cp_effect_approval_shape_check','c'),
+         ('cp_effect','cp_effect_projection_shape_check','c'),
+         ('cp_effect_attempt','cp_effect_attempt_pkey','p'),
+         ('cp_effect_attempt','cp_effect_attempt_permit_shape_check','c'),
+         ('cp_effect_attempt','cp_effect_attempt_permit_window_check','c'),
+         ('cp_effect_evidence','cp_effect_evidence_pkey','p')
+       ), required_trigger(table_name,trigger_name,function_name) AS (VALUES
+         ('cp_effect','cp_effect_request_immutable','cp_reject_effect_request_mutation'),
+         ('cp_effect','cp_effect_approval_immutable','cp_reject_effect_approval_rewrite'),
+         ('cp_effect','cp_effect_delete_immutable','cp_reject_effect_authority_mutation'),
+         ('cp_effect','cp_effect_state_transition','cp_guard_effect_state_transition'),
+         ('cp_effect','cp_effect_projection','cp_project_effect_change'),
+         ('cp_effect_attempt','cp_effect_reconciliation_origin',
+           'cp_guard_effect_reconciliation_origin'),
+         ('cp_effect_attempt','cp_effect_attempt_immutable','cp_reject_effect_authority_mutation'),
+         ('cp_effect_evidence','cp_effect_evidence_immutable','cp_reject_effect_authority_mutation'),
+         ('cp_hosted_run','cp_hosted_run_cancel_unpermitted_effects',
+           'cp_cancel_unpermitted_effects_after_work_terminal')
+       ), authority_table(table_name) AS (VALUES
+         ('cp_effect'),('cp_effect_attempt'),('cp_effect_evidence')
+       ), catalog_line(line) AS (
+         SELECT concat_ws('|','column',table_row.relname,attribute.attnum::text,
+           attribute.attname,format_type(attribute.atttypid,attribute.atttypmod),
+           attribute.attnotnull::text,COALESCE(pg_get_expr(default_value.adbin,
+             default_value.adrelid,true),'<null>'))
+         FROM pg_class table_row
+         JOIN pg_attribute attribute ON attribute.attrelid=table_row.oid
+           AND attribute.attnum>0 AND NOT attribute.attisdropped
+         LEFT JOIN pg_attrdef default_value ON default_value.adrelid=table_row.oid
+           AND default_value.adnum=attribute.attnum
+         WHERE table_row.relnamespace=current_schema()::regnamespace
+           AND (table_row.relname IN (SELECT table_name FROM authority_table)
+             OR (table_row.relname='cp_project_target'
+               AND attribute.attname='binding_generation'))
+         UNION ALL
+         SELECT concat_ws('|','constraint',source_table.relname,constraint_row.conname,
+           constraint_row.contype::text,
+           array_to_string(ARRAY(SELECT attribute.attname::text
+             FROM unnest(constraint_row.conkey) WITH ORDINALITY key(attnum,ordinal)
+             JOIN pg_attribute attribute ON attribute.attrelid=constraint_row.conrelid
+               AND attribute.attnum=key.attnum ORDER BY key.ordinal),','),
+           CASE WHEN constraint_row.confrelid=0 THEN '<null>'
+             ELSE constraint_row.confrelid::regclass::text END,
+           array_to_string(ARRAY(SELECT attribute.attname::text
+             FROM unnest(constraint_row.confkey) WITH ORDINALITY key(attnum,ordinal)
+             JOIN pg_attribute attribute ON attribute.attrelid=constraint_row.confrelid
+               AND attribute.attnum=key.attnum ORDER BY key.ordinal),','),
+           constraint_row.convalidated::text,constraint_row.confmatchtype::text,
+           constraint_row.confupdtype::text,constraint_row.confdeltype::text,
+           constraint_row.condeferrable::text,constraint_row.condeferred::text,
+           constraint_row.connoinherit::text,
+           regexp_replace(pg_get_constraintdef(constraint_row.oid,true),'[[:space:]]+','','g'))
          FROM pg_constraint constraint_row
-         WHERE constraint_row.conrelid IN (SELECT to_regclass(table_name) FROM expected_spec)
-       ), expected_index(index_name,source_table,is_unique,is_valid,is_ready,key_count,
-            expression_definition,column_definitions,predicate_definition) AS (VALUES
-         ('cp_publication_branch_owner_key','cp_publication_branch_ownership',true,true,true,5,
-           'lower(provider), lower(owner), lower(repo), lower(branch)',
-           ARRAY['organization_id','lower(provider)','lower(owner)','lower(repo)','lower(branch)'],NULL)
-       ), actual_index AS (
-         SELECT index_relation.relname::text AS index_name,index_row.indrelid::regclass::text AS source_table,
-           index_row.indisunique AS is_unique,index_row.indisvalid AS is_valid,
-           index_row.indisready AS is_ready,index_row.indnkeyatts::integer AS key_count,
-           regexp_replace(pg_get_expr(index_row.indexprs,index_row.indrelid,true),'\\s+',' ','g') AS expression_definition,
-           ARRAY(SELECT COALESCE(attribute.attname::text,pg_get_indexdef(index_row.indexrelid,key.ordinal::integer,false))
-             FROM unnest(index_row.indkey) WITH ORDINALITY key(attnum,ordinal)
-             LEFT JOIN pg_attribute attribute ON attribute.attrelid=index_row.indrelid AND attribute.attnum=key.attnum
-             ORDER BY key.ordinal) AS column_definitions,
-           CASE WHEN index_row.indpred IS NULL THEN NULL ELSE regexp_replace(
-             pg_get_expr(index_row.indpred,index_row.indrelid,true),'\\s+',' ','g') END AS predicate_definition
-         FROM pg_index index_row JOIN pg_class index_relation ON index_relation.oid=index_row.indexrelid
-         WHERE index_row.indrelid IN (SELECT to_regclass(table_name) FROM expected_spec)
-           AND index_row.indexprs IS NOT NULL
-       ), immutable(table_name, trigger_name) AS (VALUES
-         ('cp_publication_branch_ownership','cp_publication_branch_ownership_immutable'),
-         ('cp_publication_intent','cp_publication_intent_immutable'),
-         ('cp_publication_capability','cp_publication_capability_immutable'),
-         ('cp_publication_begin','cp_publication_begin_immutable'),
-         ('cp_publication_receipt','cp_publication_receipt_immutable'),
-         ('cp_publication_reconciliation','cp_publication_reconciliation_immutable'),
-         ('cp_publication_completion','cp_publication_completion_immutable')
+         JOIN pg_class source_table ON source_table.oid=constraint_row.conrelid
+         WHERE source_table.relnamespace=current_schema()::regnamespace
+           AND (source_table.relname IN (SELECT table_name FROM authority_table)
+             OR (source_table.relname='cp_project_target'
+               AND constraint_row.conname='cp_project_target_binding_generation_check'))
+         UNION ALL
+         SELECT concat_ws('|','index',source_table.relname,index_table.relname,
+           index_row.indisunique::text,index_row.indisprimary::text,
+           index_row.indisvalid::text,index_row.indisready::text,
+           index_row.indnkeyatts::text,index_row.indnatts::text,
+           array_to_string(ARRAY(SELECT pg_get_indexdef(index_row.indexrelid,
+             ordinal::integer,false) FROM generate_series(1,index_row.indnatts)
+             ordinal ORDER BY ordinal),','),
+           COALESCE(regexp_replace(pg_get_expr(index_row.indpred,index_row.indrelid,true),
+             '[[:space:]]+','','g'),'<null>'))
+         FROM pg_index index_row
+         JOIN pg_class source_table ON source_table.oid=index_row.indrelid
+         JOIN pg_class index_table ON index_table.oid=index_row.indexrelid
+         WHERE source_table.relnamespace=current_schema()::regnamespace
+           AND source_table.relname IN (SELECT table_name FROM authority_table)
+         UNION ALL
+         SELECT concat_ws('|','trigger',source_table.relname,trigger_row.tgname,
+           trigger_row.tgenabled,trigger_row.tgtype::text,
+           COALESCE(pg_get_expr(trigger_row.tgqual,trigger_row.tgrelid,true),'<null>'),
+           encode(trigger_row.tgargs,'hex'),function_row.proname,
+           function_row.provolatile,function_row.prosecdef::text,
+           function_row.proisstrict::text,function_row.proleakproof::text,
+           language_row.lanname,
+           regexp_replace(function_row.prosrc,'[[:space:]]+','','g'))
+         FROM pg_trigger trigger_row
+         JOIN pg_class source_table ON source_table.oid=trigger_row.tgrelid
+         JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
+         JOIN pg_language language_row ON language_row.oid=function_row.prolang
+         WHERE source_table.relnamespace=current_schema()::regnamespace
+           AND NOT trigger_row.tgisinternal
+           AND (source_table.relname IN (SELECT table_name FROM authority_table)
+             OR (source_table.relname='cp_hosted_run'
+               AND trigger_row.tgname='cp_hosted_run_cancel_unpermitted_effects'))
+       ), catalog_fingerprint(value) AS (
+         SELECT md5(string_agg(line,E'\n' ORDER BY line)) FROM catalog_line
        ) SELECT (
-         NOT EXISTS (SELECT 1 FROM expected WHERE to_regclass(table_name) IS NULL)
-         AND NOT EXISTS (SELECT 1 FROM expected expected_column
-           LEFT JOIN pg_attribute attribute ON attribute.attrelid=to_regclass(expected_column.table_name)
-             AND attribute.attnum=expected_column.ordinal AND NOT attribute.attisdropped
-           LEFT JOIN pg_attrdef default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum
-           WHERE attribute.attname IS DISTINCT FROM expected_column.column_name
-             OR format_type(attribute.atttypid,attribute.atttypmod) IS DISTINCT FROM expected_column.column_type
-             OR NOT attribute.attnotnull OR default_value.oid IS NOT NULL)
-         AND NOT EXISTS (SELECT 1 FROM expected_spec expected_table
-           JOIN LATERAL (SELECT count(*)::integer AS count FROM pg_attribute
-             WHERE attrelid=to_regclass(expected_table.table_name) AND attnum>0 AND NOT attisdropped) actual ON true
-           WHERE actual.count<>cardinality(expected_table.column_names))
-         AND NOT EXISTS ((SELECT * FROM expected_constraint EXCEPT SELECT * FROM actual_constraint)
-           UNION ALL (SELECT * FROM actual_constraint EXCEPT SELECT * FROM expected_constraint))
-         AND NOT EXISTS ((SELECT * FROM expected_index EXCEPT SELECT * FROM actual_index)
-           UNION ALL (SELECT * FROM actual_index EXCEPT SELECT * FROM expected_index))
-         AND EXISTS (SELECT 1 FROM pg_indexes
-           WHERE schemaname=current_schema() AND tablename='cp_publication_reconciliation'
-             AND indexname='cp_publication_reconciliation_capability_idx')
-         AND NOT EXISTS (SELECT 1 FROM immutable expected_trigger WHERE NOT EXISTS (
-           SELECT 1 FROM pg_trigger trigger_row JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
-           WHERE trigger_row.tgrelid=to_regclass(expected_trigger.table_name)
-             AND trigger_row.tgname=expected_trigger.trigger_name AND trigger_row.tgenabled='O'
-             AND NOT trigger_row.tgisinternal AND trigger_row.tgtype=27 AND trigger_row.tgqual IS NULL
-             AND trigger_row.tgnargs=0 AND function_row.proname='cp_reject_publication_authority_mutation'
+         to_regclass('cp_effect') IS NOT NULL
+         AND to_regclass('cp_effect_attempt') IS NOT NULL
+         AND to_regclass('cp_effect_evidence') IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM legacy_table WHERE to_regclass(name) IS NOT NULL)
+         AND to_regprocedure('cp_reject_publication_authority_mutation()') IS NULL
+         AND NOT EXISTS (SELECT 1 FROM expected_columns expected WHERE
+           (SELECT array_agg(column_name::text ORDER BY ordinal_position)
+            FROM information_schema.columns WHERE table_schema=current_schema()
+              AND table_name=expected.table_name) IS DISTINCT FROM expected.column_names)
+         AND EXISTS (SELECT 1 FROM information_schema.columns
+           WHERE table_schema=current_schema() AND table_name='cp_project_target'
+             AND column_name='binding_generation' AND data_type='integer'
+             AND is_nullable='NO' AND column_default IS NULL)
+         AND NOT EXISTS (SELECT 1 FROM required_constraint expected WHERE NOT EXISTS (
+           SELECT 1 FROM pg_constraint constraint_row
+           WHERE constraint_row.conrelid=to_regclass(expected.table_name)
+             AND constraint_row.conname=expected.constraint_name
+             AND constraint_row.contype::text=expected.constraint_type
+             AND constraint_row.convalidated
+             AND (constraint_row.contype <> 'c' OR NOT constraint_row.connoinherit)))
+         AND NOT EXISTS (SELECT 1 FROM required_trigger expected WHERE NOT EXISTS (
+           SELECT 1 FROM pg_trigger trigger_row
+           JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
+           WHERE trigger_row.tgrelid=to_regclass(expected.table_name)
+             AND trigger_row.tgname=expected.trigger_name
+             AND trigger_row.tgenabled='O' AND NOT trigger_row.tgisinternal
+             AND function_row.proname=expected.function_name
              AND function_row.pronamespace=current_schema()::regnamespace))
-         AND EXISTS (SELECT 1 FROM pg_proc function_row JOIN pg_language language_row ON language_row.oid=function_row.prolang
-           WHERE function_row.proname='cp_reject_publication_authority_mutation'
-             AND function_row.pronamespace=current_schema()::regnamespace
-             AND function_row.pronargs=0 AND function_row.prorettype='trigger'::regtype
-             AND language_row.lanname='plpgsql' AND function_row.provolatile='v'
-             AND NOT function_row.prosecdef AND NOT function_row.proisstrict AND NOT function_row.proleakproof
-             AND regexp_replace(function_row.prosrc,'\\s+',' ','g') = ' BEGIN RAISE EXCEPTION ''publication_authority_immutable''; END ')
+         AND EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+           AND proname='cp_reject_effect_authority_mutation' AND pronargs=0
+           AND prorettype='trigger'::regtype
+           AND regexp_replace(prosrc,'[[:space:]]+','','g')=
+             'BEGINRAISEEXCEPTION''effect_authority_immutable'';END')
+         AND EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+           AND proname='cp_reject_effect_request_mutation' AND pronargs=0
+           AND prosrc LIKE '%effect_request_immutable%' AND prosrc LIKE '%IS DISTINCT FROM%')
+         AND EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+           AND proname='cp_reject_effect_approval_rewrite' AND pronargs=0
+           AND prosrc LIKE '%effect_approval_immutable%' AND prosrc LIKE '%OLD.approval_id%')
+         AND EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+           AND proname='cp_guard_effect_state_transition' AND pronargs=0
+           AND prosrc LIKE '%effect_state_transition_invalid%'
+           AND prosrc LIKE '%effect_terminal_projection_immutable%')
+         AND EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+           AND proname='cp_guard_effect_reconciliation_origin' AND pronargs=0
+           AND prosrc LIKE '%effect_reconciliation_origin_invalid%'
+           AND prosrc LIKE '%origin.permit_kind=''execute''%')
+         AND EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+           AND proname='cp_project_effect_change' AND pronargs=0
+           AND prosrc LIKE '%projection_revision = projection_revision + 1%')
+         AND EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+           AND proname='cp_cancel_unpermitted_effects_after_work_terminal' AND pronargs=0
+           AND prosrc LIKE '%work.cancelled_before_permit%')
+         AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname=current_schema()
+           AND tablename='cp_effect' AND indexname='cp_effect_dispatch_idx')
+         AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname=current_schema()
+           AND tablename='cp_effect_attempt' AND indexname='cp_effect_execute_attempt_key'
+           AND indexdef LIKE '%WHERE (permit_kind = ''execute''::text)%')
+         AND EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname=current_schema()
+           AND tablename='cp_effect_evidence' AND indexname='cp_effect_evidence_chain_idx')
+         AND (SELECT value FROM catalog_fingerprint) = '2d1e3961cf07a79a6cc1d40a61847116'
        ) AS schema_ready`,
     );
     const current = schema.rows[0]?.schema_ready === true
-      && publicationOperations.rows[0]?.schema_ready === true
+      && effectAuthority.rows[0]?.schema_ready === true
       && applied.size === migrations.length
       && migrations.every(
         (migration) => applied.get(migration.name) === migration.checksum,

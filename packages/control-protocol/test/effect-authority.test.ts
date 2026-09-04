@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EffectEvidenceV1Schema,
+  EffectEvidenceEnvelopeV1Schema,
   EffectExecutePermitV1Schema,
   EffectReconciliationPermitV1Schema,
   EffectRequestV1Schema,
@@ -205,6 +206,10 @@ describe("Effect Authority V1 permits", () => {
       targetDigest: digest("0"),
       permitDigest: await computeEffectPermitDigestV1({ ...permitInput, targetDigest: digest("0") }),
     })).resolves.toBe(false);
+    expect(await computeEffectPermitDigestV1({
+      ...permitInput,
+      predecessorEvidenceDigest: digest("7"),
+    })).not.toBe(permitDigest);
     expect(JSON.stringify(executePermitInput)).not.toMatch(/githubToken|checkoutPath|authorization/iu);
 
     expect(EffectExecutePermitV1Schema.safeParse({
@@ -220,6 +225,7 @@ describe("Effect Authority V1 permits", () => {
       permitId: "permit_2",
       permitKind: "reconcile" as const,
       originalExecutePermitId: "permit_1",
+      predecessorEvidenceDigest: digest("8"),
       observationPolicy: "github.exact_draft_pr.v1" as const,
     };
     const permitDigest = await computeEffectPermitDigestV1(reconciliation);
@@ -228,6 +234,10 @@ describe("Effect Authority V1 permits", () => {
       ...reconciliation,
       permitDigest,
     }).success).toBe(true);
+    expect(await computeEffectPermitDigestV1({
+      ...reconciliation,
+      predecessorEvidenceDigest: digest("7"),
+    })).not.toBe(permitDigest);
     expect(EffectExecutePermitV1Schema.safeParse({
       ...executePermitInput,
       permitDigest,
@@ -305,6 +315,11 @@ describe("Effect Authority V1 evidence", () => {
       ...envelope,
       evidenceDigest: digest("0"),
     })).resolves.toBe(false);
+    expect(EffectEvidenceEnvelopeV1Schema.safeParse({
+      ...envelope,
+      evidenceDigest: first,
+      observedAt: "2026-09-05T01:08:04.004Z",
+    }).success).toBe(false);
   });
 });
 
@@ -381,7 +396,7 @@ describe("Effect Authority V1 truthful views", () => {
     { ...common, state: "outcome_unknown" as const, currentAttemptNumber: 1,
       currentEvidenceDigest: digest("1"), reasonCode: "provider_timeout" },
     { ...common, state: "retry_eligible" as const, currentAttemptNumber: 1,
-      currentEvidenceDigest: digest("1"), reasonCode: "github.exact_absence_observed" as const },
+      currentEvidenceDigest: digest("1"), reasonCode: "local.provider_io_not_begun" as const },
     { ...common, state: "succeeded" as const, currentAttemptNumber: 1,
       currentEvidenceDigest: digest("1"), externalResource },
     { ...common, state: "attention" as const, currentAttemptNumber: 0,

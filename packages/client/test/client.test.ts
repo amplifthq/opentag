@@ -151,6 +151,7 @@ describe("@opentag/client Control V1", () => {
       targets: [{
         projectTargetId: "target_1",
         bindingDigest: `sha256:${"a".repeat(64)}`,
+        bindingGeneration: 1,
         provider: "github",
         owner: "acme",
         repo: "app",
@@ -197,6 +198,7 @@ describe("@opentag/client Control V1", () => {
       targets: [{
         projectTargetId: canonicalTarget.projectTargetId,
         bindingDigest,
+        bindingGeneration: 1,
         provider: canonicalTarget.provider,
         owner: canonicalTarget.owner,
         repo: canonicalTarget.repo,
@@ -270,6 +272,7 @@ describe("@opentag/client Control V1", () => {
       targets: [{
         projectTargetId: canonicalTarget.projectTargetId,
         bindingDigest: await computeGitHubProjectTargetBindingDigestV1(canonicalTarget),
+        bindingGeneration: 1,
         provider: "github",
         owner: canonicalTarget.owner,
         repo: canonicalTarget.repo,
@@ -312,6 +315,7 @@ describe("@opentag/client Control V1", () => {
         targets: [{
           projectTargetId: input.target.projectTargetId,
           bindingDigest: `sha256:${"f".repeat(64)}`,
+          bindingGeneration: 1,
           provider: "github",
           owner: "acme",
           repo: "private.app",

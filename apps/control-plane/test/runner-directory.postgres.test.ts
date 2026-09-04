@@ -476,10 +476,32 @@ describe.skipIf(!TEST_DATABASE_URL)("Runner Directory PostgreSQL module", () => 
         {
           projectTargetId: "target_1",
           bindingDigest: targetBindingDigest,
+          bindingGeneration: 1,
           owner: "acme",
           repo: "demo",
         },
       ],
+    });
+
+    await expect(directory.upsertProjectTarget(targetCommand)).resolves.toMatchObject({
+      kind: "upserted",
+      context: { targets: [{ bindingDigest: targetBindingDigest, bindingGeneration: 1 }] },
+    });
+    const changedTarget = { ...target, defaultBranch: "trunk" };
+    const changedBindingDigest = await computeGitHubProjectTargetBindingDigestV1(changedTarget);
+    await expect(directory.upsertProjectTarget({
+      principal: authenticated.principal,
+      request: {
+        ...targetCommand.request,
+        requestId: "request_target_2",
+        target: changedTarget,
+      },
+    })).resolves.toMatchObject({
+      kind: "upserted",
+      context: { targets: [{
+        bindingDigest: changedBindingDigest,
+        bindingGeneration: 2,
+      }] },
     });
   });
 

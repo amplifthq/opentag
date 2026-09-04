@@ -79,6 +79,17 @@ describe("checked-in PostgreSQL migrations", () => {
     expect(publication?.sql).toContain("cp_publication_completion_immutable");
     expect(publication?.sql).toContain("cp_publication_receipt_immutable");
   });
+  it("replaces publication operations with the EffectAuthority ledger", async () => {
+    const migrations = await loadSqlMigrations(join(process.cwd(), "apps/control-plane/migrations"));
+    const effects = migrations.find(({ name }) => name === "0023_effect_authority.sql");
+    expect(effects?.sql).toContain("CREATE TABLE cp_effect (");
+    expect(effects?.sql).toContain("CREATE TABLE cp_effect_attempt (");
+    expect(effects?.sql).toContain("CREATE TABLE cp_effect_evidence (");
+    expect(effects?.sql).toContain("cp_effect_projection");
+    expect(effects?.sql).toContain("effect_authority_cutover_reconciliation_required");
+    expect(effects?.sql).toContain("DROP TABLE cp_publication_completion");
+    expect(effects?.sql).not.toContain("CREATE VIEW");
+  });
   it("serializes migration application and records the reviewed checksum", async () => {
     const harness = migrationHarness();
     const first = migration("0000_control_plane.sql", "CREATE TABLE example(id text)");
