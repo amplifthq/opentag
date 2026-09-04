@@ -1029,12 +1029,83 @@ describe("hosted assigned Run import", () => {
         await expect(second.getHostedClaimOperationForRetry({ destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1" }))
             .resolves.toMatchObject({ request: value.request, state: "pending" });
         await second.importHostedAssignedRun(value);
+        expect(secondSqlite.prepare("SELECT state FROM hosted_claim_operations WHERE operation_id = ?")
+            .get(value.request.operationId)).toEqual({ state: "claimed" });
         secondSqlite.close();
         const thirdSqlite = new Database(path);
         migratePairedRunnerSchema(thirdSqlite);
+        expect(thirdSqlite.prepare("SELECT state FROM hosted_claim_operations WHERE operation_id = ?")
+            .get(value.request.operationId)).toEqual({ state: "claimed" });
         await expect(createPairedRunnerRepository(drizzle(thirdSqlite)).importHostedAssignedRun(value))
             .resolves.toMatchObject({ outcome: "replayed" });
         thirdSqlite.close();
+    });
+    it("retains an exact pending claim across request and empty-response crash windows, then forgets it atomically", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "opentag-empty-claim-recovery-"));
+        tempDirs.push(directory);
+        const path = join(directory, "store.sqlite");
+        const value = await fixture();
+
+        const firstSqlite = new Database(path);
+        migratePairedRunnerSchema(firstSqlite);
+        const first = createPairedRunnerRepository(drizzle(firstSqlite));
+        await begin(first, value);
+        firstSqlite.close();
+
+        const secondSqlite = new Database(path);
+        migratePairedRunnerSchema(secondSqlite);
+        const second = createPairedRunnerRepository(drizzle(secondSqlite));
+        await expect(begin(second, value)).resolves.toMatchObject({
+            outcome: "replayed",
+            operation: { request: value.request, state: "pending" }
+        });
+        secondSqlite.close();
+
+        const thirdSqlite = new Database(path);
+        migratePairedRunnerSchema(thirdSqlite);
+        const third = createPairedRunnerRepository(drizzle(thirdSqlite));
+        await expect(third.getHostedClaimOperationForRetry({
+            destinationId: "cloud-1",
+            organizationId: "org-1",
+            runnerId: "runner-1"
+        })).resolves.toMatchObject({ request: value.request, state: "pending" });
+        await expect(third.acknowledgeHostedClaimEmpty({
+            operationId: value.request.operationId,
+            requestId: "wrong-request"
+        })).rejects.toMatchObject({ code: "HOSTED_CLAIM_OPERATION_CONFLICT" });
+        expect(thirdSqlite.prepare("SELECT state FROM hosted_claim_operations").get())
+            .toEqual({ state: "pending" });
+
+        thirdSqlite.exec(`CREATE TRIGGER abort_empty_claim_cleanup
+      BEFORE DELETE ON hosted_claim_operations
+      BEGIN SELECT RAISE(ABORT, 'injected terminal claim cleanup failure'); END;`);
+        await expect(third.acknowledgeHostedClaimEmpty({
+            operationId: value.request.operationId,
+            requestId: value.request.requestId
+        })).rejects.toThrow("injected terminal claim cleanup failure");
+        expect(thirdSqlite.prepare("SELECT state FROM hosted_claim_operations").get())
+            .toEqual({ state: "pending" });
+        thirdSqlite.exec("DROP TRIGGER abort_empty_claim_cleanup");
+
+        await expect(third.acknowledgeHostedClaimEmpty({
+            operationId: value.request.operationId,
+            requestId: value.request.requestId
+        })).resolves.toMatchObject({ state: "empty", acknowledgedAt: expect.any(String) });
+        expect(thirdSqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations").get())
+            .toEqual({ count: 0 });
+        thirdSqlite.close();
+
+        const fourthSqlite = new Database(path);
+        migratePairedRunnerSchema(fourthSqlite);
+        const fourth = createPairedRunnerRepository(drizzle(fourthSqlite));
+        await expect(fourth.getHostedClaimOperationForRetry({
+            destinationId: "cloud-1",
+            organizationId: "org-1",
+            runnerId: "runner-1"
+        })).resolves.toBeNull();
+        expect(fourthSqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations").get())
+            .toEqual({ count: 0 });
+        fourthSqlite.close();
     });
     it("expires recovery fail-closed, then recovers and starts only the later Cloud attempt", async () => {
         vi.useFakeTimers();
@@ -1497,6 +1568,8 @@ describe("hosted assigned Run import", () => {
         const proposed = await fixture({ claimOperationId: "claim-op-2", requestId: "request-2" });
         await expect(begin(repo, proposed)).resolves.toMatchObject({ outcome: "replayed", operation: { request: first.request } });
         await repo.acknowledgeHostedClaimEmpty({ operationId: first.request.operationId, requestId: first.request.requestId });
+        expect(sqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations").get())
+            .toEqual({ count: 0 });
         await expect(begin(repo, proposed)).resolves.toMatchObject({ outcome: "created", operation: { request: proposed.request } });
         await expect(repo.beginHostedClaimOperation({
             destinationId: "other-cloud",
@@ -1504,6 +1577,33 @@ describe("hosted assigned Run import", () => {
             runnerId: "runner-1",
             request: { ...proposed.request, requestId: "drifted" }
         })).rejects.toMatchObject({ code: "HOSTED_CLAIM_OPERATION_CONFLICT" });
+        expect(sqlite.prepare("SELECT state FROM hosted_claim_operations").get())
+            .toEqual({ state: "pending" });
+    });
+    it("keeps retained claim rows at zero across sustained empty polling", async () => {
+        const sqlite = new Database(":memory:");
+        migratePairedRunnerSchema(sqlite);
+        const repo = createPairedRunnerRepository(drizzle(sqlite));
+        let maximumRetained = 0;
+        for (let index = 0; index < 512; index += 1) {
+            const claimRequest = request(`empty-operation-${index}`, `empty-request-${index}`);
+            await repo.beginHostedClaimOperation({
+                destinationId: "cloud-1",
+                organizationId: "org-1",
+                runnerId: "runner-1",
+                request: claimRequest
+            });
+            await repo.acknowledgeHostedClaimEmpty({
+                operationId: claimRequest.operationId,
+                requestId: claimRequest.requestId
+            });
+            const row = sqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations")
+                .get() as { count: number };
+            maximumRetained = Math.max(maximumRetained, row.count);
+        }
+        expect(maximumRetained).toBe(0);
+        expect(sqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations").get())
+            .toEqual({ count: 0 });
     });
     it("terminally abandons only an authoritative pending-operation rejection", async () => {
         const sqlite = new Database(":memory:");
@@ -1511,11 +1611,24 @@ describe("hosted assigned Run import", () => {
         const repo = createPairedRunnerRepository(drizzle(sqlite));
         const value = await fixture();
         await begin(repo, value);
+        sqlite.exec(`CREATE TRIGGER abort_abandoned_claim_cleanup
+      BEFORE DELETE ON hosted_claim_operations
+      BEGIN SELECT RAISE(ABORT, 'injected abandoned claim cleanup failure'); END;`);
+        await expect(repo.abandonHostedClaimOperation({
+            operationId: value.request.operationId,
+            requestId: value.request.requestId,
+            reasonCode: "stale_control_authority"
+        })).rejects.toThrow("injected abandoned claim cleanup failure");
+        expect(sqlite.prepare("SELECT state FROM hosted_claim_operations").get())
+            .toEqual({ state: "pending" });
+        sqlite.exec("DROP TRIGGER abort_abandoned_claim_cleanup");
         await expect(repo.abandonHostedClaimOperation({
             operationId: value.request.operationId,
             requestId: value.request.requestId,
             reasonCode: "stale_control_authority"
         })).resolves.toMatchObject({ state: "empty", terminalReasonCode: "stale_control_authority" });
+        expect(sqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations").get())
+            .toEqual({ count: 0 });
         await expect(repo.getHostedClaimOperationForRetry({
             destinationId: "cloud-1",
             organizationId: "org-1",

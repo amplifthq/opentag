@@ -2615,19 +2615,24 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 const current = tx.select().from(hostedClaimOperations).where(and(eq(hostedClaimOperations.operationId, input.operationId), eq(hostedClaimOperations.requestId, input.requestId))).limit(1).get();
                 if (!current)
                     throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
-                if (current.state === "empty")
-                    return hostedClaimOperationFromRow(current);
                 if (current.state !== "pending") {
                     throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
                 }
-                tx.update(hostedClaimOperations).set({
+                const terminal = hostedClaimOperationFromRow({
+                    ...current,
                     state: "empty",
                     activeKey: null,
                     updatedAt: acknowledgedAt,
                     acknowledgedAt
-                }).where(and(eq(hostedClaimOperations.operationId, input.operationId), eq(hostedClaimOperations.state, "pending"))).run();
-                return hostedClaimOperationFromRow(tx.select().from(hostedClaimOperations)
-                    .where(eq(hostedClaimOperations.operationId, input.operationId)).limit(1).get()!);
+                });
+                const deleted = tx.delete(hostedClaimOperations).where(and(
+                    eq(hostedClaimOperations.operationId, input.operationId),
+                    eq(hostedClaimOperations.requestId, input.requestId),
+                    eq(hostedClaimOperations.state, "pending")
+                )).run();
+                if (deleted.changes !== 1)
+                    throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+                return terminal;
             });
         },
         async abandonHostedClaimOperation(input: {
@@ -2640,21 +2645,25 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 const current = tx.select().from(hostedClaimOperations).where(and(eq(hostedClaimOperations.operationId, input.operationId), eq(hostedClaimOperations.requestId, input.requestId))).limit(1).get();
                 if (!current)
                     throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
-                if (current.state === "empty" && current.terminalReasonCode === input.reasonCode) {
-                    return hostedClaimOperationFromRow(current);
-                }
                 if (current.state !== "pending") {
                     throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
                 }
-                tx.update(hostedClaimOperations).set({
+                const terminal = hostedClaimOperationFromRow({
+                    ...current,
                     state: "empty",
                     activeKey: null,
                     terminalReasonCode: input.reasonCode,
                     updatedAt: acknowledgedAt,
                     acknowledgedAt
-                }).where(and(eq(hostedClaimOperations.operationId, input.operationId), eq(hostedClaimOperations.state, "pending"))).run();
-                return hostedClaimOperationFromRow(tx.select().from(hostedClaimOperations)
-                    .where(eq(hostedClaimOperations.operationId, input.operationId)).limit(1).get()!);
+                });
+                const deleted = tx.delete(hostedClaimOperations).where(and(
+                    eq(hostedClaimOperations.operationId, input.operationId),
+                    eq(hostedClaimOperations.requestId, input.requestId),
+                    eq(hostedClaimOperations.state, "pending")
+                )).run();
+                if (deleted.changes !== 1)
+                    throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+                return terminal;
             });
         },
         async getHostedProposalSettlementForRetry(input: {
