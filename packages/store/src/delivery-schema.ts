@@ -33,34 +33,7 @@ function bootstrapDeliveryJournalInTransaction(sqlite: Database.Database): void 
   if (existing && (!existingColumns?.has("organization_id") || !existingColumns.has("deadline_at")
     || existing.sql.includes("UNIQUE (scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key)")
     || existing.sql.includes("UNIQUE (organization_id, scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key)"))) {
-    sqlite.exec(`
-      DROP TRIGGER IF EXISTS delivery_attempts_identity_immutable;
-      DROP TRIGGER IF EXISTS delivery_attempts_transition_guard;
-      DROP TRIGGER IF EXISTS delivery_attempts_immutable_delete;
-      DROP INDEX IF EXISTS delivery_attempts_claim_idx;
-      DROP INDEX IF EXISTS delivery_attempts_idempotency_idx;
-      ALTER TABLE delivery_attempts RENAME TO delivery_attempts_legacy;
-    `);
-    bootstrapDeliveryJournalInTransaction(sqlite);
-    const legacyRows = sqlite.prepare("PRAGMA table_info(delivery_attempts_legacy)").all() as Array<{ name: string }>;
-    const targetRows = sqlite.prepare("PRAGMA table_info(delivery_attempts)").all() as Array<{ name: string }>;
-    const legacyColumns = new Set(legacyRows.map(({ name }) => name));
-    const targetColumns = targetRows.map(({ name }) => name);
-    const selectExpressions = targetColumns.map((name) => legacyColumns.has(name)
-      ? `"${name}"` : name === "organization_id" ? "'local_direct'"
-        : name === "deadline_at" ? "'9999-12-31T23:59:59.999Z'" : "NULL");
-    const legacyCount = (sqlite.prepare("SELECT count(*) AS count FROM delivery_attempts_legacy")
-      .get() as { count: number }).count;
-    sqlite.exec(`INSERT INTO delivery_attempts (${targetColumns.map((name) => `"${name}"`).join(",")})
-      SELECT ${selectExpressions.join(",")} FROM delivery_attempts_legacy;`);
-    const copiedCount = (sqlite.prepare("SELECT count(*) AS count FROM delivery_attempts")
-      .get() as { count: number }).count;
-    const integrity = (sqlite.prepare("PRAGMA integrity_check('delivery_attempts')")
-      .get() as { integrity_check: string }).integrity_check;
-    if (copiedCount !== legacyCount || integrity !== "ok")
-      throw new Error("delivery_attempts upgrade validation failed");
-    sqlite.exec("DROP TABLE delivery_attempts_legacy");
-    return;
+    throw new Error("Incompatible delivery_attempts schema; start with a fresh OpenTag local database.");
   }
   const errors = DELIVERY_ERROR_CODES.map((code) => `'${code}'`).join(", ");
   sqlite.exec(`

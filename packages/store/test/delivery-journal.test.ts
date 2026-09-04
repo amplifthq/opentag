@@ -146,7 +146,7 @@ describe('fresh delivery journal', () => {
     ]));
   });
 
-  it('rolls back a failed tenant-qualified legacy upgrade to the usable original table', () => {
+  it('rejects a legacy journal without mutating it', () => {
     const sqlite = new Database(':memory:');
     sqlite.exec(`CREATE TABLE delivery_attempts (
       id TEXT PRIMARY KEY, scope_kind TEXT NOT NULL, scope_id TEXT NOT NULL,
@@ -162,49 +162,6 @@ describe('fresh delivery journal', () => {
     expect(sqlite.prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name").all())
       .toEqual([{ name: 'delivery_attempts' }]);
     sqlite.close();
-  });
-
-  it('atomically upgrades a real legacy journal, preserves rows and states, and reopens', () => {
-    const directory = mkdtempSync(join(tmpdir(), 'opentag-delivery-migration-'));
-    const path = join(directory, 'journal.sqlite');
-    try {
-      const current = setup(path);
-      current.repository.recordIntent(intent(), {});
-      current.repository.recordIntent(intent({ sideEffectIntentId: 'intent_2',
-        idempotencyKey: 'delivery_2' }), {});
-      const claim = current.repository.claimNext(); if (!claim) throw new Error('missing claim');
-      const begin = current.repository.markBegin(markers(claim)); if (!begin) throw new Error('missing begin');
-      current.repository.settleOrReadTerminal({ ...begin, outcome: 'accepted',
-        evidenceDigest: digest('accepted') });
-      const createSql = (current.sqlite.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='delivery_attempts'")
-        .get() as { sql: string }).sql;
-      current.sqlite.exec(`DROP TRIGGER delivery_attempts_identity_immutable;
-        DROP TRIGGER delivery_attempts_transition_guard;
-        DROP TRIGGER delivery_attempts_immutable_delete;
-        DROP INDEX delivery_attempts_claim_idx;
-        DROP INDEX delivery_attempts_idempotency_idx;
-        ALTER TABLE delivery_attempts RENAME TO delivery_attempts_current;`);
-      const legacySql = createSql
-        .replace('organization_id TEXT NOT NULL, ', '')
-        .replace('deadline_at TEXT NOT NULL, ', '')
-        .replace(/\)\s*$/u, ', UNIQUE (scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key))');
-      current.sqlite.exec(legacySql);
-      const columns = (current.sqlite.prepare('PRAGMA table_info(delivery_attempts)').all() as Array<{ name: string }>)
-        .map(({ name }) => name);
-      current.sqlite.exec(`INSERT INTO delivery_attempts (${columns.map((name) => `"${name}"`).join(',')})
-        SELECT ${columns.map((name) => `"${name}"`).join(',')} FROM delivery_attempts_current;
-        DROP TABLE delivery_attempts_current;`);
-      bootstrapDeliveryJournal(current.sqlite);
-      expect(current.sqlite.prepare('SELECT organization_id,state FROM delivery_attempts ORDER BY state').all())
-        .toEqual([{ organization_id: 'local_direct', state: 'accepted' },
-          { organization_id: 'local_direct', state: 'pending' }]);
-      expect((current.sqlite.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='delivery_attempts'")
-        .get() as { sql: string }).sql).not.toContain('UNIQUE (scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key)');
-      current.sqlite.close();
-      const reopened = new Database(path); bootstrapDeliveryJournal(reopened);
-      expect(reopened.prepare('SELECT count(*) count FROM delivery_attempts').get()).toEqual({ count: 2 });
-      reopened.close();
-    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
   it('records exact replay idempotently and rejects conflicting identities', () => {

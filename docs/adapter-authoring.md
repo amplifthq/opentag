@@ -1,307 +1,119 @@
 # Adapter Authoring
 
-OpenTag adapters bring new work apps into the same protocol loop:
+## Status
+
+Current supported adapter boundary, 2026-09-04.
+
+OpenTag keeps Slack provider behavior behind a narrow adapter boundary. GitHub
+is a Project Target and publication/readback provider, not a second Source App.
 
 ```text
-work app event -> OpenTagEvent -> dispatcher -> runner -> delivery intent -> side-effect kernel
+Slack event -> OpenTagEvent -> Control Plane -> Run/Attempt -> Runner
+                                                   |
+                                  GitHub publication/readback when governed
 ```
 
-Use this guide when adding a new GitHub-like, Slack-like, Lark-like, or webhook
-surface. For runtime configuration, see [Configuration](./configuration.md).
+## Adapter types
 
-## Adapter Types
-
-OpenTag currently uses three adapter shapes:
-
-| Adapter type | Purpose | Current examples |
+| Adapter type | Purpose | Current example |
 | --- | --- | --- |
-| Ingress normalizer | Converts a platform event into `OpenTagEvent` | `@opentag/github`, `@opentag/slack`, `@opentag/telegram` |
-| Ingress app | Receives signed webhooks/events and calls the dispatcher | `apps/github-probot`, `apps/slack-events`, `apps/telegram-events` |
-| Delivery adapter | Prepares one provider request for the side-effect kernel | `SlackDeliveryAdapter` |
+| Ingress normalizer | Converts a signed Slack event into `OpenTagEvent` | `@opentag/slack` |
+| Ingress app | Receives signed Slack events and calls the Control Plane | `apps/control-plane` |
+| Target adapter | Resolves GitHub target and readback evidence | `@opentag/github` |
+| Delivery adapter | Prepares one governed provider request | Slack delivery side-effect kernel |
 
-Future app support should arrive through these adapters, not by adding a new
-execution architecture. The dispatcher and runner contracts should stay shared.
+Adapters translate provider shape into OpenTag contracts. They do not own Run,
+Attempt, lease, approval, retry, cancellation, receipt, or completion state.
 
-## Boundary Rules
+## Boundary rules
 
-- Adapters translate platform shape into OpenTag protocol shape.
-- Adapters should ignore ambient messages unless there is an explicit mention or
-  command trigger.
-- Adapters should not choose a local checkout directly. Bindings map work app
-  containers to repositories and runners.
-- Adapters should not execute agent code. Runners and executors own execution.
-- Adapters should not bake one team's workflow method into core protocol fields.
-  Put opinionated behavior in recipes or policy.
-- Official adapters should use stable, provider-specific ids for events,
-  callbacks, and thread keys.
+- Verify Slack signatures before parsing or admitting source events.
+- Preserve stable provider event IDs, message IDs, thread keys, and target
+  references.
+- Normalize provider data into typed, bounded OpenTag fields.
+- Keep provider credentials outside source events, prompts, logs, and durable
+  presentation payloads.
+- Do not choose a local checkout or Runner directly; bindings and routing own
+  those decisions.
+- Do not execute Agent code in an adapter; the paired Runner owns execution.
+- Do not turn provider API success into completion without a provider
+  observation or material-action receipt.
+- Treat an ambiguous provider result as `outcome_unknown`; never blind-retry a
+  material action.
 
-## Core Schema Check
+## Slack ingress
 
-`@opentag/core` does not whitelist product providers. Adapters may introduce
-provider ids such as `github`, `slack`, `linear`, `jira`, `teams`, or `discord`
-without changing core schema.
+Slack is the supported Source App. The ingress adapter should:
 
-Keep platform vocabulary at the adapter boundary:
+1. verify the raw request signature;
+2. reject stale, malformed, or duplicate events according to the source
+   delivery contract;
+3. preserve channel, thread, message, actor, and application identity;
+4. map the event to the bounded OpenTag context packet;
+5. submit it to the Control Plane;
+6. render only the semantic status or action receipt returned by OpenTag.
 
-- use `source`, `actor.provider`, and `callback.provider` for the external
-  system that emitted or receives the event;
-- use context pointers shaped as `{ provider?: string, kind: string, uri: string }`;
-- use generic pointer kinds when the object is protocol-native, for example
-  `file`, `url`, or `text`;
-- use provider-scoped pointer kinds for platform objects, for example
-  `{ provider: "github", kind: "issue" }` or
-  `{ provider: "lark", kind: "message" }`;
-- populate `workItem` when the event is attached to a canonical external unit of
-  work such as an issue, pull request, task, ticket, or document.
+The adapter must not create a second task queue or decide which Runner owns a
+Run. It may apply source-thread presentation policy such as concise status
+updates and attention-required routing.
 
-Do not pretend a Jira actor is a GitHub actor just to reuse an existing adapter.
-The provider string is intentionally open; adapters should be honest and stable.
+## GitHub target and readback
 
-## Normalizer Checklist
+GitHub is the supported Project Target. Target adapters may:
 
-An ingress normalizer should produce `OpenTagEvent | null`.
+- resolve `github:owner/repo` identity;
+- identify issues, pull requests, branches, and required checks;
+- prepare or publish an explicitly approved artifact;
+- read back provider state and return evidence with its observed revision.
 
-Return `null` when:
+Publication is a material action. It requires current Run/Attempt fencing,
+policy and approval checks, a stable idempotency key, and a receipt. Readback
+is evidence and must retain its assurance level; reported state is not the same
+as provider-verified state.
 
-- the event is not a user-authored trigger;
-- the mention targets another bot or agent;
-- the command text is empty after removing the platform mention;
-- the source container is not bound to a repository or allowed work context.
+## ACP execution boundary
 
-Populate these fields carefully:
+Adapters do not launch ACP processes. The paired Runner creates the Attempt,
+sets the approved workspace and context, applies grants, starts the configured
+ACP executor, and reports lifecycle/evidence. See [ACP agent integration](./acp-agent-integration.md).
 
-| Field | Guidance |
-| --- | --- |
-| `id` | Stable and namespaced, for example `evt_lark_message_<id>` |
-| `source` | Provider or generic source accepted by `SourceSchema` |
-| `sourceEventId` | Raw platform event id |
-| `receivedAt` | ISO timestamp from the platform event or ingress clock |
-| `actor` | Provider identity, user id, handle, and organization/team id when available |
-| `target` | Mention text, `agentId`, and optional executor hint |
-| `command` | Use `parseOpenTagMention` for literal `@opentag`; use `commandFromRawText` after stripping platform mentions |
-| `context` | Durable pointers to the issue, thread, message, file, URL, or text |
-| `workItem` | Canonical external work item when one exists; omit for pure chat mentions that only point to a conversation |
-| `permissions` | Smallest permissions implied by the command |
-| `callback` | Provider, callback URI, and stable `threadKey` when callbacks target a thread |
-| `metadata` | Provider-specific ids needed for binding, routing, or debugging |
+The Agent must not receive Slack application credentials or post directly to
+the Slack source thread. Any external write goes through the material-action
+boundary.
 
-## Command Parsing
+## Presentation
 
-Use the shared command parser instead of inventing adapter-specific commands.
+Adapters receive semantic presentations and may render Slack Block Kit,
+GitHub Markdown, or bounded plain text as appropriate. They must preserve:
 
-- Use `parseOpenTagMention(text)` when the source text contains literal
-  `@opentag`.
-- Use `commandFromRawText(text)` when the platform has already resolved the bot
-  mention and you only have the command body.
-- Preserve parser diagnostics in `command.parsed`; they help runners and audit
-  views explain weak commands.
-- Forward `executorHint` from parsed commands into `target.executorHint`.
+- action state (`ready_to_apply`, `needs_approval`, `needs_setup`, or
+  `unsupported`);
+- target and impact;
+- approval requirement;
+- safe next action;
+- receipt, evidence, or reconciliation status.
 
-Intent defaults:
+They must not expose raw ACP frames, unbounded tool traces, credentials,
+internal secrets, or unsupported provider claims.
 
-| Intent | Typical permissions |
-| --- | --- |
-| `review`, `explain`, `investigate` | callback permission plus runner permission |
-| `fix`, `run` | callback, runner, repo read/write, and PR permission when the surface supports code work |
-| `unknown` | callback and runner only, unless policy upgrades it later |
+## Testing checklist
 
-## Context Pointers
+An adapter change should cover:
 
-Context pointers should point to the source material without copying more data
-than needed:
+- signature verification before parsing and side effects;
+- duplicate and stale event handling;
+- stable source/thread/target identity;
+- bounded malformed input and output;
+- credential redaction;
+- unsupported capability behavior;
+- action idempotency and stale-fence rejection;
+- provider timeout and `outcome_unknown` handling;
+- semantic Slack/GitHub rendering without a second lifecycle authority.
 
-- issue, PR, ticket, task, or thread URL;
-- source comment or message URL;
-- file, line, range, and URL references parsed from command flags;
-- short text context only when the source app has no durable URL.
+## Related documents
 
-Set `visibility` to `public`, `private`, or `organization` based on the source
-container. Do not mark private work as public just because the runner is local.
-
-## Delivery Routes
-
-The event callback address is routing input for a delivery intent. It does not
-authorize direct Provider I/O from the dispatcher:
-
-```ts
-callback: {
-  provider: "slack",
-  uri: "https://slack.com/api/chat.postMessage",
-  threadKey: "T123|C123|1710000000.000100"
-}
-```
-
-Use `threadKey` whenever a platform needs more than a URL to route replies. The
-Slack adapter encodes `teamId`, `channelId`, and `threadTs` for this reason.
-
-Delivery adapters should:
-
-- prepare acknowledgement and final requests for the source thread;
-- keep routine progress audit-only unless the adapter policy says otherwise;
-- treat provider response bodies as authoritative when the provider can return
-  HTTP 200 with an error payload;
-- return only bounded, non-secret evidence to the kernel;
-- perform Provider I/O only after the kernel durably records `provider_io_begun`.
-
-## Binding Model
-
-Do not create a second execution model for chat surfaces. Chat adapters should
-resolve to the same Project Target and runner bindings used by GitHub-shaped
-runs.
-
-Current Slack behavior is the model:
-
-```json
-{
-  "teamId": "T123",
-  "channelId": "C123",
-  "owner": "acme",
-  "repo": "demo"
-}
-```
-
-That binding lets a Slack thread create a run against the `acme/demo` Project
-Target, then the daemon claims it only if its Project Target binding allows it.
-
-For a new app, define the smallest binding that maps the app container to the
-work context owner. Examples:
-
-| App surface | Likely binding |
-| --- | --- |
-| Lark chat | `chatId -> Project Target ref` |
-| Linear project | `teamId/projectId -> Project Target ref` |
-| Jira project | `siteId/projectKey -> Project Target ref` |
-| Microsoft Teams channel | `tenantId/teamId/channelId -> Project Target ref` |
-
-## Package Layout
-
-Use the existing package split as the default:
-
-```text
-packages/<adapter>/
-  src/index.ts
-  src/normalize.ts
-  src/render.ts
-  test/normalize.test.ts
-  test/render.test.ts
-
-apps/<adapter>-events/
-  src/index.ts
-  src/app.ts
-  test/app.test.ts
-```
-
-Keep SDK-specific dependencies in the adapter package or ingress app. Do not add
-provider SDKs to `@opentag/core`.
-
-## Minimal Normalizer Example
-
-This example uses Lark because `lark` is already a supported provider in core.
-A new provider should first extend the core enums.
-
-```ts
-import { commandFromRawText, type OpenTagEvent } from "@opentag/core";
-
-type LarkMessageMentionInput = {
-  eventId: string;
-  messageId: string;
-  chatId: string;
-  userId: string;
-  textAfterMention: string;
-  receivedAt: string;
-  binding: {
-    owner: string;
-    repo: string;
-  };
-};
-
-export function normalizeLarkMessageMention(input: LarkMessageMentionInput): OpenTagEvent | null {
-  const rawText = input.textAfterMention.trim();
-  if (!rawText) return null;
-
-  const command = commandFromRawText(rawText);
-
-  return {
-    id: `evt_lark_message_${input.eventId}`,
-    source: "lark",
-    sourceEventId: input.eventId,
-    receivedAt: input.receivedAt,
-    actor: {
-      provider: "lark",
-      providerUserId: input.userId,
-      organizationId: input.chatId
-    },
-    target: {
-      mention: "@opentag",
-      agentId: "opentag",
-      ...(command.parsed?.executorHint ? { executorHint: command.parsed.executorHint } : {})
-    },
-    command,
-    context: [
-      {
-        provider: "lark",
-        kind: "message",
-        uri: `lark://chat/${input.chatId}/message/${input.messageId}`,
-        visibility: "organization",
-        title: "Lark message"
-      }
-    ],
-    permissions: [
-      { scope: "chat:postMessage", reason: "reply in the originating Lark thread" },
-      { scope: "runner:local", reason: "execute the run on an approved runner" }
-    ],
-    callback: {
-      provider: "lark",
-      uri: `lark://chat/${input.chatId}/message/${input.messageId}`,
-      threadKey: `${input.chatId}|${input.messageId}`
-    },
-    metadata: {
-      chatId: input.chatId,
-      messageId: input.messageId,
-      repoProvider: "github",
-      owner: input.binding.owner,
-      repo: input.binding.repo
-    }
-  };
-}
-```
-
-## Ingress App Checklist
-
-The ingress app should:
-
-1. Verify provider signatures or tokens before parsing the event.
-2. Handle provider challenge requests, such as Slack `url_verification`.
-3. Resolve the source container to a binding.
-4. Call the normalizer.
-5. Create the run through `@opentag/client`.
-6. Return quickly to the provider.
-7. Log ignored events with enough context to debug bindings without leaking
-   secrets.
-
-If the dispatcher has `OPENTAG_PAIRING_TOKEN`, the ingress app must pass the
-same value as `OPENTAG_DISPATCHER_TOKEN`.
-
-## Test Checklist
-
-At minimum, add tests for:
-
-- non-mentions are ignored;
-- empty commands are ignored;
-- explicit mentions create a valid `OpenTagEvent`;
-- event ids and thread keys are stable;
-- write-capable intents request write permissions only when intended;
-- unbound containers do not create runs;
-- callback rendering escapes or formats provider markdown correctly;
-- provider API error payloads become failures, not silent successes.
-
-Run the normal repo gates before opening a PR:
-
-```bash
-pnpm test
-pnpm typecheck
-pnpm lint
-pnpm build
-```
-
-For real provider testing, follow [Real integration smoke test](./real-integration-smoke-test.md).
+- [Slack platform guide](./platforms/slack.en.md)
+- [GitHub platform guide](./platforms/github.en.md)
+- [Control Plane runtime architecture](./control-plane-runtime-architecture.md)
+- [Source-thread action receipts](./source-thread-action-receipts.md)
+- [Integration taxonomy](./integration-taxonomy.md)

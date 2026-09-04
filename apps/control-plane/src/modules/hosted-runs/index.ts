@@ -10,7 +10,6 @@ import {
   HostedAdmissionEnvelopeV1Schema,
   HostedClaimRequestV1Schema,
   HostedClaimV1Schema,
-  HostedCancelRequestV1Schema,
   HostedCompleteRequestV1Schema,
   HostedHeartbeatRequestV1Schema,
   HostedLifecycleReceiptEnvelopeV1Schema,
@@ -122,7 +121,7 @@ type HostedAttemptRow = {
   credential_id: string;
   fencing_token_digest: string;
   lease_expires_at: Date;
-  material_start_state: "open" | "proven_not_started" | "started_or_ambiguous";
+  material_start_state: "open" | "started_or_ambiguous";
   state: string;
   workspace_attestation: unknown | null;
   interruption_evidence: unknown | null;
@@ -197,8 +196,6 @@ export type HostedRunCoordinator = {
     request: HostedClaimRequestV1;
   }): Promise<
     | { kind: "claimed" | "replayed"; claim: HostedClaimV1 }
-    | { kind: "legacy_interrupted"; runId: string; outcome: "outcome_unknown";
-        reconciliationIdentity: string }
     | { kind: "empty" }
     | { kind: "conflict"; reason: "authority_mismatch" | "operation_mismatch" }
   >;
@@ -274,8 +271,7 @@ function linkedAdmission(
       === admission.projectTarget.projectTargetId
     && policy.payload.target.providerRepositoryId
       === admission.repository.providerRepositoryId
-    && (admission.repository.provider === undefined
-      || policy.payload.target.repositoryProvider === admission.repository.provider)
+    && policy.payload.target.repositoryProvider === admission.repository.provider
     && policy.payload.snapshotId === admission.admissionPolicySnapshot.snapshotId
     && policy.receiptDigest === admission.admissionPolicySnapshot.digest
     && policy.payload.target.authorizedPublicationModes.includes(
@@ -330,7 +326,9 @@ export function createHostedRunCoordinator(input: {
   }) => Promise<HostedClaimV1["sourceContentGrant"]>;
 }): HostedRunCoordinator {
   async function hydrateStoredClaim(client: PoolClient, value: unknown): Promise<HostedClaimV1 | null> {
-    const stored = StoredHostedClaimV1Schema.parse(value);
+    const parsed = StoredHostedClaimV1Schema.safeParse(value);
+    if (!parsed.success) return null;
+    const stored = parsed.data;
     const fencingToken = input.tokenFactory({
       organizationId: stored.organizationId,
       operationId: stored.operationId,
@@ -442,78 +440,6 @@ export function createHostedRunCoordinator(input: {
         command.sourceVersionRef, JSON.stringify(receipt), now],
     );
     return receipt;
-  }
-
-  async function containLegacyClaims(client: PoolClient, principal: RuntimePrincipal) {
-    const legacy = await client.query<{ run_id: string; operation_id: string;
-      claim: unknown; current_attempt_number: number; terminal_kind: string | null }>(
-      `SELECT legacy.run_id, legacy.operation_id, legacy.claim,
-              run.current_attempt_number, run.terminal_kind
-       FROM cp_hosted_claim legacy JOIN cp_hosted_run run
-         ON run.organization_id = legacy.organization_id AND run.run_id = legacy.run_id
-       WHERE legacy.organization_id = $1 AND legacy.claim_version = 1
-         AND run.runner_id = $2 ORDER BY legacy.run_id FOR UPDATE OF run`,
-      [principal.organizationId, principal.runnerId],
-    );
-    for (const row of legacy.rows) {
-      const containedAt = input.clock.now();
-      const rawAttempt = row.claim && typeof row.claim === "object"
-        ? (row.claim as { attempt?: unknown }).attempt : undefined;
-      const attemptId = rawAttempt && typeof rawAttempt === "object"
-        && typeof (rawAttempt as { id?: unknown }).id === "string"
-        ? (rawAttempt as { id: string }).id : null;
-      const attemptNumber = rawAttempt && typeof rawAttempt === "object"
-        && Number.isInteger((rawAttempt as { number?: unknown }).number)
-        ? (rawAttempt as { number: number }).number : null;
-      let exactAttempt = false;
-      if (attemptId && attemptNumber && attemptNumber > 0) {
-        const locked = await client.query(
-          `SELECT 1 FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2
-             AND attempt_id = $3 AND attempt_number = $4 FOR UPDATE`,
-          [principal.organizationId, row.run_id, attemptId, attemptNumber],
-        );
-        exactAttempt = locked.rows.length === 1;
-        if (exactAttempt) await client.query(
-          `UPDATE cp_hosted_attempt SET state = 'interrupted',
-             material_start_state = 'started_or_ambiguous',
-             lease_expires_at = LEAST(lease_expires_at, $5),
-             blocked_permission_request_id = NULL,
-             blocked_action_descriptor_digest = NULL,
-             blocked_policy_snapshot_digest = NULL, updated_at = $5
-           WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-             AND attempt_number = $4`,
-          [principal.organizationId, row.run_id, attemptId, attemptNumber,
-            containedAt],
-        );
-      }
-      const staleAgainstLaterAttempt = attemptNumber !== null
-        && row.current_attempt_number > attemptNumber;
-      if (!staleAgainstLaterAttempt && !row.terminal_kind) {
-        const reconciliationIdentity = `${principal.organizationId}:${row.run_id}:${row.operation_id}:legacy_claim`;
-        await client.query(
-          `UPDATE cp_hosted_run SET state = 'interrupted', terminal_kind = 'interrupted',
-             terminal_reason = 'legacy_claim_authority_unrecoverable',
-             outcome_state = 'outcome_unknown', reconciliation_identity = $3,
-             terminal_receipt = $4::jsonb, updated_at = $5
-           WHERE organization_id = $1 AND run_id = $2 AND terminal_kind IS NULL`,
-          [principal.organizationId, row.run_id, reconciliationIdentity,
-            JSON.stringify({ kind: "legacy_claim_interrupted",
-              outcome: "outcome_unknown", reconciliationIdentity }), containedAt],
-        );
-      }
-      if (attemptId && exactAttempt) await client.query(
-        `UPDATE cp_source_content_read_grant SET revoked_at = COALESCE(revoked_at, $4)
-         WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-           AND consumed_at IS NULL`,
-        [principal.organizationId, row.run_id, attemptId, containedAt],
-      );
-      if (attemptId && exactAttempt) await client.query(
-        `UPDATE cp_permission_request SET state = 'revoked', updated_at = $4
-         WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-           AND state = 'waiting'`,
-        [principal.organizationId, row.run_id, attemptId, containedAt],
-      );
-    }
   }
 
   return {
@@ -656,23 +582,16 @@ export function createHostedRunCoordinator(input: {
             ]),
           ],
         );
-        await containLegacyClaims(client as PoolClient, principal);
         const existingClaim = await client.query(
-          `SELECT request_digest, claim_version, run_id, claim
+          `SELECT request_digest, run_id, claim
            FROM cp_hosted_claim
            WHERE organization_id = $1 AND operation_id = $2`,
           [principal.organizationId, request.operationId],
-        ) as { rows: Array<{ request_digest: string; claim_version: number;
-          run_id: string; claim: unknown }> };
+        ) as { rows: Array<{ request_digest: string; run_id: string; claim: unknown }> };
         const replay = existingClaim.rows[0];
         if (replay) {
           if (replay.request_digest !== requestDigest) {
             return { kind: "conflict", reason: "operation_mismatch" } as const;
-          }
-          if (replay.claim_version === 1) {
-            const reconciliationIdentity = `${principal.organizationId}:${replay.run_id}:${request.operationId}:legacy_claim`;
-            return { kind: "legacy_interrupted", runId: replay.run_id,
-              outcome: "outcome_unknown", reconciliationIdentity } as const;
           }
           const claim = await hydrateStoredClaim(client as PoolClient, replay.claim);
           if (!claim) {
@@ -718,28 +637,7 @@ export function createHostedRunCoordinator(input: {
              AND run.terminal_kind IS NULL
              AND run.queue_claim_deadline > $3
              AND run.outcome_state IS NULL
-             AND NOT EXISTS (SELECT 1 FROM cp_hosted_claim legacy
-               WHERE legacy.organization_id = run.organization_id
-                 AND legacy.run_id = run.run_id AND legacy.claim_version = 1)
-             AND (
-               run.state = 'queued'
-               OR EXISTS (
-                 SELECT 1 FROM cp_hosted_attempt attempt
-                 WHERE attempt.organization_id = run.organization_id
-                   AND attempt.run_id = run.run_id
-                   AND attempt.attempt_number = run.current_attempt_number
-                   AND attempt.lease_expires_at <= $3
-                   AND attempt.material_start_state = 'proven_not_started'
-                   AND EXISTS (
-                     SELECT 1 FROM cp_material_action_non_start_proof proof
-                     WHERE proof.organization_id = attempt.organization_id
-                       AND proof.run_id = attempt.run_id
-                       AND proof.attempt_id = attempt.attempt_id
-                       AND proof.attempt_number = attempt.attempt_number
-                       AND proof.fencing_token_digest = attempt.fencing_token_digest
-                   )
-               )
-             )
+             AND run.state = 'queued'
            ORDER BY run.created_at, run.run_id
            FOR UPDATE OF run SKIP LOCKED
            LIMIT 1`,
@@ -868,9 +766,9 @@ export function createHostedRunCoordinator(input: {
         );
         await client.query(
           `INSERT INTO cp_hosted_claim(
-             organization_id, operation_id, request_digest, claim_version, run_id, claim,
+             organization_id, operation_id, request_digest, run_id, claim,
              created_at
-           ) VALUES($1, $2, $3, 2, $4, $5::jsonb, $6)`,
+           ) VALUES($1, $2, $3, $4, $5::jsonb, $6)`,
           [
             principal.organizationId,
             request.operationId,
@@ -975,8 +873,7 @@ export function createHostedRunCoordinator(input: {
               request.attempt.attemptId, request.attempt.attemptNumber,
               request.attempt.fencingTokenDigest],
           );
-          if (!replayAttempt.rows[0]
-            || replayAttempt.rows[0].material_start_state === "proven_not_started") {
+          if (!replayAttempt.rows[0]) {
             return { kind: "stale_fence" } as const;
           }
           return {
@@ -1013,13 +910,12 @@ export function createHostedRunCoordinator(input: {
           || attempt.credential_id !== command.principal.credentialId
           || attempt.fencing_token_digest !== request.attempt.fencingTokenDigest
           || attempt.lease_expires_at.getTime() <= now.getTime()
-          || attempt.material_start_state === "proven_not_started"
         ) {
           return { kind: "stale_fence" } as const;
         }
         const operation = lifecycleOperation(command.action);
         if (attempt.state === "needs_approval"
-          && command.action !== "heartbeat" && command.action !== "cancel") {
+          && command.action !== "heartbeat") {
           return { kind: "conflict", reason: "invalid_transition" } as const;
         }
         if (command.action === "complete" && !["claimed", "running"].includes(attempt.state)) {
@@ -1054,7 +950,7 @@ export function createHostedRunCoordinator(input: {
           return { kind: "conflict", reason: "invalid_request" } as const;
         }
         if (attempt.workspace_attestation && !workspaceAttestation
-          && ["progress", "complete", "cancel"].includes(command.action)) {
+          && ["progress", "complete"].includes(command.action)) {
           return { kind: "conflict", reason: "invalid_request" } as const;
         }
         const lifecycleEvidence = {
@@ -1113,14 +1009,6 @@ export function createHostedRunCoordinator(input: {
             occurredAt: rejected.occurredAt,
             executorId: rejected.executorId,
             reasonCode: rejected.reasonCode,
-            ...lifecycleEvidence,
-          };
-        } else if (command.action === "cancel") {
-          const cancelled = HostedCancelRequestV1Schema.parse(request);
-          payload = {
-            operation: "cancel",
-            occurredAt: cancelled.occurredAt,
-            reasonCode: cancelled.reasonCode,
             ...lifecycleEvidence,
           };
         } else {
@@ -1235,10 +1123,6 @@ export function createHostedRunCoordinator(input: {
           } as const satisfies Record<typeof conclusion,
             readonly [CanonicalRunStatus, string, TerminalKind | null]>;
           [nextRunState, nextAttemptState, nextTerminal] = completion[conclusion];
-        } else if (command.action === "cancel") {
-          nextRunState = "cancelled";
-          nextAttemptState = attempt.state === "succeeded" ? "succeeded" : "cancelled";
-          nextTerminal = "cancelled";
         }
         await client.query(
           `INSERT INTO cp_hosted_lifecycle_receipt(

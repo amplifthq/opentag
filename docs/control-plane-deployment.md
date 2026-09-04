@@ -40,13 +40,12 @@ Required values:
 - `OPENTAG_FENCING_TOKEN_SECRET`: independent, at least 32-character authority
   used to derive live fencing tokens. PostgreSQL stores only a
   fencing-token digest, never the live token. Outside `local` the server
-  refuses to start when this value equals the bootstrap, recovery, or GitHub
-  ingress authority;
+  refuses to start when this value equals the bootstrap or recovery authority;
 - `OPENTAG_LOGIN_THROTTLE_SECRET`: a different, independently generated
   at-least-32-character HMAC authority. Durable throttle rows contain only
   pseudonymous keyed identifiers and are bounded by expiry cleanup;
 - `OPENTAG_BOOTSTRAP_ADMIN_EMAIL`, `...NAME`, and `...PASSWORD`: initial owner;
-- `OPENTAG_PUBLIC_URL`: the exact browser and webhook origin.
+- `OPENTAG_PUBLIC_URL`: the exact browser and Slack webhook origin.
 
 Relay content encryption is deliberately not configured with an inline
 environment secret. On the host, set only
@@ -107,8 +106,6 @@ Recommended values:
 
 - `OPENTAG_RECOVERY_PAIRING_TOKEN`: separate emergency authority used only to
   reprovision a paired runner credential;
-- `OPENTAG_GITHUB_INGRESS_MASTER_SECRET`: at least 32 characters, and only when
-  GitHub ingress is intentionally enabled for local testing;
 - `OPENTAG_RELEASE_SHA`: the immutable 40-character Git commit for staging or
   production. `local` is accepted only in the local environment.
 
@@ -148,19 +145,16 @@ Do not expose the plain HTTP Compose port directly to the Internet. Terminate
 TLS in a reverse proxy or load balancer and set `OPENTAG_PUBLIC_URL` to that
 exact HTTPS origin. Forward the original `Host` and scheme consistently.
 
-GitHub ingress is absent unless its master secret is configured and a binding
-has been created. The current open-source foundation does not yet implement
-audited binding-secret rotation or disable/re-enable recovery. Keep the master
-secret empty and do not register a production provider webhook until that
-lifecycle exists and has incident-recovery evidence. Local disposable tests
-may enable it to verify signature, delivery reservation, replay, and admission.
-Accepted webhook delivery means the intent was durably admitted; it does not
-mean execution began or a provider mutation completed.
+Public provider ingress is limited to the configured Slack Events API and
+interactivity routes. Keep Slack signing and bot credentials in mounted secret
+files, and expose only the route identities issued for active installations.
+An accepted Slack request means the source event was durably reserved; it does
+not mean execution began or a provider mutation completed.
 
 Cloudflare DNS/CDN/WAF may proxy the origin, but it is optional. Do not cache
 Control V1, console API, authentication, or provider-ingress responses.
 
-## Installation and upgrade
+## Installation and schema reset
 
 Pin a reviewed image digest in production. For the local source profile:
 
@@ -184,38 +178,28 @@ secret references where the relevant installation or Runner contract calls for
 them.
 
 Startup is ordered by health and completion: PostgreSQL, migration, owner
-bootstrap, Slack installation bootstrap, HTTP readiness, then jobs. Migrations take a PostgreSQL advisory lock, verify
-the checksum of every already-applied file, and only append new migrations.
-Never edit a migration after it has been released.
+bootstrap, Slack installation bootstrap, HTTP readiness, then jobs.
 
-Before upgrading an existing installation, stop both `control-plane` and
-`jobs`; leaving the old jobs process active can retain a live legacy projection
-lease, and migration `0021` deliberately refuses to guess whether that work is
-still executing. An expired projection lease is safely returned to pending and
-converted to the v2 job shape. A live lease remains a hard stop until the old
-worker exits or the operator has separately proved it dead.
+The Agent Presence reset intentionally establishes a new database baseline.
+It supports a new empty PostgreSQL database only and does not provide an
+in-place upgrade from a pre-reset migration ledger. The migration runner checks
+the recorded checksum and fails closed rather than interpreting or deleting
+old state.
 
-The first upgrade from the pre-relay schema is intentionally outcome
-preserving, not work preserving. Migration `0007` terminates legacy in-flight
-Hosted Attempts as `interrupted/outcome_unknown`, and `0009` consumes legacy
-Slack action authorities whose exact Attempt/fence lineage cannot be proven.
-Drain work before upgrading when possible. Afterward, reconcile ambiguous
-material/provider effects and issue fresh controls; never replay them blindly.
+For an existing installation:
 
-For an upgrade:
+1. Stop the old HTTP and jobs roles so the backup is not racing live work.
+2. Back up PostgreSQL together with the exact relay-content KEK and key version.
+3. Keep that recovery set immutable; do not point the reset release at it.
+4. Provision a separate empty database or Compose volume.
+5. Start the exact reviewed reset image and let it create the new baseline.
+6. Re-bootstrap the owner and Slack installation, then pair the Runner again.
+7. Verify `/readyz`, console login, Runner readiness, and a non-destructive
+   hosted lifecycle smoke before accepting new work.
 
-1. Back up the complete recovery set—PostgreSQL plus the exact relay-content
-   KEK file and immutable key version `v1`—and verify both artifacts are readable.
-2. Pull or build the exact reviewed image digest.
-3. Stop the old HTTP and jobs roles: `docker compose stop control-plane jobs`.
-4. Run `docker compose run --rm migrate` and wait for successful completion.
-5. Start HTTP and jobs on the same image digest with `docker compose up -d`.
-6. Verify `/readyz`, capability discovery, console login, runner readiness,
-   and a non-destructive hosted lifecycle smoke.
-7. Retain the prior image until rollback compatibility is understood.
-
-A database migration may make application rollback unsafe. Rollback is an
-explicit release decision, not an automatic response to a failed healthcheck.
+OpenTag does not remove or rewrite the old database automatically. Importing
+selected historical facts, if ever needed, is a separately reviewed migration
+project rather than a compatibility path in this release.
 
 ## PostgreSQL sizing and connections
 
@@ -294,13 +278,11 @@ Before production use, require:
 
 - exact image digest and source revision;
 - clean empty-volume installation;
-- upgrade from the previous migration corpus;
 - backup and restore rehearsal;
 - runner pair/re-pair and credential revocation;
 - concurrent claim/fencing and cancellation race tests;
 - permission and material-receipt tests;
 - provider signature, replay, and tenant-mismatch negatives;
-- audited provider-binding secret rotation and disable/re-enable recovery;
 - graceful shutdown and connection-budget checks.
 
 Only after these checks pass for the exact deployment identity may status report

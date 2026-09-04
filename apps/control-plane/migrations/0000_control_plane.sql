@@ -52,6 +52,7 @@ CREATE TABLE cp_runner (
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
   PRIMARY KEY (organization_id, runner_id),
+  UNIQUE (organization_id),
   UNIQUE (organization_id, current_credential_id)
 );
 
@@ -109,7 +110,6 @@ CREATE TABLE cp_project_target (
   repo text NOT NULL,
   default_executor text NOT NULL,
   default_branch text,
-  version integer NOT NULL CHECK (version > 0),
   updated_at timestamptz NOT NULL,
   PRIMARY KEY (organization_id, project_target_id),
   FOREIGN KEY (organization_id, runner_id)
@@ -218,64 +218,6 @@ CREATE TABLE cp_management_audit_event (
 
 CREATE INDEX cp_management_audit_tenant_idx
   ON cp_management_audit_event(organization_id, sequence_id);
-
-CREATE TABLE cp_github_binding (
-  organization_id text NOT NULL REFERENCES cp_organization(organization_id),
-  binding_id text NOT NULL,
-  provider_repository_id text NOT NULL,
-  owner text NOT NULL,
-  repo text NOT NULL,
-  runner_id text NOT NULL,
-  project_target_id text NOT NULL,
-  secret_hash text NOT NULL,
-  secret_version text NOT NULL,
-  allowed_actor_ids text[] NOT NULL,
-  enabled boolean NOT NULL DEFAULT false,
-  created_at timestamptz NOT NULL,
-  updated_at timestamptz NOT NULL,
-  PRIMARY KEY (organization_id, binding_id),
-  UNIQUE (binding_id),
-  UNIQUE (organization_id, provider_repository_id),
-  FOREIGN KEY (organization_id, runner_id)
-    REFERENCES cp_runner(organization_id, runner_id)
-);
-
-CREATE TABLE cp_github_delivery (
-  organization_id text NOT NULL,
-  binding_id text NOT NULL,
-  delivery_id text NOT NULL,
-  payload_digest text NOT NULL,
-  event_name text NOT NULL,
-  normalized_outcome jsonb NOT NULL,
-  processing_token text,
-  processing_expires_at timestamptz,
-  received_at timestamptz NOT NULL,
-  CHECK (
-    (normalized_outcome = '{"kind":"processing"}'::jsonb
-      AND processing_token IS NOT NULL
-      AND processing_expires_at IS NOT NULL)
-    OR
-    (normalized_outcome <> '{"kind":"processing"}'::jsonb
-      AND processing_token IS NULL
-      AND processing_expires_at IS NULL)
-  ),
-  PRIMARY KEY (organization_id, binding_id, delivery_id),
-  FOREIGN KEY (organization_id, binding_id)
-    REFERENCES cp_github_binding(organization_id, binding_id)
-);
-
-CREATE TABLE cp_provider_evidence (
-  evidence_id text PRIMARY KEY,
-  organization_id text NOT NULL REFERENCES cp_organization(organization_id),
-  run_id text,
-  provider text NOT NULL,
-  evidence_kind text NOT NULL,
-  provider_identity text NOT NULL,
-  payload_digest text NOT NULL,
-  evidence jsonb NOT NULL,
-  observed_at timestamptz NOT NULL,
-  UNIQUE (organization_id, provider, evidence_kind, provider_identity)
-);
 
 CREATE TABLE cp_job (
   job_id text PRIMARY KEY,

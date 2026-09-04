@@ -3,7 +3,6 @@ import { lstat, mkdir, rm } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import {
   formatProjectTargetRef,
-  parseWorkContextMutationCommand,
   projectTargetRefFromEvent,
   sanitizeCredentialLikeValue,
   computeControlPayloadDigestV1,
@@ -22,7 +21,6 @@ import {
   assessRunnerSecurity,
   formatSecurityAssessment,
   createAgentSessionProfileForEvent,
-  createWorkContextMutationRunResult,
   resolveAgentSessionProfile,
   resolveRunnerSecurityPaths,
   type ExecutorAdapter,
@@ -49,8 +47,7 @@ export type ClaimedRun = {
 
 export type AttemptLease = Pick<ClaimedRun, "attemptId" | "fencingToken">;
 
-export type DaemonClient = {
-  claim(): Promise<ClaimedRun | null>;
+export type ClaimedRunExecutionClient = {
   markRunning(
     runId: string,
     executor: string,
@@ -105,19 +102,11 @@ function claimedProjectTargetFailure(input: {
   if (!input.projectTargetRef) {
     const metadata = input.event.metadata ?? {};
     const hasRepositoryMetadata = ["repoProvider", "owner", "repo"].some((key) => metadata[key] !== undefined);
-    if (input.event.source !== "github" && !hasRepositoryMetadata) return null;
+    if (!hasRepositoryMetadata) return null;
     return {
       conclusion: "needs_human",
       summary: "Repository-bearing events require complete Project Target metadata.",
       nextAction: "Replay this event with repoProvider, owner, and repo metadata before allowing repository execution."
-    };
-  }
-
-  if (input.event.source === "github" && input.projectTargetRef.provider !== "github") {
-    return {
-      conclusion: "needs_human",
-      summary: `GitHub source events must target a GitHub Project Target, received ${formatProjectTargetRef(input.projectTargetRef)}.`,
-      nextAction: "Verify the relay is preserving GitHub webhook metadata before allowing this run."
     };
   }
 
@@ -208,8 +197,7 @@ function executorMetadata(event: OpenTagEvent): Record<string, unknown> {
   };
 }
 
-export type LegacyDaemonIterationInput = {
-  mode: "legacy";
+export type ClaimedRunExecutionInput = {
   runnerId: string;
   repositories: RepositoryBindingConfig[];
   executors: Record<string, ExecutorAdapter>;
@@ -221,15 +209,6 @@ export type LegacyDaemonIterationInput = {
   heartbeatIntervalMs?: number;
   runTimeoutMs?: number;
   agentSessionProfile?: AgentSessionProfileConfig;
-  client: DaemonClient;
-};
-
-export type ClaimedRunExecutionClient = Omit<DaemonClient, "claim">;
-
-export type ClaimedRunExecutionInput = Omit<
-  LegacyDaemonIterationInput,
-  "mode" | "client"
-> & {
   claimed: ClaimedRun;
   client: ClaimedRunExecutionClient;
   hostedExecutionAuthority?: {
@@ -243,29 +222,6 @@ export type ClaimedRunExecutionInput = Omit<
     now?: () => Date;
   };
 };
-
-export async function runOneDaemonIteration(
-  input: LegacyDaemonIterationInput
-): Promise<boolean> {
-  const runtimeInput = input as unknown as Record<string, unknown>;
-  if (
-    (runtimeInput.mode !== undefined && runtimeInput.mode !== "legacy")
-    || "controlLoop" in runtimeInput
-    || "controlV1SidecarOnly" in runtimeInput
-    || typeof input.client?.claim !== "function"
-  ) {
-    throw new Error(
-      "runOneDaemonIteration accepts only a legacy claim-capable daemon runtime."
-    );
-  }
-  const claimed = await input.client.claim();
-  if (!claimed) return false;
-  const { mode: _mode, ...executionInput } = input;
-  return executeClaimedRun({
-    ...executionInput,
-    claimed,
-  });
-}
 
 /**
  * Executes one already-claimed Attempt without owning claim authority.
@@ -289,17 +245,6 @@ export async function executeClaimedRun(
   });
   if (claimedTargetFailure) {
     await input.client.complete(claimed.run.id, lease, claimedTargetFailure);
-    return true;
-  }
-  // Pure source-thread mutations stay on the governed apply path and do not
-  // allocate either a repository worktree or a scratch attempt directory.
-  const mutationRequests = parseWorkContextMutationCommand(claimed.event.command.rawText);
-  if (mutationRequests) {
-    await input.client.complete(
-      claimed.run.id,
-      lease,
-      createWorkContextMutationRunResult({ runId: claimed.run.id, requests: mutationRequests })
-    );
     return true;
   }
   const binding = resolveRepositoryBinding(claimed.event, input.repositories);
@@ -923,99 +868,32 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export type LegacyDaemonRuntimeInput = LegacyDaemonIterationInput & {
-  pollIntervalMs?: number;
-  signal?: AbortSignal;
-  controlLoop?: never;
-};
-
-export type ControlV1SidecarRuntimeInput = {
-  mode: "control-v1-sidecar";
+export type PairedRunnerRuntimeInput = {
   pollIntervalMs?: number;
   signal?: AbortSignal;
   controlLoop: HostedControlLoop;
-  client?: never;
 };
 
-export type DaemonRuntimeInput =
-  | LegacyDaemonRuntimeInput
-  | ControlV1SidecarRuntimeInput;
-
-function assertDaemonRuntimeInput(input: DaemonRuntimeInput): void {
-  const runtimeInput = input as unknown as Record<string, unknown>;
-  if ("controlV1SidecarOnly" in runtimeInput) {
-    throw new Error(
-      "controlV1SidecarOnly is not a valid authority boundary; use a discriminated daemon runtime mode."
-    );
-  }
-  if (runtimeInput.mode === "legacy") {
-    if (
-      "controlLoop" in runtimeInput
-      || typeof (runtimeInput.client as { claim?: unknown } | undefined)?.claim
-        !== "function"
-    ) {
-      throw new Error(
-        "Legacy daemon runtime requires a claim-capable client and forbids a HostedControlLoop."
-      );
-    }
-    return;
-  }
-  if (runtimeInput.mode === "control-v1-sidecar") {
-    const loop = runtimeInput.controlLoop as Partial<HostedControlLoop> | undefined;
-    if (
-      "client" in runtimeInput
-      || !loop
-      || typeof loop.beforeIteration !== "function"
-      || typeof loop.afterIteration !== "function"
-      || typeof loop.abort !== "function"
-      || typeof loop.close !== "function"
-    ) {
-      throw new Error(
-        "Control V1 sidecar runtime requires a HostedControlLoop and forbids a claim-capable client."
-      );
-    }
-    return;
-  }
-  throw new Error("Unknown daemon runtime mode.");
-}
-
-export async function serveDaemon(input: DaemonRuntimeInput): Promise<void> {
-  assertDaemonRuntimeInput(input);
+export async function serveDaemon(input: PairedRunnerRuntimeInput): Promise<void> {
   const pollIntervalMs = input.pollIntervalMs ?? 5_000;
-  if (input.mode === "control-v1-sidecar") {
-    const abortControlLoop = () => input.controlLoop.abort();
-    input.signal?.addEventListener("abort", abortControlLoop, { once: true });
-    try {
-      while (!input.signal?.aborted) {
-        try {
-          const didWork = await input.controlLoop.beforeIteration();
-          await input.controlLoop.afterIteration();
-          if (!didWork) {
-            await sleep(pollIntervalMs, input.signal);
-          }
-        } catch (error) {
-          if (input.signal?.aborted) break;
-          console.warn("OpenTag Control V1 sidecar iteration failed; retrying:", error);
+  const abortControlLoop = () => input.controlLoop.abort();
+  input.signal?.addEventListener("abort", abortControlLoop, { once: true });
+  try {
+    while (!input.signal?.aborted) {
+      try {
+        const didWork = await input.controlLoop.beforeIteration();
+        await input.controlLoop.afterIteration();
+        if (!didWork) {
           await sleep(pollIntervalMs, input.signal);
         }
-      }
-    } finally {
-      input.signal?.removeEventListener("abort", abortControlLoop);
-      await input.controlLoop.close();
-    }
-    return;
-  }
-
-  while (!input.signal?.aborted) {
-    try {
-      const didWork = await runOneDaemonIteration(input);
-      if (!didWork) {
+      } catch (error) {
+        if (input.signal?.aborted) break;
+        console.warn("OpenTag paired Runner iteration failed; retrying:", error);
         await sleep(pollIntervalMs, input.signal);
       }
-    } catch (error) {
-      if (input.signal?.aborted) break;
-      console.warn("OpenTag daemon iteration failed; retrying:", error);
-      await sleep(pollIntervalMs, input.signal);
     }
+  } finally {
+    input.signal?.removeEventListener("abort", abortControlLoop);
+    await input.controlLoop.close();
   }
 }

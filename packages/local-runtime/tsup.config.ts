@@ -5,7 +5,6 @@ export default defineConfig({
     "src/index.ts",
     "src/config.ts",
     "src/daemon.ts",
-    "src/dispatcher.ts",
     "src/doctor.ts",
     "src/pr.ts",
     "src/runtime.ts"

@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { createOpenTagClient, OpenTagControlV1HttpError, type OpenTagClient } from "@opentag/client";
 import {
+  computeGitHubProjectTargetBindingDigestV1,
+  GitHubProjectTargetDeclarationV1Schema,
   RunnerCredentialReprovisionRequestV1Schema,
+  RunnerProjectTargetUpsertRequestV1Schema,
   RunnerRegistrationRequestV1Schema,
+  type GitHubProjectTargetDeclarationV1,
+  type RunnerControlContextResponseV1,
   type RunnerCredentialResponseV1
 } from "@opentag/control-protocol";
+import { compareCanonicalUnicodeStrings } from "@opentag/core";
 import {
   HostedControlRegistrationSchema,
   type HostedControlRegistration,
@@ -16,16 +22,9 @@ import {
   assertRemotePairedRelayEndpoint,
   readCliConfig,
   readCliRawConfig,
-  writeCliConfigAtomic,
   writeHostedControlConfigAtomic,
   type OpenTagCliConfig
 } from "./config.js";
-import {
-  evaluateRelayIngressCapability,
-  probeDispatcherHealth,
-  probeRelayCapabilities,
-  type RelayIngressRequirement
-} from "./health.js";
 import { formatConfiguredProjectTargetSummary } from "./project-target-summary.js";
 import {
   TrustedRelayAuthorizationV1Schema,
@@ -33,12 +32,10 @@ import {
   canonicalHostedRelayOrigin,
   relayTrustWarning
 } from "./relay-security.js";
-import { bootstrapLocalDispatcher, type BootstrapClient } from "./start.js";
 
 export type PairCommandOptions = {
   config?: string;
   relay?: string;
-  register?: boolean;
   recover?: string;
   trustRelayOrigin?: string;
 };
@@ -46,25 +43,24 @@ export type PairCommandOptions = {
 export type PairRelayDependencies = {
   createControlClient?: (options: Parameters<typeof createOpenTagClient>[0]) => Pick<
     OpenTagClient,
-    "getRelayCapabilitiesControlV1" | "registerRunnerControlV1" | "reprovisionRunnerControlV1"
+    "getRelayCapabilitiesControlV1" | "getRunnerControlContextV1"
+      | "registerRunnerControlV1" | "reprovisionRunnerControlV1"
+      | "upsertRunnerProjectTargetControlV1"
   >;
   fetchImpl?: typeof fetch;
-  bootstrapClient?: BootstrapClient;
   logger?: Pick<Console, "log" | "warn">;
-  healthTimeoutMs?: number;
   randomUUID?: () => string;
   now?: () => Date;
   readConfig?: typeof readCliConfig;
+  readBootstrapSecret?: () => string | undefined | Promise<string | undefined>;
   readRawConfig?: typeof readCliRawConfig;
-  readRecoverySecret?: () => string | undefined;
-  writeConfig?: typeof writeCliConfigAtomic;
+  readRecoverySecret?: () => string | undefined | Promise<string | undefined>;
   writeHostedConfig?: typeof writeHostedControlConfigAtomic;
 };
 
 type PairRelaySummaryInput = {
   configPath: string;
   config: OpenTagCliConfig;
-  relayUrl: string;
   registered: boolean;
 };
 
@@ -93,35 +89,6 @@ export function normalizeRelayUrl(rawRelayUrl: string): string {
     throw new Error("Relay URL must not include a query string or fragment.");
   }
   return stripTrailingSlash(url.toString());
-}
-
-export function inferRelayProvider(relayUrl: string): string {
-  const hostname = new URL(relayUrl).hostname.toLowerCase();
-  return hostname.includes("railway") ? "railway" : "custom";
-}
-
-export function relayConfigFrom(input: { config: OpenTagCliConfig; relayUrl: string }): OpenTagCliConfig {
-  const hostedRelay = input.config.daemon.controlRegistration
-    ? input.config.daemon.dispatcherUrl
-    : undefined;
-  if (hostedRelay && hostedRelay !== input.relayUrl) {
-    throw new Error(
-      `Hosted Control V1 authority is already bound to ${hostedRelay}; re-pairing to a different relay is not allowed.`
-    );
-  }
-  const relayProvider = inferRelayProvider(input.relayUrl);
-  return {
-    ...input.config,
-    runtime: {
-      mode: "paired_relay",
-      relayUrl: input.relayUrl,
-      relayProvider
-    },
-    daemon: {
-      ...input.config.daemon,
-      dispatcherUrl: input.relayUrl
-    }
-  };
 }
 
 export function controlRequestIdFromOperationId(operationId: string): string {
@@ -153,13 +120,27 @@ function rawDaemon(value: unknown): Record<string, unknown> {
   return rawObject(rawObject(value, "OpenTag config").daemon, "OpenTag daemon config");
 }
 
+function assertRawProjectTargetsConfigured(value: unknown): void {
+  const repositories = rawDaemon(value).repositories;
+  if (!Array.isArray(repositories) || repositories.length === 0) {
+    throw new Error(
+      "Project Target setup is incomplete; configure at least one GitHub Project Target before pairing.",
+    );
+  }
+  for (const repository of repositories) {
+    const raw = rawObject(repository, "Project Target config");
+    if (typeof raw.projectTargetId !== "string" || !raw.projectTargetId.trim()) {
+      throw new Error("Every GitHub Project Target requires projectTargetId before pairing.");
+    }
+  }
+}
+
 function assertPersistedRegistration(
   readRawConfig: typeof readCliRawConfig,
   path: string,
   expected: HostedControlRegistration,
   trustedRelay: TrustedRelayAuthorizationV1,
-  expectedRunnerToken?: string | null,
-  expectPairingTokenRemoved = false
+  expectedRunnerToken?: string | null
 ): void {
   const daemon = rawDaemon(readRawConfig(path));
   if (JSON.stringify(daemon.controlRegistration) !== JSON.stringify(expected)) {
@@ -174,9 +155,6 @@ function assertPersistedRegistration(
   ) {
     throw new Error("Hosted Control V1 staged runner credential failed atomic config readback.");
   }
-  if (expectPairingTokenRemoved && daemon.pairingToken !== undefined) {
-    throw new Error("Hosted Control V1 pairing credential survived atomic config readback.");
-  }
 }
 
 function writeHostedState(input: {
@@ -185,17 +163,13 @@ function writeHostedState(input: {
   readRawConfig: typeof readCliRawConfig;
   relayUrl: string;
   trustedRelay: TrustedRelayAuthorizationV1;
-  removePairingToken?: boolean;
   runnerToken?: string | null;
   writeHostedConfig: typeof writeHostedControlConfigAtomic;
 }): void {
   input.writeHostedConfig(input.configPath, {
-    dispatcherUrl: input.relayUrl,
-    relayProvider: inferRelayProvider(input.relayUrl),
     relayUrl: input.relayUrl,
     trustedRelay: input.trustedRelay,
     controlRegistration: input.controlRegistration,
-    ...(input.removePairingToken ? { removePairingToken: true } : {}),
     ...(input.runnerToken !== undefined ? { runnerToken: input.runnerToken } : {})
   });
   assertPersistedRegistration(
@@ -203,26 +177,43 @@ function writeHostedState(input: {
     input.configPath,
     input.controlRegistration,
     input.trustedRelay,
-    input.runnerToken,
-    input.removePairingToken === true
+    input.runnerToken
   );
+}
+
+function defaultReadBootstrapSecret(): string | undefined {
+  return process.env.OPENTAG_BOOTSTRAP_PAIRING_TOKEN;
+}
+
+async function requireBootstrapSecret(
+  readBootstrapSecret: () => string | undefined | Promise<string | undefined>
+): Promise<string> {
+  const secret = (await readBootstrapSecret())?.trim();
+  if (!secret) {
+    throw new Error(
+      "Control Plane bootstrap pairing authority is unavailable; enter it in the local password prompt or set OPENTAG_BOOTSTRAP_PAIRING_TOKEN for this command."
+    );
+  }
+  return secret;
 }
 
 function defaultReadRecoverySecret(): string | undefined {
   return process.env.OPENTAG_RECOVERY_CREDENTIAL;
 }
 
-function requireRecoverySecret(readRecoverySecret: () => string | undefined): string {
-  const secret = readRecoverySecret()?.trim();
+async function requireRecoverySecret(
+  readRecoverySecret: () => string | undefined | Promise<string | undefined>
+): Promise<string> {
+  const secret = (await readRecoverySecret())?.trim();
   if (!secret) {
     throw new Error(
-      "Runner recovery credential is unavailable; set OPENTAG_RECOVERY_CREDENTIAL and retry with --recover <credentialId>."
+      "Runner recovery credential is unavailable; enter it in the local password prompt or set OPENTAG_RECOVERY_CREDENTIAL and retry with --recover <credentialId>."
     );
   }
   return secret;
 }
 
-async function persistStageThenPair(input: {
+function persistCredentialStage(input: {
   configPath: string;
   operationId: string;
   relayUrl: string;
@@ -230,7 +221,7 @@ async function persistStageThenPair(input: {
   readRawConfig: typeof readCliRawConfig;
   trustedRelay: TrustedRelayAuthorizationV1;
   writeHostedConfig: typeof writeHostedControlConfigAtomic;
-}): Promise<void> {
+}): Extract<HostedControlRegistration, { state: "credential_staged" }> {
   const registration = registrationMetadata(input.response);
   const stagedControl: HostedControlRegistration = {
     kind: "hosted_control_v1",
@@ -244,22 +235,87 @@ async function persistStageThenPair(input: {
     readRawConfig: input.readRawConfig,
     relayUrl: input.relayUrl,
     trustedRelay: input.trustedRelay,
-    removePairingToken: true,
     runnerToken: input.response.runnerToken,
     writeHostedConfig: input.writeHostedConfig
   });
+  return stagedControl;
+}
 
-  const pairedControl: HostedControlRegistration = { ...stagedControl, state: "paired" };
-  writeHostedState({
-    configPath: input.configPath,
-    controlRegistration: pairedControl,
-    readRawConfig: input.readRawConfig,
-    relayUrl: input.relayUrl,
-    trustedRelay: input.trustedRelay,
-    removePairingToken: true,
-    runnerToken: input.response.runnerToken,
-    writeHostedConfig: input.writeHostedConfig
+function projectTargetDeclaration(
+  repository: OpenTagCliConfig["daemon"]["repositories"][number],
+): GitHubProjectTargetDeclarationV1 {
+  return GitHubProjectTargetDeclarationV1Schema.parse({
+    projectTargetId: repository.projectTargetId,
+    provider: "github",
+    owner: repository.owner,
+    repo: repository.repo,
+    defaultExecutor: repository.defaultExecutor,
+    defaultBranch: repository.baseBranch,
   });
+}
+
+async function assertProjectTargetReadback(input: {
+  context: RunnerControlContextResponseV1;
+  registration: HostedControlRegistrationMetadata;
+  target: GitHubProjectTargetDeclarationV1;
+}): Promise<void> {
+  const { context, registration, target } = input;
+  if (context.organizationId !== registration.organizationId
+    || context.runnerId !== registration.runnerId
+    || context.credentialId !== registration.credentialId
+    || context.registrationGeneration !== registration.registrationGeneration
+    || context.credentialGeneration !== registration.credentialGeneration) {
+    throw new Error("Project Target readback did not match the staged Runner authority.");
+  }
+  const expectedDigest = await computeGitHubProjectTargetBindingDigestV1(target);
+  const actual = context.targets.find((candidate) =>
+    candidate.projectTargetId === target.projectTargetId);
+  if (!actual || actual.bindingDigest !== expectedDigest
+    || actual.provider !== target.provider || actual.owner !== target.owner
+    || actual.repo !== target.repo || actual.defaultExecutor !== target.defaultExecutor
+    || actual.defaultBranch !== target.defaultBranch) {
+    throw new Error(`Project Target ${target.projectTargetId} readback did not match its canonical declaration.`);
+  }
+}
+
+async function synchronizeProjectTargets(input: {
+  client: Pick<OpenTagClient, "upsertRunnerProjectTargetControlV1">;
+  config: OpenTagCliConfig;
+  operationId: string;
+  registration: HostedControlRegistrationMetadata;
+}): Promise<void> {
+  if (input.config.daemon.repositories.length === 0) {
+    throw new Error("Project Target setup is incomplete; configure at least one GitHub Project Target before pairing.");
+  }
+  const targets = input.config.daemon.repositories
+    .map(projectTargetDeclaration)
+    .sort((left, right) => compareCanonicalUnicodeStrings(
+      left.projectTargetId,
+      right.projectTargetId,
+  ));
+  for (const target of targets) {
+    const bindingDigest = await computeGitHubProjectTargetBindingDigestV1(target);
+    const request = RunnerProjectTargetUpsertRequestV1Schema.parse({
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: ["relay.repository-binding.v1"],
+      requestId: controlRequestIdFromOperationId(
+        `project-target:${input.operationId}:${bindingDigest}`,
+      ),
+      expectedAuthority: {
+        credentialId: input.registration.credentialId,
+        registrationGeneration: input.registration.registrationGeneration,
+        credentialGeneration: input.registration.credentialGeneration,
+      },
+      target,
+    });
+    const context = await input.client.upsertRunnerProjectTargetControlV1({
+      runnerId: input.registration.runnerId,
+      projectTargetId: target.projectTargetId,
+      request,
+    });
+    await assertProjectTargetReadback({ context, registration: input.registration, target });
+  }
 }
 
 function replayRecoveryRequired(
@@ -275,7 +331,7 @@ function replayRecoveryRequired(
 
 type HostedPairPlan = {
   controlRegistration: HostedControlRegistration;
-  finalizeStagedLocally?: {
+  reconcileRuntimeCredential?: {
     pairedControl: Extract<HostedControlRegistration, { state: "paired" }>;
     runnerToken: string;
   };
@@ -291,20 +347,10 @@ function hostedPairPlan(input: {
   relayUrl: string;
   operationId: () => string;
   now: () => Date;
-}): HostedPairPlan | undefined {
+}): HostedPairPlan {
   const daemon = rawDaemon(input.rawConfig);
   const rawControl = daemon.controlRegistration;
   const rawTrust = daemon.trustedRelay;
-  const hostedRequested = input.options.trustRelayOrigin !== undefined
-    || input.options.recover !== undefined
-    || rawControl !== undefined
-    || rawTrust !== undefined;
-  if (!hostedRequested) return undefined;
-  if (input.options.register === false) {
-    throw new Error(
-      "--no-register is incompatible with Hosted Control V1 registration, recovery, and staged finalization."
-    );
-  }
 
   const relayOrigin = canonicalHostedRelayOrigin(input.relayUrl);
   const explicitOrigin = input.options.trustRelayOrigin === undefined
@@ -335,9 +381,6 @@ function hostedPairPlan(input: {
     : HostedControlRegistrationSchema.parse(rawControl);
 
   if (control?.state === "credential_staged") {
-    if (input.options.recover !== undefined) {
-      throw new Error("Hosted credential staging must be finalized before recovery can begin.");
-    }
     const runnerId = daemon.runnerId;
     if (typeof runnerId !== "string" || !runnerId.trim()) {
       throw new Error("Hosted staged credential requires a non-empty raw daemon runnerId.");
@@ -351,13 +394,38 @@ function hostedPairPlan(input: {
     }
     return {
       controlRegistration: control,
-      finalizeStagedLocally: {
+      reconcileRuntimeCredential: {
         pairedControl: { ...control, state: "paired" },
         runnerToken
       },
       relayOrigin,
       trustedRelay,
       operationId: control.operationId
+    };
+  }
+
+  if (control?.state === "paired") {
+    if (input.options.recover !== undefined) {
+      throw new Error("A paired Runner cannot enter recovery without recovery-required authority.");
+    }
+    const runnerId = daemon.runnerId;
+    if (typeof runnerId !== "string" || !runnerId.trim()
+      || control.registration.runnerId !== runnerId) {
+      throw new Error("Paired Runner identity does not match raw daemon runnerId.");
+    }
+    const runnerToken = daemon.runnerToken;
+    if (typeof runnerToken !== "string" || !runnerToken.trim()) {
+      throw new Error("Paired Runner target reconciliation requires its runtime credential.");
+    }
+    return {
+      controlRegistration: control,
+      reconcileRuntimeCredential: {
+        pairedControl: control,
+        runnerToken,
+      },
+      relayOrigin,
+      trustedRelay,
+      operationId: control.operationId,
     };
   }
 
@@ -437,180 +505,25 @@ function hostedPairPlan(input: {
   };
 }
 
-function linearRelayIngressRequirement(config: OpenTagCliConfig): RelayIngressRequirement | undefined {
-  const linear = config.platforms.linear;
-  if (!linear) return undefined;
-  if ((linear.webhookPath ?? "/linear/webhooks").startsWith("/linear/webhooks/")) return undefined;
-  return {
-    provider: "linear",
-    path: linear.webhookPath ?? "/linear/webhooks",
-    requireCallback: true,
-    requireApply: true
-  };
-}
-
-function formatOptionalRelayEnv(name: string, value: string | undefined): string[] {
-  return value ? [`  ${name}=${value}`] : [];
-}
-
-export function formatLinearRelayProvisioningHint(config: OpenTagCliConfig): string {
-  const linear = config.platforms.linear;
-  if (!linear) return "";
-  const target = linear.projectTarget;
-  if (linear.auth?.method === "hosted_oauth_app") {
-    return [
-      "Configure the relay process for hosted Linear OAuth installs, then restart the relay and retry pairing:",
-      "  OPENTAG_LINEAR_OAUTH_CLIENT_ID=<Linear OAuth app client id>",
-      "  OPENTAG_LINEAR_OAUTH_REDIRECT_URI=<relay URL>/linear/oauth/callback",
-      "  OPENTAG_LINEAR_OAUTH_CLIENT_SECRET=<optional Linear OAuth app client secret>",
-      "  OPENTAG_LINEAR_OAUTH_WEBHOOK_SECRET=<Linear OAuth app webhook signing secret>",
-      "  OPENTAG_LINEAR_OAUTH_WEBHOOK_PATH=/linear/oauth/webhooks",
-      "Secrets are intentionally not printed here."
-    ].join("\n");
-  }
-  return [
-    "Configure the relay process with Linear environment variables, then restart the relay and retry pairing:",
-    "  OPENTAG_LINEAR_API_KEY=<Linear OAuth access token or raw lin_api_... key>",
-    "  OPENTAG_LINEAR_WEBHOOK_SECRET=<copy platforms.linear.webhookSecret from the local OpenTag config>",
-    `  OPENTAG_LINEAR_WEBHOOK_PATH=${linear.webhookPath ?? "/linear/webhooks"}`,
-    `  OPENTAG_LINEAR_REPO_PROVIDER=${target?.repoProvider ?? "<Project Target repo provider>"}`,
-    `  OPENTAG_LINEAR_REPO_OWNER=${target?.owner ?? "<Project Target owner>"}`,
-    `  OPENTAG_LINEAR_REPO_NAME=${target?.repo ?? "<Project Target repo>"}`,
-    ...formatOptionalRelayEnv("OPENTAG_LINEAR_GRAPHQL_URL", linear.graphqlUrl),
-    "Secrets are intentionally not printed here."
-  ].join("\n");
-}
-
-export async function validateRelayPlatformCapabilities(input: {
-  config: OpenTagCliConfig;
-  relayUrl: string;
-  fetchImpl?: typeof fetch;
-  timeoutMs: number;
-}): Promise<void> {
-  const linear = input.config.platforms.linear;
-  if (linear?.auth?.method === "hosted_oauth_app") {
-    const probe = await probeRelayCapabilities({
-      dispatcherUrl: input.relayUrl,
-      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-      timeoutMs: input.timeoutMs
-    });
-    if (probe.status !== "unknown") {
-      const platform = probe.capabilities.platforms.find((candidate) => candidate.provider === "linear");
-      if (platform?.oauthInstall?.enabled !== true) {
-        const reason = platform?.oauthInstall?.reason ?? "Linear hosted OAuth install is not enabled.";
-        const hint = formatLinearRelayProvisioningHint(input.config);
-        throw new Error(
-          `Relay ${input.relayUrl} is not ready for Linear hosted OAuth install: ${reason}${hint ? `\n\n${hint}` : ""}`
-        );
-      }
-      if (platform?.ingress?.enabled !== true) {
-        const reason = platform?.ingress?.reason ?? "Linear hosted OAuth webhook ingress is not enabled.";
-        const hint = formatLinearRelayProvisioningHint(input.config);
-        throw new Error(
-          `Relay ${input.relayUrl} is not ready for Linear hosted OAuth webhooks: ${reason}${hint ? `\n\n${hint}` : ""}`
-        );
-      }
-    }
-    return;
-  }
-  const requirement = linearRelayIngressRequirement(input.config);
-  if (!requirement) return;
-
-  const probe = await probeRelayCapabilities({
-    dispatcherUrl: input.relayUrl,
-    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-    timeoutMs: input.timeoutMs
-  });
-  if (probe.status === "unknown") return;
-
-  const support = evaluateRelayIngressCapability(probe.capabilities, requirement);
-  if (!support.ok) {
-    const hint = formatLinearRelayProvisioningHint(input.config);
-    throw new Error(
-      `Relay ${input.relayUrl} is not ready for Linear at ${requirement.path}: ${support.reason}${hint ? `\n\n${hint}` : ""}`
-    );
-  }
-}
-
-function githubRelayWebhookUrl(relayUrl: string): string {
-  return `${stripTrailingSlash(relayUrl)}/github/webhooks`;
-}
-
-function gitlabRelayWebhookUrl(relayUrl: string, webhookPath = "/gitlab/webhooks"): string {
-  return `${stripTrailingSlash(relayUrl)}${webhookPath}`;
-}
-
-function linearRelayWebhookUrl(relayUrl: string, webhookPath = "/linear/webhooks"): string {
-  return `${stripTrailingSlash(relayUrl)}${webhookPath}`;
-}
-
-function discordRelayInteractionsUrl(relayUrl: string, webhookPath = "/discord/interactions"): string {
-  return `${stripTrailingSlash(relayUrl)}${webhookPath}`;
-}
-
-function teamsRelayWebhookUrl(relayUrl: string, webhookPath = "/teams/messages"): string {
-  return `${stripTrailingSlash(relayUrl)}${webhookPath}`;
-}
-
 export function formatPairRelaySummary(input: PairRelaySummaryInput): string {
   const projectTargets = input.config.daemon.repositories.map((repository) => {
     return `  ${formatConfiguredProjectTargetSummary(repository)}`;
   });
-  const discord = input.config.platforms.discord;
-  const teams = input.config.platforms.teams;
   return [
     "OpenTag relay pairing updated.",
     `Config: ${input.configPath}`,
-    "Runtime: paired_relay",
-    `Relay: ${input.relayUrl}`,
+    `Relay: ${input.config.daemon.relayUrl}`,
     `Runner: ${input.config.daemon.runnerId}`,
     `Registration: ${input.registered ? "completed" : "skipped"}`,
-    relayTrustWarning(input.relayUrl),
+    "Project Target synchronization: verified",
+    relayTrustWarning(input.config.daemon.relayUrl),
     "Project Targets:",
     ...(projectTargets.length ? projectTargets : ["  none"]),
-    ...(input.config.platforms.github ? [`GitHub webhook URL: ${githubRelayWebhookUrl(input.relayUrl)}`] : []),
-    ...(input.config.platforms.gitlab
-      ? [`GitLab webhook URL: ${gitlabRelayWebhookUrl(input.relayUrl, input.config.platforms.gitlab.webhookPath)}`]
-      : []),
-    ...(input.config.platforms.linear
-      ? [`Linear webhook URL: ${linearRelayWebhookUrl(input.relayUrl, input.config.platforms.linear.webhookPath)}`]
-      : []),
-    ...(input.config.platforms.linear?.auth?.method === "hosted_oauth_app" && input.config.platforms.linear.auth.authorizationUrl
-      ? [`Linear OAuth install URL: ${input.config.platforms.linear.auth.authorizationUrl}`]
-      : []),
-    ...(discord?.mode === "webhook" ? [`Discord Interactions Endpoint URL: ${discordRelayInteractionsUrl(input.relayUrl, discord.webhookPath)}`] : []),
-    ...(teams ? [`Microsoft Teams Messaging Endpoint URL: ${teamsRelayWebhookUrl(input.relayUrl, teams.webhookPath)}`] : []),
     "Next steps:",
     `  opentag start --config ${input.configPath}`,
-    "  opentag service start"
+    `  opentag service install --config ${input.configPath}`,
+    `  opentag service start --config ${input.configPath}`
   ].join("\n");
-}
-
-async function runLegacyPair(input: {
-  options: PairCommandOptions;
-  dependencies: PairRelayDependencies;
-  configPath: string;
-  config: OpenTagCliConfig;
-  relayUrl: string;
-}): Promise<OpenTagCliConfig> {
-  const healthy = await probeDispatcherHealth({
-    dispatcherUrl: input.relayUrl,
-    ...(input.dependencies.fetchImpl ? { fetchImpl: input.dependencies.fetchImpl } : {}),
-    timeoutMs: input.dependencies.healthTimeoutMs ?? 5_000
-  });
-  if (!healthy) throw new Error(`Relay health check failed at ${input.relayUrl}/healthz.`);
-  const updated = relayConfigFrom({ config: input.config, relayUrl: input.relayUrl });
-  await validateRelayPlatformCapabilities({
-    config: updated,
-    relayUrl: input.relayUrl,
-    ...(input.dependencies.fetchImpl ? { fetchImpl: input.dependencies.fetchImpl } : {}),
-    timeoutMs: input.dependencies.healthTimeoutMs ?? 5_000
-  });
-  if (input.options.register !== false) {
-    await bootstrapLocalDispatcher(updated, input.dependencies.bootstrapClient);
-  }
-  (input.dependencies.writeConfig ?? writeCliConfigAtomic)(input.configPath, updated);
-  return updated;
 }
 
 async function runHostedPair(input: {
@@ -636,43 +549,77 @@ async function runHostedPair(input: {
   });
 
   const capabilityClient = createControlClient({
-    dispatcherUrl: input.plan.relayOrigin,
+    controlPlaneUrl: input.plan.relayOrigin,
     ...(input.dependencies.fetchImpl
       ? { fetchImpl: input.dependencies.fetchImpl }
       : {})
   });
   const capabilities = await capabilityClient.getRelayCapabilitiesControlV1();
-  const requiredCapability = input.plan.recoveryRegistration
-    ? "relay.credential-reprovision.v1" as const
-    : "relay.registration.v1" as const;
-  if (!capabilities.capabilities.includes(requiredCapability)) {
-    throw new Error(
-      `Hosted Control V1 relay does not advertise required capability ${requiredCapability}.`
-    );
+  const requiredCapabilities = [
+    ...(input.plan.reconcileRuntimeCredential ? [] : [input.plan.recoveryRegistration
+      ? "relay.credential-reprovision.v1" as const
+      : "relay.registration.v1" as const]),
+    "relay.repository-binding.v1" as const,
+  ];
+  for (const requiredCapability of requiredCapabilities) {
+    if (!capabilities.capabilities.includes(requiredCapability)) {
+      throw new Error(
+        `Hosted Control V1 relay does not advertise required capability ${requiredCapability}.`
+      );
+    }
   }
 
   // This is intentionally the first full config read. The raw trust and
   // pending-operation readback above must complete before any SecretRef is
   // materialized.
   const config = readConfig(input.configPath);
+  if (input.plan.reconcileRuntimeCredential) {
+    const runtimeClient = createControlClient({
+      controlPlaneUrl: input.plan.relayOrigin,
+      controlCredential: {
+        kind: "runtime",
+        token: input.plan.reconcileRuntimeCredential.runnerToken,
+      },
+      ...(input.dependencies.fetchImpl
+        ? { fetchImpl: input.dependencies.fetchImpl }
+        : {}),
+    });
+    await synchronizeProjectTargets({
+      client: runtimeClient,
+      config,
+      operationId: input.plan.operationId,
+      registration: input.plan.reconcileRuntimeCredential.pairedControl.registration,
+    });
+    writeHostedState({
+      configPath: input.configPath,
+      controlRegistration: input.plan.reconcileRuntimeCredential.pairedControl,
+      readRawConfig,
+      relayUrl: input.relayUrl,
+      trustedRelay: input.plan.trustedRelay,
+      runnerToken: input.plan.reconcileRuntimeCredential.runnerToken,
+      writeHostedConfig,
+    });
+    return readConfig(input.configPath);
+  }
   let controlCredential: Parameters<typeof createOpenTagClient>[0]["controlCredential"];
   if (input.plan.recoveryRegistration) {
     controlCredential = {
       kind: "recovery_pairing",
-      token: requireRecoverySecret(
+      token: await requireRecoverySecret(
         input.dependencies.readRecoverySecret ?? defaultReadRecoverySecret
       )
     };
   } else {
-    const pairingToken = config.daemon.pairingToken?.trim();
-    if (!pairingToken) {
-      throw new Error("Hosted Control V1 registration requires daemon.pairingToken.");
-    }
-    controlCredential = { kind: "bootstrap_pairing", token: pairingToken };
+    controlCredential = {
+      kind: "bootstrap_pairing",
+      token: await requireBootstrapSecret(
+        input.dependencies.readBootstrapSecret ?? defaultReadBootstrapSecret
+      )
+    };
   }
 
   const mutationClient = createControlClient({
-    dispatcherUrl: input.plan.relayOrigin,
+    controlPlaneUrl: input.plan.relayOrigin,
     controlCredential,
     ...(input.dependencies.fetchImpl
       ? { fetchImpl: input.dependencies.fetchImpl }
@@ -708,7 +655,7 @@ async function runHostedPair(input: {
           requestId: controlRequestIdFromOperationId(input.plan.operationId),
           operationId: input.plan.operationId,
           runnerId: config.daemon.runnerId,
-          capabilities: []
+          capabilities: ["relay.repository-binding.v1"]
         })
       );
     }
@@ -730,7 +677,7 @@ async function runHostedPair(input: {
         writeHostedConfig
       });
       throw new Error(
-        "Hosted Control V1 mutation outcome is unknown; retry with the persisted operation."
+        "Hosted Control V1 mutation outcome is unknown. Retry `opentag pair` with the same relay and bootstrap authority; OpenTag will reuse the persisted operation instead of creating another registration."
       );
     }
     throw error;
@@ -743,12 +690,14 @@ async function runHostedPair(input: {
       readRawConfig,
       relayUrl: input.relayUrl,
       trustedRelay: input.plan.trustedRelay,
-      removePairingToken: true,
       runnerToken: null,
       writeHostedConfig
     });
+    throw new Error(
+      "Hosted Control V1 registration was replayed without returning the runtime credential; recovery_required. Re-provision this Runner with `opentag pair --recover <recoveryCredentialId>` before starting it."
+    );
   } else {
-    await persistStageThenPair({
+    const stagedControl = persistCredentialStage({
       configPath: input.configPath,
       operationId: input.plan.operationId,
       relayUrl: input.relayUrl,
@@ -757,31 +706,32 @@ async function runHostedPair(input: {
       trustedRelay: input.plan.trustedRelay,
       writeHostedConfig
     });
+    const runtimeClient = createControlClient({
+      controlPlaneUrl: input.plan.relayOrigin,
+      controlCredential: { kind: "runtime", token: response.runnerToken },
+      ...(input.dependencies.fetchImpl
+        ? { fetchImpl: input.dependencies.fetchImpl }
+        : {}),
+    });
+    await synchronizeProjectTargets({
+      client: runtimeClient,
+      config,
+      operationId: input.plan.operationId,
+      registration: stagedControl.registration,
+    });
+    writeHostedState({
+      configPath: input.configPath,
+      controlRegistration: { ...stagedControl, state: "paired" },
+      readRawConfig,
+      relayUrl: input.relayUrl,
+      trustedRelay: input.plan.trustedRelay,
+      runnerToken: response.runnerToken,
+      writeHostedConfig,
+    });
   }
   return readConfig(input.configPath);
 }
-
-function finalizeStagedHostedPair(input: {
-  dependencies: PairRelayDependencies;
-  configPath: string;
-  plan: HostedPairPlan & {
-    finalizeStagedLocally: NonNullable<HostedPairPlan["finalizeStagedLocally"]>;
-  };
-  relayUrl: string;
-}): void {
-  writeHostedState({
-    configPath: input.configPath,
-    controlRegistration: input.plan.finalizeStagedLocally.pairedControl,
-    readRawConfig: input.dependencies.readRawConfig ?? readCliRawConfig,
-    relayUrl: input.relayUrl,
-    trustedRelay: input.plan.trustedRelay,
-    removePairingToken: true,
-    runnerToken: input.plan.finalizeStagedLocally.runnerToken,
-    writeHostedConfig: input.dependencies.writeHostedConfig
-      ?? writeHostedControlConfigAtomic
-  });
-}
-export async function runPairCommand(options: PairCommandOptions, dependencies: PairRelayDependencies = {}): Promise<void> {
+export async function runPairCommand(options: PairCommandOptions, dependencies: PairRelayDependencies = {}): Promise<OpenTagCliConfig> {
   if (!options.relay) {
     throw new Error("opentag pair currently requires --relay <url>.");
   }
@@ -792,16 +742,8 @@ export async function runPairCommand(options: PairCommandOptions, dependencies: 
   assertRelayTransportAllowed(relayUrl);
   const readRawConfig = dependencies.readRawConfig ?? readCliRawConfig;
   const rawConfig = readRawConfig(configPath);
-  const rawRuntime = rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig)
-    ? (rawConfig as Record<string, unknown>).runtime
-    : undefined;
-  const localProcessEndpoint = rawRuntime && typeof rawRuntime === "object" && !Array.isArray(rawRuntime)
-    ? (rawRuntime as Record<string, unknown>).localProcessEndpoint
-    : undefined;
-  assertRemotePairedRelayEndpoint({
-    relayUrl,
-    ...(typeof localProcessEndpoint === "string" ? { localProcessEndpoint } : {})
-  });
+  assertRawProjectTargetsConfigured(rawConfig);
+  assertRemotePairedRelayEndpoint({ relayUrl });
   const plan = hostedPairPlan({
     options,
     rawConfig,
@@ -809,44 +751,15 @@ export async function runPairCommand(options: PairCommandOptions, dependencies: 
     operationId: dependencies.randomUUID ?? randomUUID,
     now: dependencies.now ?? (() => new Date())
   });
-  if (plan?.finalizeStagedLocally) {
-    finalizeStagedHostedPair({
-      dependencies,
-      configPath,
-      plan: {
-        ...plan,
-        finalizeStagedLocally: plan.finalizeStagedLocally
-      },
-      relayUrl
-    });
-    logger.log(
-      [
-        "Hosted Control V1 staged credential finalized locally.",
-        `Config: ${configPath}`,
-        `Relay: ${plan.relayOrigin}`,
-        "Registration: completed"
-      ].join("\n")
-    );
-    return;
-  }
-  const updated = plan
-    ? await runHostedPair({ dependencies, configPath, plan, relayUrl })
-    : await runLegacyPair({
-        options,
-        dependencies,
-        configPath,
-        config: (dependencies.readConfig ?? readCliConfig)(configPath),
-        relayUrl
-      });
+  const updated = await runHostedPair({ dependencies, configPath, plan, relayUrl });
 
   logger.log(
     formatPairRelaySummary({
       configPath,
       config: updated,
-      relayUrl,
-      registered: plan
-        ? updated.daemon.controlRegistration?.state === "paired"
-        : options.register !== false
+      registered: !plan.reconcileRuntimeCredential
+        && updated.daemon.controlRegistration?.state === "paired"
     })
   );
+  return updated;
 }

@@ -7,7 +7,6 @@
   "include": ["src/**/*.ts"],
   "references": [
     { "path": "../core" },
-    { "path": "../delivery-contract" },
-    { "path": "../governance" }
+    { "path": "../delivery-contract" }
   ]
 }

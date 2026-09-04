@@ -1,22 +1,17 @@
-import { createDispatcherClient } from "@opentag/client";
-import { resolveGitHubSourceApiOrigin } from "@opentag/github";
 import {
   createAcpAgentExecutor,
   createBuiltInAcpExecutors,
   createEchoExecutor,
-  DEFAULT_HERMES_PROFILE,
   type BuiltInAcpAgentOptions,
   type ExecutorAdapter,
   type RunnerSecurityPolicy
 } from "@opentag/runner";
-import { compareCanonicalUnicodeStrings, type RunnerExecutorRegistration } from "@opentag/core";
 import {
   assertHostedRelayAuthorization,
   hostedRunnerAuthProblem,
-  runnerDispatcherToken,
   type OpenTagDaemonConfig
 } from "./config.js";
-import type { DaemonClient, DaemonRuntimeInput } from "./daemon.js";
+import type { PairedRunnerRuntimeInput } from "./daemon.js";
 import { createHostedControlLoop } from "./control-v1.js";
 
 export function securityFromConfig(config: OpenTagDaemonConfig): RunnerSecurityPolicy | undefined {
@@ -30,15 +25,6 @@ export function securityFromConfig(config: OpenTagDaemonConfig): RunnerSecurityP
   if (security.extraSafeEnv !== undefined) normalized.extraSafeEnv = security.extraSafeEnv;
 
   return Object.keys(normalized).length > 0 ? normalized : undefined;
-}
-
-export function hermesProfileConfigurationWarning(config: OpenTagDaemonConfig): string | undefined {
-  if (!config.hermes?.profileTemplate) return undefined;
-  const profile = config.hermes.profile ?? DEFAULT_HERMES_PROFILE;
-  return (
-    "Hermes configuration warning: daemon.hermes.profileTemplate is not used because OpenTag does not yet provision per-run " +
-    `Hermes profiles. OpenTag will use the fixed profile '${profile}'; set daemon.hermes.profile explicitly and remove profileTemplate.`
-  );
 }
 
 export function builtInAcpOptionsFromConfig(config: OpenTagDaemonConfig): BuiltInAcpAgentOptions {
@@ -95,103 +81,31 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
   return executors;
 }
 
-export function runnerExecutorRegistrations(
-  executors: Record<string, ExecutorAdapter>
-): RunnerExecutorRegistration[] {
-  return Object.values(executors)
-    .map((executor) => ({
-      executorId: executor.id,
-      ...(executor.capability ? { capability: { ...executor.capability } } : {}),
-      readiness: "ready" as const,
-      reason: "Executor is configured; run-specific readiness is verified before execution starts."
-    }))
-    .sort((left, right) => compareCanonicalUnicodeStrings(left.executorId, right.executorId));
-}
-
-export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
-  if (config.controlRegistration) {
-    assertHostedRelayAuthorization({
-      dispatcherUrl: config.dispatcherUrl,
-      trustedRelay: config.trustedRelay
-    });
-    const hostedAuthProblem = hostedRunnerAuthProblem(config);
-    if (hostedAuthProblem) throw new Error(hostedAuthProblem);
-    throw new Error(
-      "Hosted Control V1 does not expose a legacy claim-capable daemon client."
-    );
-  }
-  const token = runnerDispatcherToken(config);
-  return createDispatcherClient({
-    dispatcherUrl: config.dispatcherUrl,
-    runnerId: config.runnerId,
-    ...(token ? { pairingToken: token } : {})
-  });
-}
-
-/** @deprecated Legacy automatic-PR settings are parsed but no longer executed. */
-export function pullRequestOptionsFromConfig(_config: OpenTagDaemonConfig): undefined {
-  return undefined;
-}
-
 export function createDaemonRuntimeInput(
   config: OpenTagDaemonConfig,
-  options: { databasePath?: string; githubApiOrigin?: string } = {},
-): DaemonRuntimeInput {
+  options: { databasePath: string },
+): PairedRunnerRuntimeInput {
   const security = securityFromConfig(config);
   const executors = executorsFromConfig(config);
-  if (options.githubApiOrigin !== undefined && !config.controlRegistration) {
+  if (!config.controlRegistration) {
     throw new Error(
-      "Hosted Control V1 E2E GitHub API origin requires paired Hosted Control V1."
+      "Paired Runner runtime requires a Hosted Control V1 registration."
     );
   }
-  if (config.controlRegistration) {
-    if (!options.databasePath) {
-      throw new Error(
-        "Hosted Control V1 requires the authoritative local dispatcher database path."
-      );
-    }
-    assertHostedRelayAuthorization({
-      dispatcherUrl: config.dispatcherUrl,
-      trustedRelay: config.trustedRelay
-    });
-    const hostedAuthProblem = hostedRunnerAuthProblem(config);
-    if (hostedAuthProblem) throw new Error(hostedAuthProblem);
-    const githubApiOrigin = options.githubApiOrigin !== undefined
-      ? resolveGitHubSourceApiOrigin({
-        token: config.githubToken ?? "",
-        apiOrigin: options.githubApiOrigin,
-      })
-      : undefined;
-    const controlLoop = createHostedControlLoop({
-      config,
-      databasePath: options.databasePath,
-      executors,
-      ...(security ? { security } : {}),
-      ...(githubApiOrigin !== undefined ? { githubApiOrigin } : {}),
-    });
-    if (!controlLoop) {
-      throw new Error("Hosted Control V1 sidecar could not be created.");
-    }
-    return {
-      mode: "control-v1-sidecar",
-      controlLoop,
-      ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),
-    };
-  }
-
-  return {
-    mode: "legacy",
-    runnerId: config.runnerId,
-    repositories: config.repositories,
+  assertHostedRelayAuthorization({
+    relayUrl: config.relayUrl,
+    trustedRelay: config.trustedRelay
+  });
+  const hostedAuthProblem = hostedRunnerAuthProblem(config);
+  if (hostedAuthProblem) throw new Error(hostedAuthProblem);
+  const controlLoop = createHostedControlLoop({
+    config,
+    databasePath: options.databasePath,
     executors,
-    scratchRoot: config.scratchRoot,
-    keepScratch: config.keepScratch,
-    approvalMode: config.approvalMode,
     ...(security ? { security } : {}),
-    ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),
-    ...(config.runTimeoutMs ? { runTimeoutMs: config.runTimeoutMs } : {}),
-    ...(config.agentSessionProfile ? { agentSessionProfile: config.agentSessionProfile } : {}),
+  });
+  return {
+    controlLoop,
     ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),
-    client: createDaemonClient(config)
   };
 }

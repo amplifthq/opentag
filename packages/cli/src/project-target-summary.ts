@@ -9,5 +9,5 @@ export function formatConfiguredProjectTargetSummary(repository: ConfiguredRepos
     owner: repository.owner,
     repo: repository.repo
   });
-  return `${target} (hasWorkspacePath=${repository.checkoutPath ? "yes" : "no"})`;
+  return `${repository.projectTargetId} -> ${target} (hasWorkspacePath=${repository.checkoutPath ? "yes" : "no"})`;
 }

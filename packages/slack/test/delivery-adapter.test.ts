@@ -107,7 +107,7 @@ describe('Slack delivery adapter', () => {
   });
 
   it.each([
-    ['providerId', { providerId: 'teams' }],
+    ['providerId', { providerId: 'github' }],
     ['providerInstanceId', { providerInstanceId: 'slack-secondary' }],
     ['bindingDigest', { bindingDigest: `sha256:${'4'.repeat(64)}` }],
     ['providerPrincipalDigest', {

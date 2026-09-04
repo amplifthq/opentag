@@ -83,7 +83,7 @@ Run the repository verifier with:
 pnpm verify:delivery-fixtures
 ```
 
-The verifier resolves the declared `tsx` dependency from the dispatcher
-workspace; no package-manager-global executable is assumed.
+The verifier resolves the root workspace's declared `tsx` dependency; no
+package-manager-global executable is assumed.
 
 The verifier performs no network or Provider I/O.

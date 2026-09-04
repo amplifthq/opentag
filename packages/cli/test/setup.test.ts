@@ -1,1452 +1,243 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { readCliConfig, type OpenTagCliConfig } from "../src/config.js";
-import { runSetupCommand as runSetupCommandRaw, type SetupCommandDependencies, type SetupCommandOptions } from "../src/setup.js";
-import { formatSetupComplete } from "../src/setup/summary.js";
+import { computeGitHubProjectTargetBindingDigestV1 } from "@opentag/control-protocol";
+import { readCliConfig } from "../src/config.js";
+import {
+  runSetupCommand,
+  type SetupCommandDependencies,
+} from "../src/commands/setup.js";
 import type { PromptAdapter, PromptOption } from "../src/ui/prompts.js";
 
 function tempDir(): string {
-  return mkdtempSync(join(tmpdir(), "opentag-cli-test-"));
+  return mkdtempSync(join(tmpdir(), "opentag-cli-setup-"));
 }
 
-function testPrompts(overrides: Partial<PromptAdapter> = {}): PromptAdapter {
+function prompts(input: { confirm?: boolean } = {}): PromptAdapter {
   return {
-    intro: vi.fn(),
-    outro: vi.fn(),
-    note: vi.fn(),
-    async select<Value extends string>(input: { options: Array<PromptOption<Value>>; initialValue?: Value }): Promise<Value> {
-      return input.initialValue ?? input.options[0]!.value;
+    intro() {},
+    outro() {},
+    note() {},
+    async select<Value extends string>(request: {
+      options: Array<PromptOption<Value>>;
+      initialValue?: Value;
+    }) {
+      return request.initialValue ?? request.options[0]!.value;
     },
-    async text(input) {
-      return input.initialValue ?? "";
-    },
-    async password() {
-      return "secret_prompt";
-    },
-    async confirm() {
-      return true;
-    },
-    ...overrides
+    async text(request) { return request.initialValue ?? ""; },
+    async password() { return "prompt-secret"; },
+    async confirm() { return input.confirm ?? true; },
   };
 }
 
-function runSetupCommand(options: SetupCommandOptions, dependencies: SetupCommandDependencies = {}): Promise<void> {
-  return runSetupCommandRaw(options, {
-    validateLarkCredentials: vi.fn(async () => ({ botOpenId: "ou_verified_bot", botName: "OpenTag" })),
-    probeHermesProfile: vi.fn(async () => ({ ready: true })),
-    ...dependencies
-  });
+function setupOptions(overrides: Record<string, unknown> = {}) {
+  return {
+    config: join(tempDir(), "config.json"),
+    project: tempDir(),
+    language: "en",
+    executor: "echo",
+    githubRepository: "acme/demo",
+    projectTargetId: "target_1",
+    relay: "https://relay.example",
+    start: false,
+    yes: true,
+    ...overrides,
+  };
 }
 
-describe("OpenTag CLI setup", () => {
-  it("defaults manual Lark credentials to the Feishu tenant", async () => {
-    const projectPath = tempDir();
-    const configPath = join(tempDir(), "config.json");
-    const prompts = testPrompts({
-      text: vi.fn(async (input) => input.initialValue ?? ""),
-      password: vi.fn(async () => "secret_manual")
-    });
-    const scanLarkPersonalAgent = vi.fn(async () => {
-      throw new Error("Unexpected Lark scan");
-    });
+async function returnWrittenConfig(options: { config?: string }) {
+  return readCliConfig(options.config!);
+}
 
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        executor: "echo",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        start: false,
-        force: true
-      },
-      {
-        prompts,
-        scanLarkPersonalAgent
-      }
-    );
+function dependencies(
+  overrides: Partial<SetupCommandDependencies> = {},
+): SetupCommandDependencies {
+  return {
+    prompts: prompts(),
+    env: {
+      OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "bootstrap_secret",
+    },
+    pairOpenTag: returnWrittenConfig,
+    ...overrides,
+  };
+}
 
-    expect(scanLarkPersonalAgent).not.toHaveBeenCalled();
-    expect(readCliConfig(configPath).platforms.lark).toEqual({
-      appId: "cli_manual",
-      appSecret: "secret_manual",
-      domain: "feishu",
-      botOpenId: "ou_verified_bot",
-      defaultProjectBinding: true
-    });
-    expect(readCliConfig(configPath).preferences?.lastSetup).toMatchObject({
-      platforms: ["lark"],
-      executor: "echo",
-      larkSetupMethod: "manual",
-      bindingMethod: "default_project"
+describe("OpenTag CLI paired setup core", () => {
+  it("writes a private paired Runner configuration", async () => {
+    const options = setupOptions();
+    await runSetupCommand(options, dependencies());
+    expect(existsSync(options.config)).toBe(true);
+    expect(statSync(options.config).mode & 0o777).toBe(0o600);
+    const config = readCliConfig(options.config);
+    expect(config.daemon.relayUrl).toBe("https://relay.example");
+    expect(config).not.toHaveProperty("runtime");
+    expect(config.daemon.repositories[0]).toMatchObject({
+      projectTargetId: "target_1",
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      defaultExecutor: "echo",
     });
   });
 
-  it("rejects preselected tenant for scan setup", async () => {
-    await expect(
-      runSetupCommand(
-        {
-          config: join(tempDir(), "config.json"),
-          project: tempDir(),
-          executor: "echo",
-          larkSetup: "scan",
-          tenant: "lark",
-          start: false,
-          force: true,
-          yes: true
-        },
-        {
-          prompts: testPrompts(),
-          scanLarkPersonalAgent: vi.fn(async () => ({
-            appId: "cli_scan",
-            appSecret: "secret_scan",
-            domain: "lark" as const
-          }))
-        }
-      )
-    ).rejects.toThrow("Tenant is detected during scan setup");
-  });
-
-  it("persists the domain returned by scanned Feishu registration", async () => {
-    const projectPath = tempDir();
-    const configPath = join(tempDir(), "config.json");
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        executor: "echo",
-        larkSetup: "scan",
-        start: false,
-        force: true,
-        yes: true
-      },
-      {
-        prompts: testPrompts(),
-        scanLarkPersonalAgent: vi.fn(async () => ({
-          appId: "cli_scan",
-          appSecret: "secret_scan",
-          domain: "feishu" as const,
-          botOpenId: "ou_bot"
-        }))
-      }
-    );
-
-    expect(readCliConfig(configPath).platforms.lark).toEqual({
-      appId: "cli_scan",
-      appSecret: "secret_scan",
-      domain: "feishu",
-      botOpenId: "ou_bot",
-      defaultProjectBinding: true
-    });
-    expect(readCliConfig(configPath).preferences?.lastSetup?.larkDomain).toBe("feishu");
-  });
-
-  it("persists the domain returned by scanned Lark registration", async () => {
-    const projectPath = tempDir();
-    const configPath = join(tempDir(), "config.json");
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        executor: "echo",
-        larkSetup: "scan",
-        start: false,
-        force: true,
-        yes: true
-      },
-      {
-        prompts: testPrompts(),
-        scanLarkPersonalAgent: vi.fn(async () => ({
-          appId: "cli_scan",
-          appSecret: "secret_scan",
-          domain: "lark" as const,
-          botOpenId: "ou_bot"
-        }))
-      }
-    );
-
-    expect(readCliConfig(configPath).platforms.lark).toEqual({
-      appId: "cli_scan",
-      appSecret: "secret_scan",
-      domain: "lark",
-      botOpenId: "ou_bot",
-      defaultProjectBinding: true
-    });
-    expect(readCliConfig(configPath).preferences?.lastSetup?.larkDomain).toBe("lark");
-  });
-
-  it("normalizes a saved built-in executor before reusing setup defaults", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const projectPath = tempDir();
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "lark",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        force: true,
-        yes: true
-      },
-      {
-        prompts: testPrompts(),
-        defaults: { executor: " codex " }
-      }
-    );
-
-    expect(readCliConfig(configPath).daemon.repositories[0].defaultExecutor).toBe("codex");
-  });
-
-  it("rejects whitespace-only saved executor defaults", async () => {
-    await expect(
-      runSetupCommand(
-        {
-          config: join(tempDir(), "config.json"),
-          platform: "lark",
-          force: true,
-          yes: true
-        },
-        {
-          prompts: testPrompts(),
-          defaults: { executor: "   " }
-        }
-      )
-    ).rejects.toThrow("Executor id must not be empty.");
-  });
-
-  it("supports explicit manual Lark credentials", async () => {
-    const configPath = join(tempDir(), "config.json");
-
-    await runSetupCommand({
-      config: configPath,
-      project: tempDir(),
-      executor: "echo",
-      larkSetup: "manual",
-      tenant: "feishu",
-      larkAppId: "cli_manual",
-      larkAppSecret: "secret_manual",
-      larkBotOpenId: "ou_manual_bot",
-      binding: "bind_later",
-      start: false,
-      force: true
-    }, { prompts: testPrompts() });
-
-    expect(readCliConfig(configPath).platforms.lark).toEqual({
-      appId: "cli_manual",
-      appSecret: "secret_manual",
-      domain: "feishu",
-      botOpenId: "ou_verified_bot",
-      defaultProjectBinding: false
-    });
-  });
-
-  it("does not save manual Lark credentials when provider verification fails", async () => {
-    const configPath = join(tempDir(), "config.json");
-
-    await expect(
-      runSetupCommand(
-        {
-          config: configPath,
-          project: tempDir(),
-          executor: "echo",
-          larkSetup: "manual",
-          tenant: "lark",
-          larkAppId: "cli_manual",
-          larkAppSecret: "bad_secret",
-          force: true,
-          yes: true
-        },
-        {
-          prompts: testPrompts(),
-          validateLarkCredentials: vi.fn(async () => {
-            throw new Error("Lark credentials could not be verified: invalid app secret");
-          })
-        }
-      )
-    ).rejects.toThrow("Lark credentials could not be verified");
-
-    expect(existsSync(configPath)).toBe(false);
-  });
-
-  it("shows official Lark console links before manual credential prompts", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const notes: string[] = [];
-    const prompts = testPrompts({
-      note(message) {
-        notes.push(message);
-      },
-      text: vi.fn(async (input) => {
-        return input.message.includes("App ID") || input.message.includes("应用 ID") ? "cli_manual" : "";
-      }),
-      password: vi.fn(async () => "secret_manual")
-    });
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "feishu",
-        start: false,
-        force: true
-      },
-      { prompts }
-    );
-
-    expect(notes.join("\n")).toContain("https://open.feishu.cn/app");
-    expect(notes.join("\n")).toContain("https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/use-websocket?lang=zh-CN");
-    expect(notes.join("\n")).toContain("Capabilities:");
-    expect(notes.join("\n")).toContain("platform Lark / Feishu:");
-    expect(notes.join("\n")).toContain("liveness=source_receipt");
-    expect(notes.join("\n")).toContain("executor Echo:");
-  });
-
-  it("does not prompt for optional Lark bot open id when manual credentials are provided", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const prompts = testPrompts({
-      text: vi.fn(async () => {
-        throw new Error("Unexpected optional bot open id prompt");
-      })
-    });
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        force: true,
-        yes: true
-      },
-      { prompts }
-    );
-
-    expect(readCliConfig(configPath).platforms.lark).toEqual({
-      appId: "cli_manual",
-      appSecret: "secret_manual",
-      domain: "lark",
-      botOpenId: "ou_verified_bot",
-      defaultProjectBinding: true
-    });
-  });
-
-  it("uses saved Lark credentials from the legacy start-lark config", async () => {
-    const projectPath = tempDir();
-    const configPath = join(tempDir(), "config.json");
-    const legacyDirectory = join(projectPath, ".opentag", "lark");
-    mkdirSync(legacyDirectory, { recursive: true });
-    const legacyConfigPath = join(legacyDirectory, "lark.local.json");
-    writeFileSync(
-      legacyConfigPath,
-      `${JSON.stringify({
-        appId: "legacy_app",
-        appSecret: "legacy_secret",
-        domain: "feishu",
-        botOpenId: "ou_legacy_bot"
-      })}\n`
-    );
-    chmodSync(legacyConfigPath, 0o600);
-    const scanLarkPersonalAgent = vi.fn(async () => {
-      throw new Error("Unexpected Lark scan");
-    });
-    const validateLarkCredentials = vi.fn(async () => ({
-      botOpenId: "ou_verified_saved_bot",
-      botName: "OpenTag Saved"
+  it("registers the setup Project Target before finalizing the Runner pair", async () => {
+    const options = setupOptions();
+    const upsertRunnerProjectTargetControlV1 = vi.fn(async (input: any) => ({
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const,
+      organizationId: "org_1",
+      runnerId: input.runnerId,
+      credentialId: "credential_1",
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      capabilities: ["relay.repository-binding.v1"] as const,
+      targets: [{
+        ...input.request.target,
+        bindingDigest: await computeGitHubProjectTargetBindingDigestV1(
+          input.request.target,
+        ),
+      }],
+      observedAt: "2026-08-15T06:00:00.000Z",
     }));
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        executor: "echo",
-        force: true,
-        yes: true
-      },
-      {
-        prompts: testPrompts(),
-        scanLarkPersonalAgent,
-        validateLarkCredentials
-      }
-    );
-
-    expect(scanLarkPersonalAgent).not.toHaveBeenCalled();
-    expect(validateLarkCredentials).toHaveBeenCalledWith({
-      appId: "legacy_app",
-      appSecret: "legacy_secret",
-      domain: "feishu"
-    });
-    expect(readCliConfig(configPath).platforms.lark).toEqual({
-      appId: "legacy_app",
-      appSecret: "legacy_secret",
-      domain: "feishu",
-      botOpenId: "ou_verified_saved_bot",
-      defaultProjectBinding: true
-    });
-    expect(readCliConfig(configPath).preferences?.lastSetup?.larkSetupMethod).toBe("saved");
-  });
-
-  it("reuses saved Lark credentials when provider verification is unavailable", async () => {
-    const projectPath = tempDir();
-    const configPath = join(tempDir(), "config.json");
-    const notes: string[] = [];
-    const legacyDirectory = join(projectPath, ".opentag", "lark");
-    mkdirSync(legacyDirectory, { recursive: true });
-    const legacyConfigPath = join(legacyDirectory, "lark.local.json");
-    writeFileSync(
-      legacyConfigPath,
-      `${JSON.stringify({
-        appId: "legacy_app",
-        appSecret: "stale_secret",
-        domain: "lark",
-        botOpenId: "ou_stale_bot"
-      })}\n`
-    );
-    chmodSync(legacyConfigPath, 0o600);
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        executor: "echo",
-        force: true,
-        yes: true
-      },
-      {
-        prompts: testPrompts({ note: (message) => notes.push(message) }),
-        validateLarkCredentials: vi.fn(async () => {
-          throw new Error("Lark credentials could not be verified: token expired");
-        })
-      }
-    );
-
-    expect(readCliConfig(configPath).platforms.lark).toMatchObject({
-      appId: "legacy_app",
-      domain: "lark",
-      botOpenId: "ou_stale_bot"
-    });
-    expect(notes.join("\n")).toContain("Saved Lark / Feishu credentials could not be verified live");
-  });
-
-  it("summarizes the saved project path instead of the internal Project Target id", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const projectPath = tempDir();
-    const notes: string[] = [];
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        start: false,
-        force: true
-      },
-      {
-        prompts: testPrompts({
-          note(message) {
-            notes.push(message);
-          }
-        })
-      }
-    );
-
-    const completeNote = notes.at(-1) ?? "";
-    expect(completeNote).toContain("OpenTag config saved.");
-    expect(completeNote).toContain(`Project path: ${realpathSync.native(projectPath)}`);
-    expect(completeNote).not.toContain("Project Target");
-    expect(completeNote).not.toContain("path_");
-  });
-
-  it("summarizes Linear relay setup without local tunnel instructions", () => {
-    const config = {
-      schemaVersion: 1,
-      preferences: {
-        language: "en"
-      },
-      state: {
-        directory: "/tmp/opentag-state",
-        databasePath: "/tmp/opentag-state/opentag.db",
-        worktreeRoot: "/tmp/opentag-state/worktrees"
-      },
-      runtime: {
-        mode: "paired_relay",
-        relayUrl: "https://relay.example",
-        relayProvider: "custom"
-      },
-      daemon: {
+    const client = {
+      getRelayCapabilitiesControlV1: vi.fn(async () => ({
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        registryVersion: "opentag.control.capabilities/v1" as const,
+        capabilities: ["relay.registration.v1", "relay.repository-binding.v1"] as const,
+        minimumClient: { schemaVersion: 1 as const, protocolVersion: "1.0" as const },
+        deployment: { environment: "test", releaseSha: "a".repeat(40) },
+      })),
+      registerRunnerControlV1: vi.fn(async (request: any) => ({
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        operationId: request.operationId,
+        organizationId: "org_1",
         runnerId: "runner_local",
-        dispatcherUrl: "https://relay.example",
-        repositories: [
-          {
-            provider: "github",
-            owner: "acme",
-            repo: "demo",
-            checkoutPath: "/tmp/demo",
-            defaultExecutor: "echo",
-            baseBranch: "main",
-            pushRemote: "origin",
-            worktreeRoot: "/tmp/opentag-state/worktrees",
-            keepWorktree: "on_failure"
-          }
-        ],
-        pairingToken: "pairing_token",
-        pollIntervalMs: 5000,
-        heartbeatIntervalMs: 15000
+        registrationGeneration: 1,
+        credentialGeneration: 1,
+        credentialId: "credential_1",
+        credentialPurpose: "runtime" as const,
+        runnerToken: "runner_runtime_token",
+        createdAt: "2026-08-15T06:00:00.000Z",
+        replayed: false as const,
+      })),
+      reprovisionRunnerControlV1: vi.fn(),
+      getRunnerControlContextV1: vi.fn(),
+      upsertRunnerProjectTargetControlV1,
+    };
+    await runSetupCommand(options, dependencies({
+      pairOpenTag: undefined,
+      pairDependencies: {
+        createControlClient: () => client as never,
+        now: () => new Date("2026-08-15T06:00:00.000Z"),
+        randomUUID: () => "operation_setup_pair",
       },
-      platforms: {
-        linear: {
-          token: "lin_api_token",
-          webhookSecret: "linear_webhook_secret",
-          webhookPath: "/linear/webhooks",
-          port: 3070,
-          projectTarget: {
-            repoProvider: "github",
-            owner: "acme",
-            repo: "demo"
-          }
-        }
-      }
-    } as OpenTagCliConfig;
-
-    const summary = formatSetupComplete(config, "/tmp/opentag-config.json");
-
-    expect(summary).toContain("Webhook URL: https://relay.example/linear/webhooks");
-    expect(summary).toContain("Relay mode: Linear should call the relay URL above; no ngrok/cloudflared tunnel is needed.");
-    expect(summary).not.toContain("Local listener:");
-    expect(summary).not.toContain("ngrok http 3070");
-    expect(summary).not.toContain("https://<your-tunnel-host>/linear/webhooks");
-  });
-
-  it("summarizes hosted Linear OAuth Agent Session events", () => {
-    const config = {
-      schemaVersion: 1,
-      preferences: {
-        language: "en"
-      },
-      state: {
-        directory: "/tmp/opentag-state",
-        databasePath: "/tmp/opentag-state/opentag.db",
-        worktreeRoot: "/tmp/opentag-state/worktrees"
-      },
-      runtime: {
-        mode: "paired_relay",
-        relayUrl: "https://relay.example",
-        relayProvider: "custom"
-      },
-      daemon: {
-        runnerId: "runner_local",
-        dispatcherUrl: "https://relay.example",
-        repositories: [
-          {
-            provider: "github",
-            owner: "acme",
-            repo: "demo",
-            checkoutPath: "/tmp/demo",
-            defaultExecutor: "echo",
-            baseBranch: "main",
-            pushRemote: "origin",
-            worktreeRoot: "/tmp/opentag-state/worktrees",
-            keepWorktree: "on_failure"
-          }
-        ],
-        pairingToken: "pairing_token",
-        pollIntervalMs: 5000,
-        heartbeatIntervalMs: 15000
-      },
-      platforms: {
-        linear: {
-          webhookPath: "/linear/oauth/webhooks",
-          port: 3070,
-          auth: {
-            method: "hosted_oauth_app",
-            actor: "app",
-            installationId: "install_hosted",
-            authorizationUrl: "https://linear.example/oauth/authorize?state=linear_state",
-            stateExpiresAt: "2026-07-07T01:00:00.000Z"
-          },
-          projectTarget: {
-            repoProvider: "github",
-            owner: "acme",
-            repo: "demo"
-          }
-        }
-      }
-    } as OpenTagCliConfig;
-
-    const summary = formatSetupComplete(config, "/tmp/opentag-config.json");
-
-    expect(summary).toContain("Linear OAuth install URL: https://linear.example/oauth/authorize?state=linear_state");
-    expect(summary).toContain("Webhook URL: https://relay.example/linear/oauth/webhooks");
-    expect(summary).toContain("Events: Comment and Agent Session events");
-    expect(summary).not.toContain("Events: Comment events");
-  });
-
-  it("defaults interactive setup to the background service run mode", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const startOpenTag = vi.fn(async () => undefined);
-    const startOpenTagService = vi.fn(async () => undefined);
-    const runModePrompts: Array<{ message: string; initialValue?: string; labels: string[] }> = [];
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        force: true
-      },
-      {
-        prompts: testPrompts({
-          async select(input) {
-            if (input.message === "How should OpenTag run?") {
-              runModePrompts.push({
-                message: input.message,
-                initialValue: input.initialValue,
-                labels: input.options.map((option) => option.label)
-              });
-            }
-            return input.initialValue ?? input.options[0]!.value;
-          }
+    }));
+    expect(upsertRunnerProjectTargetControlV1).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectTargetId: "target_1",
+        request: expect.objectContaining({
+          target: expect.objectContaining({ owner: "acme", repo: "demo" }),
         }),
-        startOpenTag,
-        startOpenTagService
-      }
+      }),
     );
-
-    expect(startOpenTag).not.toHaveBeenCalled();
-    expect(startOpenTagService).toHaveBeenCalledWith({ config: configPath });
-    expect(runModePrompts).toEqual([
-      {
-        message: "How should OpenTag run?",
-        initialValue: "service",
-        labels: [
-          "Keep running after I close this terminal (recommended)",
-          "Run only in this terminal",
-          "Do not start now"
-        ]
-      }
-    ]);
+    expect(readCliConfig(options.config).daemon.controlRegistration)
+      .toMatchObject({ state: "paired" });
   });
 
-  it("uses user-facing Chinese labels for the setup run mode prompt", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const startOpenTagService = vi.fn(async () => undefined);
-    const runModePrompts: Array<{ message: string; initialValue?: string; labels: string[] }> = [];
+  it("omits the optional GitHub publication credential in non-interactive setup", async () => {
+    const options = setupOptions();
+    await runSetupCommand(options, dependencies());
+    expect(readCliConfig(options.config).daemon.githubToken).toBeUndefined();
+  });
 
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        language: "zh-CN",
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        force: true
-      },
-      {
-        prompts: testPrompts({
-          async select(input) {
-            if (input.message === "OpenTag 要如何运行？") {
-              runModePrompts.push({
-                message: input.message,
-                initialValue: input.initialValue,
-                labels: input.options.map((option) => option.label)
-              });
-            }
-            return input.initialValue ?? input.options[0]!.value;
-          }
-        }),
-        startOpenTagService
-      }
+  it("requires an explicit relay", async () => {
+    const options = setupOptions({ relay: undefined });
+    await expect(runSetupCommand(options, dependencies())).rejects.toThrow(
+      "opentag setup requires --relay <url>",
     );
-
-    expect(startOpenTagService).toHaveBeenCalledWith({ config: configPath });
-    expect(runModePrompts).toEqual([
-      {
-        message: "OpenTag 要如何运行？",
-        initialValue: "service",
-        labels: ["关闭这个终端后继续运行（推荐）", "只在当前终端里运行", "暂时不启动"]
-      }
-    ]);
+    expect(existsSync(options.config)).toBe(false);
   });
 
-  it("defaults unsupported service platforms to terminal run mode", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const startOpenTag = vi.fn(async () => undefined);
-    const startOpenTagService = vi.fn(async () => undefined);
-    const runModePrompts: Array<{ message: string; initialValue?: string; labels: string[] }> = [];
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        force: true
-      },
-      {
-        platform: "win32",
-        prompts: testPrompts({
-          async select(input) {
-            if (input.message === "How should OpenTag run?") {
-              runModePrompts.push({
-                message: input.message,
-                initialValue: input.initialValue,
-                labels: input.options.map((option) => option.label)
-              });
-            }
-            return input.initialValue ?? input.options[0]!.value;
-          }
-        }),
-        startOpenTag,
-        startOpenTagService
-      }
+  it("requires --project-target-id before non-interactive setup writes config", async () => {
+    const options = setupOptions({ projectTargetId: undefined });
+    await expect(runSetupCommand(options, dependencies())).rejects.toThrow(
+      "--project-target-id is required for non-interactive setup",
     );
-
-    expect(startOpenTag).toHaveBeenCalledWith({ config: configPath });
-    expect(startOpenTagService).not.toHaveBeenCalled();
-    expect(runModePrompts).toEqual([
-      {
-        message: "How should OpenTag run?",
-        initialValue: "terminal",
-        labels: ["Run only in this terminal", "Do not start now"]
-      }
-    ]);
+    expect(existsSync(options.config)).toBe(false);
   });
 
-  it("starts OpenTag directly after interactive setup when terminal mode is selected", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const startOpenTag = vi.fn(async () => undefined);
-    const startOpenTagService = vi.fn(async () => undefined);
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        force: true
-      },
-      {
-        prompts: testPrompts({
-          async select(input) {
-            if (input.message === "How should OpenTag run?") return "terminal";
-            return input.initialValue ?? input.options[0]!.value;
-          }
-        }),
-        startOpenTag,
-        startOpenTagService
-      }
+  it("fails before writing when the Project Target checkout is missing", async () => {
+    const missing = join(tempDir(), "missing");
+    const options = setupOptions({ project: missing });
+    await expect(runSetupCommand(options, dependencies())).rejects.toThrow(
+      "Project path does not exist:",
     );
-
-    expect(startOpenTag).toHaveBeenCalledWith({ config: configPath });
-    expect(startOpenTagService).not.toHaveBeenCalled();
+    expect(existsSync(options.config)).toBe(false);
   });
 
-  it("does not start OpenTag after setup when later mode is selected", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const startOpenTag = vi.fn(async () => undefined);
-    const startOpenTagService = vi.fn(async () => undefined);
+  it("never overwrites an existing config", async () => {
+    const options = setupOptions();
+    await runSetupCommand(options, dependencies());
+    await expect(runSetupCommand(
+      { ...options, executor: "codex" },
+      dependencies(),
+    )).rejects.toThrow("Setup never overwrites pairing authority");
+    expect(
+      readCliConfig(options.config).daemon.repositories[0]?.defaultExecutor,
+    ).toBe("echo");
+  });
 
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        force: true
-      },
-      {
-        prompts: testPrompts({
-          async select(input) {
-            if (input.message === "How should OpenTag run?") return "later";
-            return input.initialValue ?? input.options[0]!.value;
-          }
-        }),
-        startOpenTag,
-        startOpenTagService
-      }
+  it("starts the paired Runner in the terminal only when requested", async () => {
+    const startOpenTag = vi.fn(async () => {});
+    const options = setupOptions({ start: true });
+    await runSetupCommand(options, dependencies({ startOpenTag }));
+    expect(startOpenTag).toHaveBeenCalledWith({ config: options.config });
+  });
+
+  it("installs the paired Runner service only when requested", async () => {
+    const startOpenTagService = vi.fn(async () => {});
+    const options = setupOptions({ service: true, start: undefined });
+    await runSetupCommand(options, dependencies({
+      platform: "darwin",
+      startOpenTagService,
+    }));
+    expect(startOpenTagService).toHaveBeenCalledWith({ config: options.config });
+  });
+
+  it("rejects conflicting terminal and service launch choices", async () => {
+    const options = setupOptions({ service: true, start: true });
+    await expect(runSetupCommand(options, dependencies({
+      platform: "darwin",
+    }))).rejects.toThrow(
+      "--service cannot be combined with --start or --no-start.",
     );
-
-    expect(startOpenTag).not.toHaveBeenCalled();
-    expect(startOpenTagService).not.toHaveBeenCalled();
   });
 
-  it("installs and starts the background service after setup when requested", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const startOpenTag = vi.fn(async () => undefined);
-    const startOpenTagService = vi.fn(async () => undefined);
-    const confirmMessages: string[] = [];
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        service: true,
-        force: true
-      },
-      {
-        prompts: testPrompts({
-          async confirm(input) {
-            confirmMessages.push(input.message);
-            return true;
-          }
-        }),
-        startOpenTag,
-        startOpenTagService
-      }
-    );
-
-    expect(startOpenTag).not.toHaveBeenCalled();
-    expect(startOpenTagService).toHaveBeenCalledWith({ config: configPath });
-    expect(confirmMessages).toContain("Write this OpenTag config?");
-    expect(confirmMessages).not.toContain("Start OpenTag now?");
+  it("fails closed when a selected Hermes ACP profile is not ready", async () => {
+    const options = setupOptions({ executor: "hermes", hermesProfile: "team" });
+    await expect(runSetupCommand(options, dependencies({
+      probeHermesProfile: vi.fn(async () => ({
+        ready: false,
+        reason: "Hermes profile is unavailable.",
+      })),
+    }))).rejects.toThrow("Hermes profile is unavailable.");
+    expect(existsSync(options.config)).toBe(false);
   });
 
-  it("rejects conflicting foreground and service setup start modes", async () => {
-    await expect(
-      runSetupCommand(
-        {
-          config: join(tempDir(), "config.json"),
-          project: tempDir(),
-          executor: "echo",
-          larkSetup: "manual",
-          tenant: "lark",
-          larkAppId: "cli_manual",
-          larkAppSecret: "secret_manual",
-          service: true,
-          start: false,
-          force: true
-        },
-        {
-          prompts: testPrompts()
-        }
-      )
-    ).rejects.toThrow("--service cannot be combined with --start or --no-start.");
-  });
-
-  it("labels Echo as dev/test only in the coding agent prompt", async () => {
-    const configPath = join(tempDir(), "config.json");
-    let echoHint: string | undefined;
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        language: "en",
-        platform: "lark",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        binding: "default_project",
-        force: true,
-        yes: true
-      },
-      {
-        env: { PATH: "" },
-        prompts: testPrompts({
-          async select(input) {
-            if (input.message === "Which coding agent should OpenTag use?") {
-              echoHint = input.options.find((option) => option.value === "echo")?.hint;
-              return "echo";
-            }
-            return input.initialValue ?? input.options[0]!.value;
-          }
-        })
-      }
-    );
-
-    expect(echoHint).toBe("dev/test only; no real coding agent");
-  });
-
-  it("restores prior setup choices as prompt defaults", async () => {
-    const projectPath = tempDir();
-    const configPath = join(tempDir(), "config.json");
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        executor: "claude-code",
-        language: "zh-CN",
-        larkSetup: "manual",
-        tenant: "feishu",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        binding: "bind_later",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    const seenDefaults: Record<string, string | undefined> = {};
-    await runSetupCommand(
-      {
-        config: configPath,
-        force: true,
-        start: false
-      },
-      {
-        prompts: testPrompts({
-          async select(input) {
-            seenDefaults[input.message] = input.initialValue;
-            return input.initialValue ?? input.options[0]!.value;
-          },
-          async text(input) {
-            if (input.message === "Lark App ID" || input.message === "Lark 应用 ID") return "cli_manual";
-            return input.initialValue ?? "";
-          },
-          async password() {
-            return "secret_manual";
-          }
-        })
-      }
-    );
-
-    expect(Object.values(seenDefaults)).toContain("zh-CN");
-    expect(Object.values(seenDefaults)).toContain("lark");
-    expect(Object.values(seenDefaults)).toContain("claude-code");
-    expect(Object.values(seenDefaults)).toContain("saved");
-    expect(Object.values(seenDefaults)).toContain("bind_later");
-    expect(readCliConfig(configPath).platforms.lark?.domain).toBe("feishu");
-  });
-
-  it("writes the GitHub local webhook port from setup options", async () => {
-    const configPath = join(tempDir(), "config.json");
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        platform: "github",
-        executor: "echo",
-        language: "en",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        githubPort: "3050",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    const config = readCliConfig(configPath);
-    expect(config.platforms.github?.port).toBe(3050);
-    expect(config.preferences?.lastSetup?.githubPort).toBe(3050);
-  });
-
-  it("uses the CLI GitHub webhook port default for new setup configs", async () => {
-    const configPath = join(tempDir(), "config.json");
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        platform: "github",
-        executor: "echo",
-        language: "en",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    expect(readCliConfig(configPath).platforms.github?.port).toBe(3050);
-  });
-
-  it("uses injected config and state env paths during setup", async () => {
-    const configHome = tempDir();
-    const stateDirectory = tempDir();
-    const configPath = join(configHome, "config.json");
-
-    await runSetupCommand(
-      {
-        project: tempDir(),
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        force: true,
-        yes: true
-      },
-      {
-        env: {
-          OPENTAG_CONFIG_HOME: configHome,
-          OPENTAG_STATE_DIR: stateDirectory
-        },
-        prompts: testPrompts()
-      }
-    );
-
-    expect(readCliConfig(configPath).state.directory).toBe(stateDirectory);
-  });
-
-  it("allows --force to replace an invalid existing config", async () => {
-    const configPath = join(tempDir(), "config.json");
-    writeFileSync(configPath, "{not valid json");
-    chmodSync(configPath, 0o600);
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        executor: "echo",
-        larkSetup: "manual",
-        tenant: "lark",
-        larkAppId: "cli_manual",
-        larkAppSecret: "secret_manual",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    expect(readCliConfig(configPath).platforms.lark?.appId).toBe("cli_manual");
-  });
-
-  it("does not read stale saved Lark credentials when scan is explicitly selected", async () => {
-    const projectPath = tempDir();
-    const configPath = join(tempDir(), "config.json");
-    const legacyDirectory = join(projectPath, ".opentag", "lark");
-    mkdirSync(legacyDirectory, { recursive: true });
-    const legacyConfigPath = join(legacyDirectory, "lark.local.json");
-    writeFileSync(legacyConfigPath, "{not valid json");
-    chmodSync(legacyConfigPath, 0o600);
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        executor: "echo",
-        larkSetup: "scan",
-        start: false,
-        force: true,
-        yes: true
-      },
-      {
-        prompts: testPrompts(),
-        scanLarkPersonalAgent: vi.fn(async () => ({
-          appId: "cli_scan",
-          appSecret: "secret_scan",
-          domain: "feishu" as const
-        }))
-      }
-    );
-
-    expect(readCliConfig(configPath).platforms.lark?.appId).toBe("cli_scan");
-  });
-
-  it("fails fast when --project points at a missing path", async () => {
-    await expect(
-      runSetupCommand(
-        {
-          config: join(tempDir(), "config.json"),
-          project: join(tempDir(), "missing"),
-          executor: "echo",
-          larkSetup: "manual",
-          tenant: "lark",
-          larkAppId: "cli_manual",
-          larkAppSecret: "secret_manual",
-          force: true,
-          yes: true
-        },
-        { prompts: testPrompts() }
-      )
-    ).rejects.toThrow("Path does not exist:");
-  });
-
-  it("keeps the existing GitHub webhook secret on setup reruns", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const projectPath = tempDir();
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "echo",
-        language: "en",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        githubWebhookSecret: "github_webhook_secret",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "echo",
-        language: "en",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    expect(readCliConfig(configPath).platforms.github?.webhookSecret).toBe("github_webhook_secret");
-  });
-
-  it("keeps the existing GitHub webhook path on setup reruns", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const projectPath = tempDir();
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "echo",
-        language: "en",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        githubWebhookPath: "/opentag",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "echo",
-        language: "en",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    expect(readCliConfig(configPath).platforms.github?.webhookPath).toBe("/opentag");
-  });
-
-  it("does not persist the deprecated GitHub auto-PR choice on --yes setup reruns", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const projectPath = tempDir();
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "echo",
-        language: "en",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        githubAutoCreatePr: true,
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "echo",
-        language: "en",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    const config = readCliConfig(configPath);
-    expect(config.daemon).not.toHaveProperty("preparePullRequestBranch");
-    expect(config.daemon).not.toHaveProperty("allowAutoCreatePullRequest");
-    expect(config.preferences?.lastSetup).not.toHaveProperty("githubAutoCreatePullRequest");
-  });
-
-  it("rejects a GitHub webhook path that is not rooted", async () => {
-    await expect(
-      runSetupCommand(
-        {
-          config: join(tempDir(), "config.json"),
-          project: tempDir(),
-          platform: "github",
-          executor: "echo",
-          githubRepository: "acme/demo",
-          githubToken: "ghp_test",
-          githubWebhookPath: "github/webhooks",
-          force: true,
-          yes: true
-        },
-        { prompts: testPrompts() }
-      )
-    ).rejects.toThrow("GitHub webhook path must start with /.");
-  });
-
-  it("rejects a Telegram bot id that does not match the token prefix", async () => {
-    await expect(
-      runSetupCommand(
-        {
-          config: join(tempDir(), "config.json"),
-          project: tempDir(),
-          platform: "telegram",
-          executor: "echo",
-          telegramBotToken: "123456789:telegram_secret",
-          telegramBotId: "987654321",
-          force: true,
-          yes: true
-        },
-        { prompts: testPrompts() }
-      )
-    ).rejects.toThrow("Telegram bot id must match the numeric prefix of the bot token.");
-  });
-
-  it("rejects a Discord webhook path that is not rooted", async () => {
-    await expect(
-      runSetupCommand(
-        {
-          config: join(tempDir(), "config.json"),
-          project: tempDir(),
-          platform: "discord",
-          executor: "echo",
-          discordMode: "webhook",
-          discordPublicKey: "discord_public_key",
-          discordBotToken: "discord_bot_token",
-          discordWebhookPath: "discord/interactions",
-          force: true,
-          yes: true
-        },
-        { prompts: testPrompts() }
-      )
-    ).rejects.toThrow("Discord interactions webhook path must start with /.");
-  });
-
-  it("rejects a Discord public key in default Gateway mode", async () => {
-    await expect(
-      runSetupCommand(
-        {
-          config: join(tempDir(), "config.json"),
-          project: tempDir(),
-          platform: "discord",
-          executor: "echo",
-          discordPublicKey: "discord_public_key",
-          discordBotToken: "discord_bot_token",
-          force: true,
-          yes: true
-        },
-        { prompts: testPrompts() }
-      )
-    ).rejects.toThrow("Discord application public key is only used with --discord-mode webhook.");
-  });
-
-  it("writes Hermes setup options into daemon config", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const projectPath = tempDir();
-    const probeHermesProfile = vi.fn(async () => ({ ready: true }));
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "hermes",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        hermesCommand: "custom-hermes",
-        hermesProfile: "opentag-fixed",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts(), probeHermesProfile }
-    );
-
-    const config = readCliConfig(configPath);
-    expect(config.daemon.repositories[0]?.defaultExecutor).toBe("hermes");
-    expect(config.daemon.hermes).toEqual({
-      command: "custom-hermes",
-      profile: "opentag-fixed"
-    });
-    expect(probeHermesProfile).toHaveBeenCalledWith({
-      hermesCommand: "custom-hermes",
-      profile: "opentag-fixed",
-      cwd: projectPath
-    });
-  });
-
-  it("writes generic agent session profile options into daemon config", async () => {
-    const configPath = join(tempDir(), "config.json");
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        platform: "github",
-        executor: "codex",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        agentProfileTemplate: "opentag-{provider}-{projectTarget}-{actorId}",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    const config = readCliConfig(configPath);
-    expect(config.daemon.repositories[0]?.defaultExecutor).toBe("codex");
-    expect(config.daemon.agentSessionProfile).toEqual({
-      profileTemplate: "opentag-{provider}-{projectTarget}-{actorId}"
-    });
-  });
-
-  it("does not keep an inherited generic fixed agent profile when a profileTemplate is explicitly provided", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const projectPath = tempDir();
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "codex",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        agentProfile: "opentag-fixed",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "codex",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        agentProfileTemplate: "opentag-{provider}-{projectTarget}-{actorId}",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    expect(readCliConfig(configPath).daemon.agentSessionProfile).toEqual({
-      profileTemplate: "opentag-{provider}-{projectTarget}-{actorId}"
-    });
-  });
-
-  it("defaults Hermes to the fixed opentag profile", async () => {
-    const configPath = join(tempDir(), "config.json");
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: tempDir(),
-        platform: "github",
-        executor: "hermes",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    expect(readCliConfig(configPath).daemon.hermes).toEqual({
-      profile: "opentag"
-    });
-  });
-
-  it("does not write config when the Hermes profile probe fails", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const projectPath = tempDir();
-
-    await expect(
-      runSetupCommand(
-        {
-          config: configPath,
-          project: projectPath,
-          platform: "github",
-          executor: "hermes",
-          githubRepository: "acme/demo",
-          githubToken: "ghp_test",
-          force: true,
-          yes: true
-        },
-        {
-          prompts: testPrompts(),
-          probeHermesProfile: vi.fn(async () => ({
-            ready: false,
-            reason:
-              "Hermes profile 'opentag' is not ready. Create it with `hermes profile create opentag` or configure daemon.hermes.profile."
-          }))
-        }
-      )
-    ).rejects.toThrow("Hermes profile 'opentag' is not ready");
-    expect(existsSync(configPath)).toBe(false);
-  });
-
-  it("rejects Slack setup without an initial channel binding", async () => {
-    await expect(
-      runSetupCommand(
-        {
-          config: join(tempDir(), "config.json"),
-          project: tempDir(),
-          platform: "slack",
-          executor: "echo",
-          slackAppToken: "xapp-token",
-          slackBotToken: "xoxb-token",
-          slackTeamId: "T123",
-          slackChannelId: "C123",
-          binding: "bind_later",
-          force: true,
-          yes: true
-        },
-        { prompts: testPrompts() }
-      )
-    ).rejects.toThrow("Slack setup requires a channel binding.");
+  it("retains the generated unpaired config when pairing fails", async () => {
+    const options = setupOptions();
+    await expect(runSetupCommand(options, dependencies({
+      pairOpenTag: vi.fn(async () => {
+        throw new Error("relay registration failed");
+      }),
+    }))).rejects.toThrow("relay registration failed");
+    const pending = readCliConfig(options.config);
+    expect(pending.daemon.relayUrl).toBe("https://relay.example");
+    expect(pending).not.toHaveProperty("runtime");
+    expect(pending.daemon.controlRegistration).toBeUndefined();
   });
 });

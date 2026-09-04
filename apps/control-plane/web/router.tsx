@@ -13,12 +13,13 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 import {
   ConsoleApiError,
+  type ConsoleAgentPresence,
   type ConsoleApi,
   type ConsoleApiKey,
   type ConsoleAuditEvent,
-  type ConsoleGithubBinding,
   type ConsoleMaterialAction,
   type ConsoleOverview,
+  type ConsolePresenceState,
   type ConsolePermission,
   type ConsoleProjectTarget,
   type ConsoleRun,
@@ -55,7 +56,7 @@ function LoadingState() {
 }
 
 const navigation = [
-  ["/", "Overview"],
+  ["/", "Teammates"],
   ["/runners", "Runners"],
   ["/targets", "Targets"],
   ["/runs", "Runs"],
@@ -76,7 +77,7 @@ function ConsoleShell() {
       <aside className="sidebar">
         <Link to="/" className="brand" aria-label="OpenTag Control Plane home">
           <span className="brand-mark">OT</span>
-          <span><strong>OpenTag</strong><small>Control Plane</small></span>
+          <span><strong>OpenTag</strong><small>Agent presence</small></span>
         </Link>
         <nav aria-label="Control Plane">
           {navigation.map(([to, label]) => (
@@ -223,20 +224,78 @@ function Metric({ label, value }: { label: string; value: number }) {
   return <article className="metric"><span>{label}</span><strong>{value}</strong></article>;
 }
 
+const presenceLabels: Record<ConsolePresenceState, string> = {
+  setup_required: "Needs setup",
+  offline: "Offline",
+  available: "Available",
+  queued: "Queued",
+  working: "Working",
+  needs_attention: "Needs attention",
+};
+
+function PresenceBadge({ state }: { state: ConsolePresenceState }) {
+  return <span className={`presence-badge presence-${state}`}>{presenceLabels[state]}</span>;
+}
+
+function PresenceCard({ agent }: { agent: ConsoleAgentPresence }) {
+  const target = agent.projectTarget
+    ? `${agent.projectTarget.provider}:${agent.projectTarget.owner}/${agent.projectTarget.repo}`
+    : "Not configured";
+  const runner = agent.runner?.displayName ?? agent.runner?.runnerId ?? "Not configured";
+  return <article className="presence-card">
+    <header>
+      <div>
+        <p className="presence-name">Slack teammate</p>
+        <code>{agent.slack.botUserId}</code>
+      </div>
+      <PresenceBadge state={agent.state} />
+    </header>
+    <p className="presence-reason">{agent.reason}</p>
+    <dl>
+      <div><dt>Slack home</dt><dd>{agent.slack.teamId} / {agent.slack.channelId}</dd></div>
+      <div><dt>Project Target</dt><dd>{target}</dd></div>
+      <div><dt>Runner</dt><dd>{runner}</dd></div>
+      <div><dt>Active Run</dt><dd>{agent.activeRun
+        ? <><code>{agent.activeRun.runId}</code> · {agent.activeRun.state}</>
+        : "None"}</dd></div>
+    </dl>
+  </article>;
+}
+
 function OverviewPage() {
   const { api, principal } = overviewRoute.useRouteContext();
-  const query = useQuery({
+  const presence = useQuery({
+    queryKey: tenantQueryKey(principal.organizationId, "presence"),
+    queryFn: api.presence,
+  });
+  const metrics = useQuery({
     queryKey: tenantQueryKey(principal.organizationId, "overview"),
     queryFn: api.overview,
   });
-  return <Page title="System overview" intro="Live, tenant-scoped operational state from PostgreSQL.">
-    {query.isPending ? <LoadingState /> : query.error ? <ErrorState error={query.error} /> : (
+  return <Page title="Your AI teammates" intro="Persistent Slack presence backed by the Project Target, Runner, and governed work that actually exist.">
+    {presence.isPending ? <LoadingState /> : presence.error ? <ErrorState error={presence.error} /> : <>
+      <section className="presence-summary" aria-live="polite">
+        <PresenceBadge state={presence.data.state} />
+        <p>{presence.data.reason}</p>
+      </section>
+      {presence.data.agents.length === 0
+        ? <div className="presence-empty">
+            <h2>No Slack teammate is configured yet.</h2>
+            <p>Create an active Slack installation and binding, then connect it to a GitHub Project Target and paired Runner.</p>
+            <Link to="/targets" className="button">Review Project Targets</Link>
+          </div>
+        : <div className="presence-grid">{presence.data.agents.map((agent) =>
+            <PresenceCard key={agent.presenceId} agent={agent} />)}
+          </div>}
+    </>}
+    <h2 className="system-metrics-title">System metrics</h2>
+    {metrics.isPending ? <LoadingState /> : metrics.error ? <ErrorState error={metrics.error} /> : (
       <div className="metrics">
-        <Metric label="Runners" value={(query.data as ConsoleOverview).runnerCount} />
-        <Metric label="Ready" value={query.data.readyRunnerCount} />
-        <Metric label="Active runs" value={query.data.activeRunCount} />
-        <Metric label="Terminal runs" value={query.data.terminalRunCount} />
-        <Metric label="Pending jobs" value={query.data.pendingJobCount} />
+        <Metric label="Runners" value={(metrics.data as ConsoleOverview).runnerCount} />
+        <Metric label="Ready" value={metrics.data.readyRunnerCount} />
+        <Metric label="Active runs" value={metrics.data.activeRunCount} />
+        <Metric label="Terminal runs" value={metrics.data.terminalRunCount} />
+        <Metric label="Pending jobs" value={metrics.data.pendingJobCount} />
       </div>
     )}
   </Page>;
@@ -258,7 +317,7 @@ function RunnersPage() {
         <strong>{runner.displayName ?? runner.runnerId}</strong>,
         `${runner.registrationGeneration} / credential ${runner.credentialGeneration}`,
         runner.capabilities.join(", "),
-        runner.readiness ? "reported" : "not reported",
+        runner.readiness ? "fresh report" : "not ready",
         new Date(runner.updatedAt).toLocaleString(),
       ])} />
     )}
@@ -266,161 +325,24 @@ function RunnersPage() {
 }
 
 function TargetsPage() {
-  const { api, principal, queryClient } = targetsRoute.useRouteContext();
+  const { api, principal } = targetsRoute.useRouteContext();
   const query = useQuery({
     queryKey: tenantQueryKey(principal.organizationId, "project-targets"),
     queryFn: api.projectTargets,
   });
-  if (query.isPending) return <Page title="Targets & ingress" intro="Project Targets bind a provider repository to one approved local runner."><LoadingState /></Page>;
-  if (query.error) return <Page title="Targets & ingress" intro="Project Targets bind a provider repository to one approved local runner."><ErrorState error={query.error} /></Page>;
-  const canAdminister = principal.role === "owner" || principal.role === "admin";
-  return <Page title="Targets & ingress" intro="Project Targets bind a provider repository to one approved local runner.">
-    <h2>Project Targets</h2>
-    {canAdminister ? <ProjectTargetForm onCreate={async (command) => {
-      await api.createProjectTarget(command);
-      await queryClient.invalidateQueries({
-        queryKey: tenantQueryKey(principal.organizationId, "project-targets"),
-      });
-    }} /> : null}
-    {query.data.targets.length === 0 ? <div className="notice">No Project Targets. Pair a runner, then declare its repository binding here.</div> : (
-      <DataTable headings={["Target", "Repository", "Runner", "Executor", "Version"]} rows={query.data.targets.map((target: ConsoleProjectTarget) => [
+  if (query.isPending) return <Page title="Project Targets" intro="Project Targets bind a provider repository to one approved local runner."><LoadingState /></Page>;
+  if (query.error) return <Page title="Project Targets" intro="Project Targets bind a provider repository to one approved local runner."><ErrorState error={query.error} /></Page>;
+  return <Page title="Project Targets" intro="GitHub repository publication targets bound to approved local runners.">
+    <div className="notice">Project Targets are registered by the intended Runner through <code>opentag setup</code> or <code>opentag pair</code>. This page is read-only.</div>
+    {query.data.targets.length === 0 ? <div className="notice">No Project Targets. Confirm the active Slack binding's target ID, then run <code>opentag setup</code> or <code>opentag pair</code> on the Runner.</div> : (
+      <DataTable headings={["Target", "Repository", "Runner", "Executor"]} rows={query.data.targets.map((target: ConsoleProjectTarget) => [
         target.projectTargetId,
         `${target.provider}:${target.owner}/${target.repo}`,
         target.runnerId,
         target.defaultExecutor,
-        target.version,
-      ])} />
-    )}
-    <h2>GitHub ingress bindings</h2>
-    {canAdminister && query.data.targets.length > 0 ? <GithubBindingForm
-      targets={query.data.targets}
-      onCreate={async (command) => {
-        const outcome = await api.createGithubBinding(command);
-        await queryClient.invalidateQueries({
-          queryKey: tenantQueryKey(principal.organizationId, "project-targets"),
-        });
-        return outcome;
-      }}
-    /> : null}
-    {query.data.bindings.length === 0 ? <div className="notice">No GitHub ingress bindings. Ingress remains fail-closed.</div> : (
-      <DataTable headings={["Binding", "Repository", "Runner", "Actors", "State"]} rows={query.data.bindings.map((binding: ConsoleGithubBinding) => [
-        binding.bindingId,
-        `${binding.owner}/${binding.repo}`,
-        binding.runnerId,
-        binding.allowedActorIds.join(", "),
-        binding.enabled ? "enabled" : "disabled",
       ])} />
     )}
   </Page>;
-}
-
-function ProjectTargetForm({
-  onCreate,
-}: {
-  onCreate(command: {
-    projectTargetId: string;
-    runnerId: string;
-    bindingDigest: string;
-    provider: string;
-    owner: string;
-    repo: string;
-    defaultExecutor: string;
-    defaultBranch: string | null;
-    version: number;
-  }): Promise<void>;
-}) {
-  const [projectTargetId, setProjectTargetId] = useState("");
-  const [runnerId, setRunnerId] = useState("");
-  const [bindingDigest, setBindingDigest] = useState("");
-  const [owner, setOwner] = useState("");
-  const [repo, setRepo] = useState("");
-  const [defaultExecutor, setDefaultExecutor] = useState("codex");
-  const [defaultBranch, setDefaultBranch] = useState("main");
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  return <form className="binding-form" onSubmit={async (event) => {
-    event.preventDefault();
-    setSubmitError(null);
-    try {
-      await onCreate({
-        projectTargetId,
-        runnerId,
-        bindingDigest,
-        provider: "github",
-        owner,
-        repo,
-        defaultExecutor,
-        defaultBranch: defaultBranch || null,
-        version: 1,
-      });
-      setProjectTargetId("");
-      setBindingDigest("");
-    } catch (error) {
-      setSubmitError(mutationErrorMessage(error));
-    }
-  }}>
-    <label>Target ID<input required value={projectTargetId} onChange={(event) => setProjectTargetId(event.target.value)} /></label>
-    <label>Runner ID<input required value={runnerId} onChange={(event) => setRunnerId(event.target.value)} /></label>
-    <label>Repository owner<input required value={owner} onChange={(event) => setOwner(event.target.value)} /></label>
-    <label>Repository name<input required value={repo} onChange={(event) => setRepo(event.target.value)} /></label>
-    <label>Binding digest<input required pattern="sha256:[a-f0-9]{64}" placeholder="sha256:…" value={bindingDigest} onChange={(event) => setBindingDigest(event.target.value)} /></label>
-    <label>Default executor<input required value={defaultExecutor} onChange={(event) => setDefaultExecutor(event.target.value)} /></label>
-    <label>Default branch<input value={defaultBranch} onChange={(event) => setDefaultBranch(event.target.value)} /></label>
-    <button className="button" type="submit">Declare Project Target</button>
-    {submitError ? <div className="notice notice-error form-span">{submitError}</div> : null}
-  </form>;
-}
-
-function GithubBindingForm({
-  targets,
-  onCreate,
-}: {
-  targets: ConsoleProjectTarget[];
-  onCreate(command: {
-    bindingId: string;
-    providerRepositoryId: string;
-    owner: string;
-    repo: string;
-    runnerId: string;
-    projectTargetId: string;
-    allowedActorIds: string[];
-    enabled: boolean;
-  }): Promise<{ kind: "created" | "replayed"; bindingId: string; secret?: string }>;
-}) {
-  const [targetId, setTargetId] = useState(targets[0]?.projectTargetId ?? "");
-  const [bindingId, setBindingId] = useState("");
-  const [repositoryId, setRepositoryId] = useState("");
-  const [actorIds, setActorIds] = useState("");
-  const [secret, setSecret] = useState<string | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const target = targets.find((candidate) => candidate.projectTargetId === targetId);
-  return <form className="binding-form" onSubmit={async (event) => {
-    event.preventDefault();
-    if (!target) return;
-    setSubmitError(null);
-    try {
-      const outcome = await onCreate({
-        bindingId,
-        providerRepositoryId: repositoryId,
-        owner: target.owner,
-        repo: target.repo,
-        runnerId: target.runnerId,
-        projectTargetId: target.projectTargetId,
-        allowedActorIds: actorIds.split(",").map((value) => value.trim()).filter(Boolean),
-        enabled: true,
-      });
-      setSecret(outcome.secret ?? null);
-    } catch (error) {
-      setSubmitError(mutationErrorMessage(error));
-    }
-  }}>
-    <label>Project Target<select value={targetId} onChange={(event) => setTargetId(event.target.value)}>{targets.map((item) => <option key={item.projectTargetId} value={item.projectTargetId}>{item.owner}/{item.repo} · {item.runnerId}</option>)}</select></label>
-    <label>Binding ID<input required value={bindingId} onChange={(event) => setBindingId(event.target.value)} /></label>
-    <label>GitHub repository ID<input required inputMode="numeric" value={repositoryId} onChange={(event) => setRepositoryId(event.target.value)} /></label>
-    <label>Allowed actor IDs<input required placeholder="1001, 1002" value={actorIds} onChange={(event) => setActorIds(event.target.value)} /></label>
-    <button className="button" type="submit">Create enabled binding</button>
-    {submitError ? <div className="notice notice-error form-span">{submitError}</div> : null}
-    {secret ? <div className="notice form-span"><strong>Copy the webhook secret now.</strong><br /><code>{secret}</code></div> : null}
-  </form>;
 }
 
 function RunsPage() {
@@ -494,7 +416,6 @@ function ApiKeysPage() {
   const query = useQuery({ queryKey: apiKeysQueryKey, queryFn: api.apiKeys });
   const [label, setLabel] = useState("");
   const [createdToken, setCreatedToken] = useState<string | null>(null);
-  const [canResolvePermissions, setCanResolvePermissions] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const canAdminister = principal.role === "owner" || principal.role === "admin";
   return <Page title="API keys" intro="Machine credentials are tenant-scoped and separate from runner and browser sessions.">
@@ -508,7 +429,6 @@ function ApiKeysPage() {
           label,
           scopes: [
             "audit:read",
-            ...(canResolvePermissions ? ["permission:resolve"] : []),
             "run:read",
             "runner:read",
             "target:read",
@@ -516,14 +436,12 @@ function ApiKeysPage() {
         });
         setCreatedToken(created.token);
         setLabel("");
-        setCanResolvePermissions(false);
         await queryClient.invalidateQueries({ queryKey: apiKeysQueryKey });
       } catch (error) {
         setSubmitError(mutationErrorMessage(error));
       }
     }}>
       <label>Key label<input required maxLength={100} value={label} onChange={(event) => setLabel(event.target.value)} /></label>
-      <label><input checked={canResolvePermissions} type="checkbox" onChange={(event) => setCanResolvePermissions(event.target.checked)} /> Allow governed permission decisions</label>
       <button className="button" type="submit">Create API key</button>
     </form> : <div className="notice">Only an owner or administrator can issue API keys.</div>}
     {query.isPending ? <LoadingState /> : query.error ? <ErrorState error={query.error} /> : query.data.length === 0 ? <div className="notice">No API keys have been issued.</div> : (

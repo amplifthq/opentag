@@ -1,13 +1,11 @@
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { formatProjectTargetRef } from "@opentag/core";
 import { nodeCommandRunner, type CommandRunner, type ExecutorAdapter, type ExecutorCapabilityContract } from "@opentag/runner";
-import { createOpenTagClient, OpenTagClientHttpError } from "@opentag/client";
-import { hostedRunnerAuthProblem, normalizeChannelBindings, runnerDispatcherToken } from "./config.js";
+import { createOpenTagClient, OpenTagClientHttpError, type OpenTagClient } from "@opentag/client";
+import { canonicalRepositoryIdentity, hostedRunnerAuthProblem } from "./config.js";
 import type { OpenTagDaemonConfig, RepositoryBindingConfig } from "./config.js";
-import { hermesProfileConfigurationWarning } from "./runtime.js";
 
 export type DoctorCheckStatus = "ok" | "warn" | "fail";
 
@@ -29,8 +27,7 @@ type SafeRemoteError = {
 
 const SAFE_REMOTE_ERROR_CODES = new Set([
   "runner_not_found",
-  "repo_binding_not_found",
-  "channel_binding_not_found"
+  "repo_binding_not_found"
 ]);
 
 function safeRemoteError(error: unknown): SafeRemoteError {
@@ -48,7 +45,7 @@ function safeRemoteError(error: unknown): SafeRemoteError {
     // Response bodies are intentionally not surfaced by doctor diagnostics.
   }
   return {
-    message: `Dispatcher request failed with HTTP ${error.status}${code ? ` (${code})` : ""}.`,
+    message: `Relay request failed with HTTP ${error.status}${code ? ` (${code})` : ""}.`,
     status: error.status,
     ...(code ? { code } : {})
   };
@@ -132,9 +129,6 @@ function checkExecutorSecretRequirements(input: {
 // Codex accepts built-in tiers (e.g. flex, fast), legacy request values (e.g. priority),
 // and catalog-provided tier IDs. OpenTag should not maintain a closed allowlist here.
 const CODEX_DEPRECATED_SERVICE_TIERS = new Set(["default"]);
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
-const DEFAULT_POLL_INTERVAL_MS = 5_000;
-const MIN_RUNNER_HEARTBEAT_STALE_MS = 30_000;
 
 function defaultCodexConfigPath(): string {
   return join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "config.toml");
@@ -151,41 +145,22 @@ function shouldCheckCodexConfig(config: OpenTagDaemonConfig): boolean {
 }
 
 function checkRunnerApiAuth(config: OpenTagDaemonConfig): DoctorCheck {
+  if (!config.controlRegistration) {
+    return check(
+      "fail",
+      "paired runner auth",
+      "The local Runner is not paired with Hosted Control V1."
+    );
+  }
   const hostedAuthProblem = hostedRunnerAuthProblem(config);
   if (hostedAuthProblem) {
     return check("fail", "hosted runner auth", hostedAuthProblem);
   }
-  if (config.controlRegistration) {
-    return check(
-      "ok",
-      "hosted runner auth",
-      "Hosted Control V1 paired runtime credential is configured and selected for this runner; remote authentication is checked separately."
-    );
-  }
-  if (config.runnerToken) {
-    return check(
-      "ok",
-      "hook ingest auth",
-      "Runner-scoped dispatcher token is configured separately from the pairing token for claim/progress/completion and local hook ingest."
-    );
-  }
-  return config.pairingToken
-    ? check(
-        "ok",
-        "hook ingest auth",
-        "Legacy daemon pairing token is configured for runner calls and local hook ingest; configure runnerToken to reduce relay credential blast radius."
-      )
-    : check(
-        "warn",
-        "hook ingest auth",
-        "No runner-scoped dispatcher token is configured; runner endpoints and local hook ingest are not protected."
-      );
-}
-
-function formatDurationMs(ms: number): string {
-  if (ms % 60_000 === 0) return `${ms / 60_000} minute(s)`;
-  if (ms % 1_000 === 0) return `${ms / 1_000} second(s)`;
-  return `${ms}ms`;
+  return check(
+    "ok",
+    "paired runner auth",
+    "Hosted Control V1 paired runtime credential is configured; remote authentication is checked separately."
+  );
 }
 
 function repositoryTargetLabel(repository: RepositoryBindingConfig): string {
@@ -194,99 +169,6 @@ function repositoryTargetLabel(repository: RepositoryBindingConfig): string {
     owner: repository.owner,
     repo: repository.repo
   });
-}
-
-function runnerHeartbeatStaleAfterMs(config: OpenTagDaemonConfig): number {
-  return Math.max(
-    config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
-    config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
-    MIN_RUNNER_HEARTBEAT_STALE_MS / 3
-  ) * 3;
-}
-
-function checkRunnerHeartbeat(input: {
-  heartbeatAt?: string;
-  config: OpenTagDaemonConfig;
-  now?: Date;
-}): DoctorCheck {
-  if (!input.heartbeatAt) {
-    return check(
-      "warn",
-      "runner heartbeat",
-      "no heartbeat observed yet; the runner may be starting or the dispatcher may not expose runner heartbeat metadata."
-    );
-  }
-
-  const heartbeatTime = Date.parse(input.heartbeatAt);
-  if (!Number.isFinite(heartbeatTime)) {
-    return check("warn", "runner heartbeat", `invalid heartbeat timestamp: ${input.heartbeatAt}`);
-  }
-
-  const now = input.now?.getTime() ?? Date.now();
-  const ageMs = Math.max(0, now - heartbeatTime);
-  const staleAfterMs = runnerHeartbeatStaleAfterMs(input.config);
-  if (ageMs > staleAfterMs) {
-    return check(
-      "warn",
-      "runner heartbeat",
-      `stale; last heartbeat ${input.heartbeatAt} (${formatDurationMs(ageMs)} ago, stale after ${formatDurationMs(staleAfterMs)})`
-    );
-  }
-
-  return check("ok", "runner heartbeat", `fresh; last heartbeat ${input.heartbeatAt}`);
-}
-
-function runnerTokenFingerprint(token: string): string {
-  return createHash("sha256").update(token).digest("hex").toLowerCase();
-}
-
-function normalizedRevokedFingerprints(config: OpenTagDaemonConfig): Set<string> {
-  return new Set((config.revokedRunnerTokenFingerprints ?? []).map((fingerprint) => fingerprint.trim().toLowerCase()).filter(Boolean));
-}
-
-function checkRunnerTokenRotation(config: OpenTagDaemonConfig): DoctorCheck[] {
-  const checks: DoctorCheck[] = [];
-  const rotationCount = config.runnerTokens?.length ?? 0;
-  const revoked = normalizedRevokedFingerprints(config);
-
-  if (rotationCount > 0) {
-    checks.push(
-      config.runnerToken
-        ? check("ok", "runner token rotation", `${rotationCount} additional runner token(s) configured for the rotation window.`)
-        : check(
-            "warn",
-            "runner token rotation",
-            "Additional runner tokens are configured, but daemon.runnerToken is missing; configure the current runner token before relying on rotation."
-          )
-    );
-  }
-
-  if (revoked.size > 0) {
-    const currentTokenRevoked = config.runnerToken ? revoked.has(runnerTokenFingerprint(config.runnerToken)) : false;
-    const rotationTokenFingerprints = new Set((config.runnerTokens ?? []).map(runnerTokenFingerprint));
-    const rotationTokenRevokedCount = [...rotationTokenFingerprints].filter((fingerprint) => revoked.has(fingerprint)).length;
-    checks.push(
-      currentTokenRevoked
-        ? check(
-            "fail",
-            "runner token revocation",
-            "Current daemon.runnerToken fingerprint is revoked; pair again or update daemon.runnerToken before starting the runner."
-          )
-        : rotationTokenRevokedCount > 0
-          ? check(
-              "fail",
-              "runner token revocation",
-              `${rotationTokenRevokedCount} daemon.runnerTokens fingerprint(s) are revoked; remove revoked rotation tokens before relying on rotation.`
-            )
-        : check(
-            "ok",
-            "runner token revocation",
-            `${revoked.size} revoked runner token fingerprint(s) configured; revoked tokens fail closed without printing token values.`
-          )
-    );
-  }
-
-  return checks;
 }
 
 function checkCodexConfig(configPath = defaultCodexConfigPath()): DoctorCheck {
@@ -401,53 +283,52 @@ export async function runDoctor(input: {
   fetchImpl?: typeof fetch;
   commandRunner?: CommandRunner;
   codexConfigPath?: string;
-  now?: Date;
   env?: Record<string, string | undefined>;
 }): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
   const commandRunner = input.commandRunner ?? nodeCommandRunner;
   const env = input.env ?? process.env;
-  const hermesProfileWarning = hermesProfileConfigurationWarning(input.config);
-  if (hermesProfileWarning) {
-    checks.push(check("warn", "Hermes profile configuration", hermesProfileWarning));
-  }
-  const hostedAuthProblem = hostedRunnerAuthProblem(input.config);
-  const token = runnerDispatcherToken(input.config);
+  const hostedAuthProblem = input.config.controlRegistration
+    ? hostedRunnerAuthProblem(input.config)
+    : "The local Runner is not paired with Hosted Control V1.";
+  const token = hostedAuthProblem ? undefined : input.config.runnerToken;
   const client = hostedAuthProblem
     ? undefined
     : createOpenTagClient({
-        dispatcherUrl: input.config.dispatcherUrl,
-        ...(token ? { pairingToken: token } : {}),
+        controlPlaneUrl: input.config.relayUrl,
+        ...(token ? { controlCredential: { kind: "runtime", token } } : {}),
         ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
       });
+  let controlContext: Awaited<ReturnType<OpenTagClient["getRunnerControlContextV1"]>> | undefined;
 
   try {
-    const response = await (input.fetchImpl ?? fetch)(`${input.config.dispatcherUrl.replace(/\/$/, "")}/healthz`);
-    checks.push(response.ok ? check("ok", "dispatcher health", input.config.dispatcherUrl) : check("fail", "dispatcher health", `${response.status}`));
+    const response = await (input.fetchImpl ?? fetch)(`${input.config.relayUrl.replace(/\/$/, "")}/healthz`);
+    checks.push(response.ok ? check("ok", "relay health", input.config.relayUrl) : check("fail", "relay health", `${response.status}`));
   } catch (error) {
-    checks.push(check("fail", "dispatcher health", error instanceof Error ? error.message : String(error)));
+    checks.push(check("fail", "relay health", error instanceof Error ? error.message : String(error)));
   }
 
   if (client) {
     try {
-      const { runner } = await client.getRunner({ runnerId: input.config.runnerId });
-      checks.push(check("ok", "runner registration", `${runner.runnerId} (${runner.name})`));
-      checks.push(
-        checkRunnerHeartbeat({
-          ...(runner.heartbeatAt ? { heartbeatAt: runner.heartbeatAt } : {}),
-          config: input.config,
-          ...(input.now ? { now: input.now } : {})
-        })
-      );
+      controlContext = await client.getRunnerControlContextV1({ runnerId: input.config.runnerId });
+      const registration = input.config.controlRegistration;
+      if (!registration || !("registration" in registration)
+        || controlContext.organizationId !== registration.registration.organizationId
+        || controlContext.credentialId !== registration.registration.credentialId
+        || controlContext.registrationGeneration !== registration.registration.registrationGeneration
+        || controlContext.credentialGeneration !== registration.registration.credentialGeneration) {
+        throw new Error("Runner Control Context does not match the persisted registration authority.");
+      }
+      checks.push(check(
+        "ok",
+        "runner registration",
+        `${controlContext.runnerId}; organization=${controlContext.organizationId}; credentialGeneration=${controlContext.credentialGeneration}`
+      ));
     } catch (error) {
       const remoteError = safeRemoteError(error);
-      const hostedAuthRejected = Boolean(
-        input.config.controlRegistration
-        && (remoteError.status === 401 || remoteError.status === 403)
-      );
       checks.push(
         check(
-          remoteError.code === "runner_not_found" || hostedAuthRejected ? "fail" : "warn",
+          "fail",
           "runner registration",
           remoteError.message
         )
@@ -458,7 +339,6 @@ export async function runDoctor(input: {
   }
 
   checks.push(checkRunnerApiAuth(input.config));
-  checks.push(...checkRunnerTokenRotation(input.config));
 
   if (!input.config.repositories.length) {
     const configuredAgentCount = Object.keys(input.config.agents ?? {}).length;
@@ -487,31 +367,22 @@ export async function runDoctor(input: {
       }))
     );
 
-    if (!client) {
+    if (!controlContext) {
       checks.push(check("fail", `${repository.owner}/${repository.repo} binding`, hostedAuthProblem ?? "Hosted runner authentication is invalid."));
       continue;
     }
-    try {
-      const { binding } = await client.getRepositoryBinding({
-        provider: repository.provider,
-        owner: repository.owner,
-        repo: repository.repo
-      });
-      checks.push(
-        binding.runnerId === input.config.runnerId
-          ? check("ok", `${repository.owner}/${repository.repo} binding`, `Bound to ${binding.runnerId}`)
-          : check("fail", `${repository.owner}/${repository.repo} binding`, `Bound to ${binding.runnerId}, expected ${input.config.runnerId}`)
-      );
-    } catch (error) {
-      const remoteError = safeRemoteError(error);
-      checks.push(
-        check(
-          remoteError.code === "repo_binding_not_found" ? "warn" : "fail",
-          `${repository.owner}/${repository.repo} binding`,
-          remoteError.message
-        )
-      );
-    }
+    const expected = canonicalRepositoryIdentity(repository);
+    const target = controlContext.targets.find((candidate) => {
+      const actual = canonicalRepositoryIdentity(candidate);
+      return actual.provider === expected.provider
+        && actual.owner === expected.owner
+        && actual.repo === expected.repo;
+    });
+    checks.push(!target
+      ? check("fail", `${repository.owner}/${repository.repo} binding`, "The Project Target is not registered for this Runner in the Control Plane.")
+      : target.defaultExecutor !== repository.defaultExecutor
+        ? check("fail", `${repository.owner}/${repository.repo} binding`, `Control Plane executor is ${target.defaultExecutor}, expected ${repository.defaultExecutor}.`)
+        : check("ok", `${repository.owner}/${repository.repo} binding`, `Project Target ${target.projectTargetId} is bound to ${input.config.runnerId}`));
   }
 
   const repositoryExecutorIds = new Set(input.config.repositories.map((repository) => repository.defaultExecutor));
@@ -537,62 +408,10 @@ export async function runDoctor(input: {
     }
   }
 
-  for (const binding of normalizeChannelBindings(input.config)) {
-    if (!client) {
-      checks.push(
-        check(
-          "fail",
-          `${binding.provider}:${binding.accountId}/${binding.conversationId} binding`,
-          hostedAuthProblem ?? "Hosted runner authentication is invalid."
-        )
-      );
-      continue;
-    }
-    try {
-      const { binding: remoteBinding } = await client.getChannelBinding({
-        provider: binding.provider,
-        accountId: binding.accountId,
-        conversationId: binding.conversationId
-      });
-      checks.push(
-        remoteBinding.repoProvider === binding.repoProvider &&
-        remoteBinding.owner === binding.owner &&
-        remoteBinding.repo === binding.repo
-          ? check(
-              "ok",
-              `${binding.provider}:${binding.accountId}/${binding.conversationId} binding`,
-              `${remoteBinding.repoProvider}:${remoteBinding.owner}/${remoteBinding.repo}`
-            )
-          : check(
-              "fail",
-              `${binding.provider}:${binding.accountId}/${binding.conversationId} binding`,
-              `Bound to ${remoteBinding.repoProvider}:${remoteBinding.owner}/${remoteBinding.repo}, expected ${binding.repoProvider}:${binding.owner}/${binding.repo}`
-            )
-      );
-    } catch (error) {
-      const remoteError = safeRemoteError(error);
-      checks.push(
-        check(
-          remoteError.code === "channel_binding_not_found" ? "warn" : "fail",
-          `${binding.provider}:${binding.accountId}/${binding.conversationId} binding`,
-          remoteError.message
-        )
-      );
-    }
-  }
-
-  const githubApplyToken = input.config.githubApplyToken === null ? undefined : (input.config.githubApplyToken ?? input.config.githubToken);
-
-  if (input.config.allowAutoCreatePullRequest !== undefined || input.config.preparePullRequestBranch !== undefined) {
-    checks.push(check(
-      "warn",
-      "GitHub PR actions",
-      "Legacy automatic-PR flags are deprecated and ignored; publication requires an exact Candidate, current approval, and coordinator-issued capability"
-    ));
-  } else if (githubApplyToken) {
-    checks.push(check("ok", "GitHub PR actions", "Credential is configured for capability-authorized publication"));
+  if (input.config.githubToken) {
+    checks.push(check("ok", "GitHub publication", "Credential is configured for capability-authorized publication"));
   } else {
-    checks.push(check("warn", "GitHub PR actions", "No GitHub publication credential is configured"));
+    checks.push(check("ok", "GitHub publication", "Optional credential is not configured; publication is unavailable"));
   }
 
   return checks;

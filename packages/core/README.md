@@ -1,8 +1,7 @@
 # @opentag/core
 
-Core protocol types and validation for OpenTag.
-
-Use this package when you need to create, validate, parse, or document OpenTag protocol objects without depending on any provider SDK or runtime service.
+Provider-neutral validation primitives used inside the OpenTag Control Plane,
+Slack adapter, and paired Runner.
 
 ## Install
 
@@ -10,43 +9,30 @@ Use this package when you need to create, validate, parse, or document OpenTag p
 pnpm add @opentag/core
 ```
 
-## Exports
+## Current boundary
 
-- `OpenTagEventSchema`, `OpenTagRunSchema`, `OpenTagRunResultSchema`: Zod schemas for protocol objects.
-- `OpenTagEvent`, `OpenTagRun`, `OpenTagRunResult`: TypeScript types inferred from the schemas.
-- `CompletionContract`, `CompletionAssessment`, `HumanEscalation`: additive completion-governance protocol objects that keep executor outcome separate from accepted work completion.
-- `RunnerDirectoryEntry`, `RoutingDecision`, `AcceptedProgressMetrics`: additive schemas for current runner readiness, explainable placement, and evidence-attributed progress by runner or executor.
-- `FactoryRecipeSnapshot`, `Workstream`, `WorkstreamAdmissionBatchReceipt`, `WorkstreamMetrics`, `WorkstreamEvaluation`: immutable factory grouping, replay-safe batch receipt, and accepted-outcome evaluation contracts.
-- `WorkstreamContinuationPolicy`, `WorkstreamContinuationDecision`: an opt-in recipe policy and explainable eligibility result for bounded evidence-driven WorkThread continuation.
-- `parseOpenTagMention`: extracts an `@opentag` command from workspace text.
-- `commandFromRawText`: maps raw command text to a normalized intent.
-- `OpenTagJsonSchemas`: JSON Schema definitions for systems that do not use TypeScript or Zod.
+- `OpenTagEventSchema` validates the normalized event handed from the Slack
+  Source App boundary to the paired execution path.
+- `OpenTagRunSchema` and `OpenTagRunResultSchema` validate local execution facts.
+- completion and evidence schemas keep executor outcome separate from accepted
+  publication evidence.
+- `commandFromRawText` parses the text that remains after the verified Slack
+  mention is removed.
+- `OpenTagJsonSchemas` exposes the same validation shapes to non-TypeScript
+  consumers.
 
-## Example
+This package does not accept provider webhooks, choose a Runner, publish to
+GitHub, or own delivery. Those authorities remain in the Control Plane,
+Project Target, and provider-specific packages.
 
 ```ts
-import { OpenTagEventSchema, parseOpenTagMention } from "@opentag/core";
+import { commandFromRawText } from "@opentag/core";
 
-const command = parseOpenTagMention("@opentag fix this flaky test");
-if (!command.matched) {
-  throw new Error("No OpenTag command found");
-}
-
-const event = OpenTagEventSchema.parse({
-  id: "evt_1",
-  source: "github",
-  sourceEventId: "comment_1",
-  receivedAt: new Date().toISOString(),
-  actor: { provider: "github", providerUserId: "42", handle: "octocat" },
-  target: { mention: "@opentag", agentId: "opentag" },
-  command: { rawText: command.rawText, intent: command.intent, args: command.args },
-  context: [],
-  permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
-  callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
-  metadata: { owner: "acme", repo: "demo" }
-});
+const command = commandFromRawText("investigate the failing check");
 ```
 
 ## Stability
 
-This package is the most stable OpenTag surface. Protocol changes should be additive whenever possible and follow the repository versioning policy.
+OpenTag is pre-1.0. Schemas may change when the supported Slack → paired Runner
+→ GitHub path becomes smaller or more precise; unsupported compatibility
+surfaces are removed instead of kept as aliases.

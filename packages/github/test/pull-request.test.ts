@@ -1,19 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildPullRequestBody, createPullRequestViaFetch } from "../src/pull-request.js";
+import { createPullRequestViaFetch } from "../src/pull-request.js";
 import { createExactDraftPullRequest } from "../src/publisher.js";
 
 describe("pull request helpers", () => {
-  it("builds a verification-oriented PR body", () => {
-    expect(
-      buildPullRequestBody({
-        conclusion: "success",
-        summary: "Implemented the fix.",
-        changedFiles: ["src/demo.ts"],
-        verification: [{ command: "pnpm test", outcome: "passed" }]
-      })
-    ).toContain("`pnpm test`: passed");
-  });
-
   it("creates a pull request through the GitHub REST API", async () => {
     const requests: { url: string; body: unknown; authorization: string | null }[] = [];
     const url = await createPullRequestViaFetch(

@@ -7,7 +7,6 @@ import {
 } from "@opentag/control-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
-import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
 import {
   HOSTED_CAPABILITIES,
@@ -420,34 +419,16 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
   });
 
   it("admits while the paired Runner is offline without extending the finite claim deadline", async () => {
-    const runners = createRunnerDirectory({
-      pool: fixture.pool,
-      clock,
-      tokenFactory: () => "runtime_offline_secret",
-      idFactory: () => "credential_offline",
-    });
-    const registration = await runners.register({
-      organizationId: principal.organizationId,
-      organizationName: "Hosted",
-      request: {
-        schemaVersion: 1,
-        protocolVersion: "1.0",
-        requiredCapabilities: ["relay.registration.v1"],
-        requestId: "request_register_offline",
-        operationId: "operation_register_offline",
-        runnerId: "runner_offline",
-        capabilities: [...HOSTED_CAPABILITIES],
-      },
-    });
-    expect(registration.kind).toBe("created");
-    const offlinePrincipal = await runners.authenticate("runtime_offline_secret");
-    if (offlinePrincipal.kind !== "authenticated") throw new Error("authentication failed");
+    await fixture.pool.query(
+      "DELETE FROM cp_runner_readiness WHERE organization_id = $1 AND runner_id = $2",
+      [principal.organizationId, principal.runnerId],
+    );
     const deadline = "2026-08-29T00:00:00.000Z";
     const service = coordinator();
     const input = await hostedAdmissionFixture({
       runId: "run_offline",
       suffix: "offline",
-      runnerId: "runner_offline",
+      runnerId: principal.runnerId,
       queueClaimDeadline: deadline,
     });
 
@@ -466,11 +447,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       },
     });
     await expect(service.claim({
-      principal: offlinePrincipal.principal,
+      principal,
       request: hostedClaimRequest({
         operationId: "operation_claim_offline",
         requestId: "request_claim_offline",
-        credentialId: "credential_offline",
+        credentialId: principal.credentialId,
       }),
     })).resolves.toEqual({ kind: "empty" });
     await expect(service.inspect({
@@ -480,6 +461,19 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       canonicalStatus: "queued",
       status: "waiting_for_runner",
       queueClaimDeadline: deadline,
+    });
+    await fixture.pool.query(
+      "DELETE FROM cp_hosted_audit_event WHERE organization_id = $1 AND run_id = 'run_offline'",
+      [principal.organizationId],
+    );
+    await fixture.pool.query(
+      "DELETE FROM cp_hosted_run WHERE organization_id = $1 AND run_id = 'run_offline'",
+      [principal.organizationId],
+    );
+    await recordHostedReadiness({
+      pool: fixture.pool,
+      organizationId: principal.organizationId,
+      runnerId: principal.runnerId,
     });
   });
 
@@ -640,7 +634,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     });
   });
 
-  it("contains a pre-grant persisted claim as controlled interrupted outcome_unknown", async () => {
+  it("rejects a stored claim missing its grant without inventing authority", async () => {
     const service = coordinator();
     const input = await hostedAdmissionFixture({ runId: "run_legacy_claim",
       suffix: "legacy_claim" });
@@ -676,8 +670,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       [principal.organizationId, first.claim.runId],
     );
     await fixture.pool.query(
-      `UPDATE cp_hosted_claim SET claim_version = 1,
-         claim = claim - 'sourceContentGrant'
+      `UPDATE cp_hosted_claim SET claim = claim - 'sourceContentGrant'
        WHERE organization_id = $1 AND operation_id = $2`,
       [principal.organizationId, request.operationId],
     );
@@ -688,16 +681,12 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     }) })).resolves.toEqual({ kind: "empty" });
 
     const exact = await service.claim({ principal, request });
-    expect(exact).toMatchObject({
-      kind: "legacy_interrupted", runId: "run_legacy_claim",
-      outcome: "outcome_unknown",
-    });
+    expect(exact).toEqual({ kind: "conflict", reason: "authority_mismatch" });
     const recreated = coordinator();
     await expect(recreated.claim({ principal, request })).resolves.toEqual(exact);
     await expect(service.inspect({ organizationId: principal.organizationId,
       runId: "run_legacy_claim" })).resolves.toMatchObject({
-        canonicalStatus: "interrupted", outcome: "outcome_unknown",
-        terminalReason: "legacy_claim_authority_unrecoverable",
+        canonicalStatus: "needs_approval",
       });
     expect((await fixture.pool.query<{ state: string; material_start_state: string;
       lease_open: boolean; blocked_permission_request_id: string | null }>(
@@ -705,19 +694,19 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
               blocked_permission_request_id
        FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2`,
       [principal.organizationId, first.claim.runId, now],
-    )).rows).toEqual([{ state: "interrupted", material_start_state: "started_or_ambiguous",
-      lease_open: false, blocked_permission_request_id: null }]);
+    )).rows).toEqual([{ state: "needs_approval", material_start_state: "open",
+      lease_open: true, blocked_permission_request_id: "permission_legacy_claim" }]);
     expect((await fixture.pool.query(
       `SELECT state FROM cp_permission_request
        WHERE organization_id = $1 AND permission_request_id = $2`,
       [principal.organizationId, "permission_legacy_claim"],
-    )).rows).toEqual([{ state: "revoked" }]);
+    )).rows).toEqual([{ state: "waiting" }]);
   });
 
   it.each([
     ["missing", { sourceContentGrant: { fabricated: true } }],
     ["malformed", { attempt: "not-an-attempt", sourceContentGrant: { fabricated: true } }],
-  ] as const)("contains a %s legacy Attempt reference without strict parsing or grant fabrication",
+  ] as const)("rejects a %s stored claim without mutating it",
     async (suffix, malformedClaim) => {
       const service = coordinator();
       const input = await hostedAdmissionFixture({ runId: `run_legacy_${suffix}`,
@@ -729,7 +718,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       const claimed = await service.claim({ principal, request: original });
       if (claimed.kind !== "claimed") throw new Error("claim failed");
       await fixture.pool.query(
-        `UPDATE cp_hosted_claim SET claim_version = 1, claim = $3::jsonb
+        `UPDATE cp_hosted_claim SET claim = $3::jsonb
          WHERE organization_id = $1 AND operation_id = $2`,
         [principal.organizationId, original.operationId, JSON.stringify(malformedClaim)],
       );
@@ -739,19 +728,18 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
         requestId: `request_legacy_${suffix}_other`,
       }) })).resolves.toEqual({ kind: "empty" });
       await expect(coordinator().claim({ principal, request: original }))
-        .resolves.toMatchObject({ kind: "legacy_interrupted",
-          runId: claimed.claim.runId, outcome: "outcome_unknown" });
+        .resolves.toEqual({ kind: "conflict", reason: "authority_mismatch" });
       expect(JSON.stringify((await fixture.pool.query(
         `SELECT claim FROM cp_hosted_claim WHERE organization_id = $1 AND operation_id = $2`,
         [principal.organizationId, original.operationId],
       )).rows[0]?.claim)).toBe(JSON.stringify(malformedClaim));
       await expect(service.inspect({ organizationId: principal.organizationId,
         runId: claimed.claim.runId })).resolves.toMatchObject({
-          canonicalStatus: "interrupted", outcome: "outcome_unknown",
+          canonicalStatus: "assigned",
         });
     });
 
-  it("does not mutate a later unrelated Attempt on stale legacy replay", async () => {
+  it("does not mutate a later Attempt when stored claim hydration fails", async () => {
     const service = coordinator();
     const input = await hostedAdmissionFixture({ runId: "run_legacy_stale",
       suffix: "legacy_stale" });
@@ -762,8 +750,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     const first = await service.claim({ principal, request });
     if (first.kind !== "claimed") throw new Error("claim failed");
     await fixture.pool.query(
-      `UPDATE cp_hosted_claim SET claim_version = 1,
-         claim = claim - 'sourceContentGrant' WHERE operation_id = $1`,
+      `UPDATE cp_hosted_claim SET claim = claim - 'sourceContentGrant'
+       WHERE operation_id = $1`,
       [request.operationId]);
     await fixture.pool.query(
       `INSERT INTO cp_hosted_attempt(organization_id, run_id, attempt_number,
@@ -778,8 +766,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
        WHERE organization_id = $1 AND run_id = $2`,
       [principal.organizationId, first.claim.runId]);
 
-    await expect(service.claim({ principal, request })).resolves.toMatchObject({
-      kind: "legacy_interrupted", runId: first.claim.runId,
+    await expect(service.claim({ principal, request })).resolves.toEqual({
+      kind: "conflict", reason: "authority_mismatch",
     });
     expect((await fixture.pool.query(
       `SELECT state FROM cp_hosted_attempt WHERE run_id = $1 AND attempt_number = 2`,
@@ -1093,58 +1081,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       [claim.runId])).rows[0]?.state).toBe("rejected");
   });
 
-  it("settles cancellation racing completion exactly once", async () => {
-    const service = coordinator();
-    const claim = await admitAndClaim("4");
-    const complete = await buildHostedLifecycleRequestV1({
-      organizationId: principal.organizationId,
-      runnerId: principal.runnerId,
-      runId: claim.runId,
-      action: "complete",
-      attempt: {
-        attemptId: claim.attempt.id,
-        attemptNumber: claim.attempt.number,
-        epoch: claim.attempt.epoch,
-        fencingToken: claim.attempt.fencingToken,
-        fencingTokenDigest: claim.attempt.fencingTokenDigest,
-      },
-      occurredAt: now.toISOString(),
-      conclusion: "success",
-      reasonCode: "executor_success",
-      resultDigest: `sha256:${"5".repeat(64)}`,
-      artifactDigests: [],
-      evidenceDigests: [],
-    });
-    const cancel = await buildHostedLifecycleRequestV1({
-      organizationId: principal.organizationId,
-      runnerId: principal.runnerId,
-      runId: claim.runId,
-      action: "cancel",
-      attempt: {
-        attemptId: claim.attempt.id,
-        attemptNumber: claim.attempt.number,
-        epoch: claim.attempt.epoch,
-        fencingToken: claim.attempt.fencingToken,
-        fencingTokenDigest: claim.attempt.fencingTokenDigest,
-      },
-      occurredAt: now.toISOString(),
-      reasonCode: "operator_cancelled",
-    });
-
-    const outcomes = await Promise.all([
-      service.lifecycle({
-        principal,
-        runId: claim.runId,
-        action: "cancel",
-        request: cancel,
-      }),
-      service.lifecycle({ principal, runId: claim.runId, action: "complete", request: complete }),
-    ]);
-    expect(outcomes.filter(({ kind }) => kind === "accepted").length).toBeGreaterThanOrEqual(1);
-    const terminal = await service.inspect({ organizationId: "org_hosted", runId: claim.runId });
-    expect(terminal?.state).toBe("cancelled");
-  });
-
   it("replays one lifecycle receipt under an identical concurrent operation", async () => {
     const service = coordinator();
     const claim = await admitAndClaim("concurrent_lifecycle");
@@ -1193,27 +1129,25 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     expect(receipts.rows[0]?.count).toBe(1);
   });
 
-  it("reclaims an expired lease with a new attempt and fences the old one", async () => {
+  it("does not reclaim an expired lease without durable material evidence", async () => {
     const service = coordinator();
     const claim = await admitAndClaim("5");
-    const materials = createMaterialActionCoordinator({ pool: fixture.pool, clock });
-    await expect(materials.recordNotStarted({ principal,
-      fencingToken: claim.attempt.fencingToken, runId: claim.runId,
-      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
-      proofId: "proof_no_start_5", proofDigest: `sha256:${"5".repeat(64)}` }))
-      .resolves.toEqual({ kind: "recorded" });
     now = new Date(now.getTime() + 61_000);
-    const reclaimed = await service.claim({
+    const reconciliation = await service.reconcileExpiredAttempts(principal.organizationId);
+    expect(reconciliation.expired).toBeGreaterThan(0);
+    await expect(service.claim({
       principal,
       request: hostedClaimRequest({
         operationId: "operation_claim_5b",
         requestId: "request_claim_5b",
       }),
-    });
-    expect(reclaimed.kind).toBe("claimed");
-    if (reclaimed.kind !== "claimed") throw new Error("reclaim failed");
-    expect(reclaimed.claim.attempt.number).toBe(2);
-    expect(reclaimed.claim.attempt.id).not.toBe(claim.attempt.id);
+    })).resolves.toEqual({ kind: "empty" });
+    await expect(service.inspect({ organizationId: principal.organizationId,
+      runId: claim.runId })).resolves.toMatchObject({
+        canonicalStatus: "interrupted",
+        outcome: "outcome_unknown",
+        terminalReason: "attempt_lease_expired_after_material_start",
+      });
 
     const heartbeat = await buildHostedLifecycleRequestV1({
       organizationId: principal.organizationId,
@@ -1232,7 +1166,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     });
     await expect(
       service.lifecycle({ principal, runId: claim.runId, action: "heartbeat", request: heartbeat }),
-    ).resolves.toEqual({ kind: "stale_fence" });
+    ).resolves.toEqual({ kind: "terminal", terminalKind: "interrupted" });
   });
 
   it("rolls back admission if its audit write fails", async () => {

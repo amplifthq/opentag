@@ -63,8 +63,8 @@ from a Slack projection or process log.
 3. Observe the paired Runner claim one Attempt. Record the Runner generation
    and fencing-token digest/identifier, not the live secret.
 4. Have the ACP harness produce bounded proposal or verification evidence.
-5. Confirm source-thread projection, `opentag status --run <run_id>`, and the
-   durable Run/Attempt state agree. If they do not, stop and retain the
+5. Confirm the source-thread projection, Control Plane Run view, and durable
+   Run/Attempt state agree. If they do not, stop and retain the
    discrepancy as the canary outcome.
 
 ### B. Stop at proposal unless a provider action is explicitly authorized

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { computeSlackSignature } from "../src/ingress.js";
+import { computeSlackSignature } from "../src/signature.js";
 import { createSlackSourceApp } from "../src/source-app.js";
 
 const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;

@@ -71,8 +71,8 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       [principal.organizationId,candidate.runId,claim.attempt.id,JSON.stringify(workspaceAttestation)]);
     await fixture.pool.query(
       `INSERT INTO cp_project_target(organization_id,project_target_id,runner_id,binding_digest,
-       provider,owner,repo,default_executor,default_branch,version,updated_at)
-       VALUES($1,$2,$3,$4,'github','Acme','Demo','executor_acp','main',1,$5)`,
+       provider,owner,repo,default_executor,default_branch,updated_at)
+       VALUES($1,$2,$3,$4,'github','Acme','Demo','executor_acp','main',$5)`,
       [principal.organizationId,candidate.projectTargetId,principal.runnerId,
         admission.admission.projectTarget.digest,now]);
     await fixture.pool.query(
@@ -107,10 +107,13 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     approvalId: "approval_publication", approverId: "operator_publication",
     approvedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 30 * 60_000).toISOString(), ...overrides });
 
-  const claimOperation = (step: "push_owned_branch" | "create_draft_pull_request") => publisher.claim({ principal,
-    runId: candidate.runId, attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
-    fencingToken: claim.attempt.fencingToken, candidateId: candidate.candidateId, candidateDigest: sha256(candidate),
-    runnerGeneration: 1, step });
+  const claimOperation = async (step: "push_owned_branch" | "create_draft_pull_request") => {
+    const outcome = await publisher.claimNextForRunner({ principal });
+    if (outcome.kind === "issued" && outcome.capability.step !== step) {
+      throw new Error(`unexpected_publication_step:${outcome.capability.step}`);
+    }
+    return outcome;
+  };
 
   const completion = (fencingToken = claim.attempt.fencingToken) => ({
     schemaVersion: 1 as const, protocolVersion: "1.0" as const,
@@ -227,23 +230,8 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     throw new Error("publication_backend_did_not_wait_on_lock");
   };
 
-  const expectBackendWaitingOnAdvisoryLock = async (backendPid: Promise<number>) => {
-    const pid = await backendPid;
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      const waiting = await fixture.pool.query(
-        `SELECT 1 FROM pg_stat_activity activity
-         WHERE activity.pid=$1 AND activity.wait_event_type='Lock'
-           AND EXISTS (SELECT 1 FROM pg_locks lock WHERE lock.pid=activity.pid
-             AND lock.locktype='advisory' AND NOT lock.granted)`,
-        [pid],
-      );
-      if (waiting.rowCount === 1) return;
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    throw new Error("publication_backend_did_not_wait_on_advisory_lock");
-  };
-
-  const createFreshApprovalAuthority = async (suffix: string, runnerId = principal.runnerId) => {
+  const createFreshApprovalAuthority = async (suffix: string) => {
+    const runnerId = principal.runnerId;
     const runId = `run_publication_approval_${suffix}`;
     const attemptId = `attempt_publication_approval_${suffix}`;
     const candidateId = `candidate_publication_approval_${suffix}`;
@@ -260,15 +248,6 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     if (sourceOwnership.rowCount === 0) {
       const recorded = await publisher.attestOwnership({ principal, attestation: ownership() as never });
       if (recorded.kind === "rejected") throw new Error(`approval_fixture_ownership_${recorded.reason}`);
-    }
-    if (runnerId !== principal.runnerId) {
-      await fixture.pool.query(
-        `INSERT INTO cp_runner
-         SELECT (jsonb_populate_record(NULL::cp_runner, to_jsonb(source) || jsonb_build_object(
-           'runner_id',$2::text,'current_credential_id',$3::text,'display_name',$2::text))).*
-         FROM cp_runner source WHERE organization_id=$1 AND runner_id=$4`,
-        [principal.organizationId, runnerId, `credential_publication_approval_${suffix}`, principal.runnerId],
-      );
     }
     await fixture.pool.query(
       `INSERT INTO cp_hosted_run
@@ -327,40 +306,6 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
        WHERE organization_id=$1 AND run_id=ANY($2::text[])`,
       [principal.organizationId, runIds, JSON.stringify({ kind: "approval_fixture_complete" })],
     );
-  };
-
-  const createAdvisoryGatePool = () => {
-    const backendPid = Promise.withResolvers<number>();
-    const advisoryAcquired = Promise.withResolvers<void>();
-    const releaseAdvisory = Promise.withResolvers<void>();
-    let gateFirstAdvisoryLock = true;
-    return {
-      backendPid: backendPid.promise,
-      advisoryAcquired: advisoryAcquired.promise,
-      releaseAdvisory: releaseAdvisory.resolve,
-      pool: {
-        connect: async () => {
-          const client = await fixture.pool.connect();
-          backendPid.resolve((await client.query<{ pid: number }>("SELECT pg_backend_pid() pid")).rows[0]!.pid);
-          return {
-            query: async (query: string, values?: unknown[]) => {
-              const result = await client.query(query, values);
-              if (query === "BEGIN") {
-                await client.query("SET LOCAL lock_timeout = '3s'");
-                await client.query("SET LOCAL statement_timeout = '5s'");
-              }
-              if (gateFirstAdvisoryLock && query.includes("pg_advisory_xact_lock")) {
-                gateFirstAdvisoryLock = false;
-                advisoryAcquired.resolve();
-                await releaseAdvisory.promise;
-              }
-              return result;
-            },
-            release: () => client.release(),
-          };
-        },
-      },
-    };
   };
 
   it("freezes exact Runner-owned branch authority before human approval and conflicts on any replay change", async () => {
@@ -478,112 +423,6 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await closeFreshApprovalRuns(authority.runId);
   });
 
-  it.each(["left", "right"] as const)(
-    "serializes concurrent first approval by approvalId when %s candidate starts first",
-    async (firstCandidate) => {
-      const left = await createFreshApprovalAuthority(`approval_id_race_left_${firstCandidate}`,
-        `runner_publication_approval_left_${firstCandidate}`);
-      const right = await createFreshApprovalAuthority(`approval_id_race_right_${firstCandidate}`,
-        `runner_publication_approval_right_${firstCandidate}`);
-      const firstAuthority = firstCandidate === "left" ? left : right;
-      const secondAuthority = firstCandidate === "left" ? right : left;
-      const firstRunLock = Promise.withResolvers<void>();
-      const secondRunLock = Promise.withResolvers<void>();
-      const firstLockPool = createAdvisoryGatePool();
-      const secondLockPool = createLockTestPool(true);
-      const approvalId = `approval_publication_race_${firstCandidate}`;
-      const firstPublisher = createPublicationPublisher({ pool: firstLockPool.pool as never,
-        clock: { now: () => now }, idFactory: () => `approval_id_race_${firstCandidate}_winner`,
-        testHooks: { onLifecycleLock: (event) => {
-          if (event.runId === firstAuthority.runId && event.resource === "run" && event.phase === "after") {
-            firstRunLock.resolve();
-          }
-        } } });
-      const secondPublisher = createPublicationPublisher({ pool: secondLockPool.pool as never,
-        clock: { now: () => now }, idFactory: () => `approval_id_race_${firstCandidate}_loser`,
-        testHooks: { onLifecycleLock: (event) => {
-          if (event.runId === secondAuthority.runId && event.resource === "run" && event.phase === "after") {
-            secondRunLock.resolve();
-          }
-        } } });
-      const first = firstPublisher.approve(freshApproval(firstAuthority, { approvalId }));
-      await firstRunLock.promise;
-      await firstLockPool.advisoryAcquired;
-      const second = secondPublisher.approve(freshApproval(secondAuthority, { approvalId }));
-      await secondRunLock.promise;
-      try {
-        await expectBackendWaitingOnAdvisoryLock(secondLockPool.backendPid);
-      } finally {
-        firstLockPool.releaseAdvisory();
-      }
-      await expect(Promise.all([first, second])).resolves.toEqual([
-        { kind: "approved", intentId: expect.any(String) },
-        { kind: "rejected", reason: "approval_replay_conflict" },
-      ]);
-      await expect(fixture.pool.query<{ intents: number; capabilities: number; begins: number; completions: number }>(
-        `SELECT
-           (SELECT count(*)::int FROM cp_publication_intent WHERE organization_id=$1 AND approval_id=$2) intents,
-           (SELECT count(*)::int FROM cp_publication_capability WHERE organization_id=$1
-             AND intent_id IN (SELECT intent_id FROM cp_publication_intent WHERE organization_id=$1 AND approval_id=$2)) capabilities,
-           (SELECT count(*)::int FROM cp_publication_begin WHERE organization_id=$1
-             AND capability_id IN (SELECT capability_id FROM cp_publication_capability WHERE organization_id=$1
-               AND intent_id IN (SELECT intent_id FROM cp_publication_intent WHERE organization_id=$1 AND approval_id=$2))) begins,
-           (SELECT count(*)::int FROM cp_publication_completion WHERE organization_id=$1 AND run_id IN ($3,$4)) completions`,
-        [principal.organizationId, approvalId, left.runId, right.runId],
-      )).resolves.toMatchObject({ rows: [{ intents: 1, capabilities: 0, begins: 0, completions: 0 }], rowCount: 1 });
-      await closeFreshApprovalRuns(left.runId, right.runId);
-    },
-  );
-
-  it.each(["approve", "claim"] as const)(
-    "serializes approval replay and operation claim when %s starts first",
-    async (firstKind) => {
-      const owned = (await fixture.pool.query<{ ownership_id: string; attestation_digest: string }>(
-        `SELECT ownership_id,attestation_digest FROM cp_publication_branch_ownership
-         WHERE organization_id=$1 AND candidate_id=$2`,
-        [principal.organizationId, candidate.candidateId],
-      )).rows[0]!;
-      const firstRunLock = Promise.withResolvers<void>();
-      const secondRunLockRequest = Promise.withResolvers<void>();
-      const releaseFirst = Promise.withResolvers<void>();
-      const firstLockPool = createLockTestPool(true);
-      const secondLockPool = createLockTestPool(true);
-      const firstPublisher = createPublicationPublisher({ pool: firstLockPool.pool as never,
-        clock: { now: () => now }, idFactory: () => "unused_approval_claim_first",
-        testHooks: { onLifecycleLock: async (event) => {
-          if (event.runId === candidate.runId && event.resource === "run" && event.phase === "after") {
-            firstRunLock.resolve();
-            await releaseFirst.promise;
-          }
-        } } });
-      const secondPublisher = createPublicationPublisher({ pool: secondLockPool.pool as never,
-        clock: { now: () => now }, idFactory: () => "unused_approval_claim_second",
-        testHooks: { onLifecycleLock: (event) => {
-          if (event.runId === candidate.runId && event.resource === "run" && event.phase === "before") {
-            secondRunLockRequest.resolve();
-          }
-        } } });
-      const run = (subject: typeof publisher, kind: typeof firstKind) => kind === "approve"
-        ? subject.approve(approval(owned.ownership_id, owned.attestation_digest))
-        : subject.claim({ principal, runId: candidate.runId, attemptId: claim.attempt.id,
-            attemptNumber: claim.attempt.number, fencingToken: "wrong_approval_race_fence",
-            candidateId: candidate.candidateId, candidateDigest: sha256(candidate),
-            runnerGeneration: 1, step: "push_owned_branch" });
-      const secondKind = firstKind === "approve" ? "claim" : "approve";
-      const firstOutcome = run(firstPublisher, firstKind);
-      await firstRunLock.promise;
-      const secondOutcome = run(secondPublisher, secondKind);
-      await secondRunLockRequest.promise;
-      await expectBackendWaitingOnLock(secondLockPool.backendPid);
-      releaseFirst.resolve();
-      const outcomes = await Promise.allSettled([firstOutcome, secondOutcome]);
-      expect(outcomes.every((outcome) => outcome.status === "fulfilled")).toBe(true);
-      const values = outcomes.map((outcome) => outcome.status === "fulfilled" ? outcome.value : null);
-      expect(values).toContainEqual(expect.objectContaining({ kind: "replayed" }));
-      expect(values).toContainEqual({ kind: "unavailable", reason: "exact_publication_authority_missing" });
-    },
-  );
-
   const sourceContentPublicationRace = async (first: "publication" | "redemption") => {
       const authority = await createFreshApprovalAuthority(`source_redeem_race_${first}`);
       await expect(publisher.approve(freshApproval(authority))).resolves.toEqual({
@@ -594,7 +433,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       const custody = createRelayContentCustody({ pool: fixture.pool,
         clock: { now: () => now }, key: { key, keyVersion: "relay-v1" } });
       await custody.store({ organizationId: principal.organizationId, installationId: "publication_race",
-        sourceAppId: "github", sourceDeliveryId: "publication_race",
+        sourceAppId: "slack", sourceDeliveryId: "publication_race",
         sourceMessageId: "publication_race",
         sourceVersionRef: claim.hostedAdmission.sourceContextEnvelope.sourceVersionRef,
         purpose: "source_context", contentId, payload: { text: "bounded" },
@@ -639,12 +478,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
             await releasePublication.promise;
           }
         } } });
-      const publish = () => racePublisher.claim({ principal, runId: authority.runId,
-        attemptId: authority.attemptId, attemptNumber: claim.attempt.number,
-        fencingToken: claim.attempt.fencingToken, candidateId: authority.candidateId,
-        candidateDigest: authority.candidateDigest,
-        runnerGeneration: principal.credentialGeneration,
-        step: "push_owned_branch" });
+      const publish = () => racePublisher.claimNextForRunner({ principal });
       const redeem = () => redemptionCustody.read({ ...grant, organizationId: principal.organizationId,
         runId: authority.runId, attemptId: authority.attemptId,
         fenceDigest: claim.attempt.fencingTokenDigest, contentIds: [contentId],
@@ -654,30 +488,32 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
         .catch((error: unknown) => ({ kind: "rejected" as const,
           reason: error instanceof Error ? error.message : String(error) }));
 
-      let publication: ReturnType<typeof publish>;
-      let redemption: ReturnType<typeof redeem>;
+      let publicationResult: Awaited<ReturnType<typeof publish>>;
+      let redemptionResult: Awaited<ReturnType<typeof redeem>>;
       try {
         if (first === "publication") {
-          publication = publish();
+          const publication = publish();
           await publicationRunAcquired.promise;
-          redemption = redeem();
+          const redemption = redeem();
           await redemptionPool.waitForRunLock;
           await expectBackendWaitingOnLock(redemptionPool.backendPid);
           releasePublication.resolve();
           await redemptionPool.runLockAcquired;
           redemptionPool.releaseRunLock();
+          [publicationResult, redemptionResult] = await Promise.all([publication, redemption]);
         } else {
-          redemption = redeem();
+          const redemption = redeem();
           await redemptionPool.runLockAcquired;
-          publication = publish();
+          const skippedPublication = publish();
           await publicationRunRequested.promise;
-          await expectBackendWaitingOnLock(publicationPool.backendPid);
+          await expect(skippedPublication).resolves.toEqual({ kind: "empty" });
           redemptionPool.releaseRunLock();
-          await publicationRunAcquired.promise;
+          redemptionResult = await redemption;
           releasePublication.resolve();
+          publicationResult = await publish();
         }
-        const [publicationResult, redemptionResult] = await Promise.all([publication!, redemption!]);
-        expect(publicationResult).toEqual({ kind: "issued", capability: expect.any(Object) });
+        expect(publicationResult).toMatchObject({ kind: "issued",
+          capability: { step: "push_owned_branch" } });
         expect(redemptionResult).toEqual({ kind: "rejected", reason: "source_content_grant_stale" });
         expect(JSON.stringify([publicationResult, redemptionResult])).not.toMatch(/40P01|55P03|57014/);
       } finally {
@@ -711,7 +547,12 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     const pushRace = await Promise.all([
       claimOperation("push_owned_branch"), claimOperation("push_owned_branch"),
     ]);
-    expect(pushRace.map((result) => result.kind).sort()).toEqual(["issued", "unavailable"]);
+    expect(pushRace.filter((result) => result.kind === "issued")).toHaveLength(1);
+    expect(pushRace.filter((result) => result.kind !== "issued")).toHaveLength(1);
+    const notIssued = pushRace.find((result) => result.kind !== "issued")!;
+    expect(notIssued.kind === "empty"
+      || (notIssued.kind === "blocked" && notIssued.reason === "capability_nonrenewable"))
+      .toBe(true);
     const push = pushRace.find((result) => result.kind === "issued")!;
     expect(push.kind).toBe("issued");
     if (push.kind !== "issued") return;
@@ -725,10 +566,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await expect(publisher.begin({ principal, fencingToken: claim.attempt.fencingToken,
       capability: push.capability, begunAt: new Date(now.getTime() - 60 * 60_000).toISOString() }))
       .resolves.toEqual({ kind: "stale_fence" });
-    await expect(claimOperation("push_owned_branch")).resolves.toEqual({
-      kind: "unavailable",
-      reason: "exact_publication_authority_missing",
-    });
+    await expect(claimOperation("push_owned_branch")).resolves.toEqual({ kind: "empty" });
     // Once execution has durably succeeded, the exact Candidate, ownership,
     // approval, intent, and short-lived publication capability are the
     // publication authority. The completed execution lease is no longer one.
@@ -759,8 +597,6 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       operationId: push.capability.operationId, reconciliationId: "reconcile_push_absent_after_success",
       observation: { kind: "absent" }, observedAt: now.toISOString() }))
       .resolves.toEqual({ kind: "conflict" });
-    await expect(claimOperation("push_owned_branch")).resolves.toMatchObject({
-      kind: "unavailable", reason: "operation_already_settled" });
     const next = await publisher.claimNextForRunner({ principal });
     expect(next).toMatchObject({ kind: "issued", capability: { step: "create_draft_pull_request" } });
     const pr = next;
@@ -825,7 +661,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     // An older authoritative absence authorizes this one successor only.  It
     // cannot remain a permanent retry token after the latest attempt exists.
     await expect(claimOperation("create_draft_pull_request")).resolves.toMatchObject({
-      kind: "unavailable", reason: "capability_nonrenewable",
+      kind: "blocked", reason: "capability_nonrenewable",
     });
     await expect(publisher.begin({ principal, fencingToken: claim.attempt.fencingToken,
       capability: retried.capability, begunAt: now.toISOString() })).resolves.toEqual({ kind: "begun" });

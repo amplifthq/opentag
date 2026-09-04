@@ -39,7 +39,7 @@ function acpManifest() {
     },
     resources: {
       "github.repository": { refs: true, read: true },
-      "linear.issue": { refs: true, read: true, write: true },
+      "github.issue": { refs: true, read: true, write: true },
       "custom.report": { refs: false, read: true }
     }
   } as const;

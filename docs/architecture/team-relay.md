@@ -8,12 +8,13 @@ one user-controlled local Runner. This is an architecture and local-contract
 description, not evidence that an installation is certified, live, highly
 available, or managed by OpenTag.
 
-`local_direct` remains the trial and single-machine mode. It is
-`offlineSafe=false`: its source listener, dispatcher, and Runner share one
-machine and disappear together. `paired_relay` separates the relay from the
-Runner fault domain, but the reference single-node profile is always
-`Relay-not-HA`. It may claim `Runner-offline-safe` only after the documented
-deterministic and installation certification gates pass.
+There is no embedded-dispatcher or local-listener compatibility mode. The same
+Control Plane and Control V1 path is used if an operator co-locates the relay
+and Runner for development. A co-located installation disappears with that
+machine and cannot claim persistent presence. A separately operated relay
+separates ingress from the Runner fault domain, but the reference single-node
+profile is always `Relay-not-HA`. It may claim `Runner-offline-safe` only after
+the documented deterministic and installation certification gates pass.
 
 ## Boundaries
 
@@ -74,16 +75,14 @@ An agent response, a stale approval, Slack delivery acceptance, or a guessed
 provider response is never publication authority. This profile does not
 auto-merge, force-push, or use blind retry to recover unknown provider outcomes.
 
-## Operating profiles
+## Supported profile
 
 | Profile | Source ingress | Execution | Product truth |
 | --- | --- | --- | --- |
-| `local_direct` | Local listener, including optional Socket Mode | Local Runner | Trial/single-machine; `offlineSafe=false` |
 | `paired_relay` | Self-hosted Slack Events API + interactivity HTTPS endpoint | One paired outbound local Runner and configured ACP executor | Exact certification is separate; reference single-node relay is `Relay-not-HA` |
 
 Slack is the supported Source App in this profile. GitHub is a Project Target
-and optional publication provider, not a second source ingress. Socket Mode is
-not a certified paired-relay transport. Managed service availability,
+and optional publication provider, not a second source ingress. Managed service availability,
 multi-Runner fallback, high availability, ambient memory, scheduled work, and
 automatic merge are outside this profile.
 

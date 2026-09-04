@@ -1,129 +1,99 @@
 # @opentag/cli
 
-OpenTag CLI for setting up and running a local source-thread agent work loop.
-
-OpenTag turns an existing work thread into a governed agent work loop. The CLI configures the local dispatcher, platform listener, runner, executor capability checks, context packet snapshots, action receipts, artifacts, and local audit/status surfaces that keep that loop source-thread-native and local-first.
+The OpenTag CLI sets up and operates a persistent Slack coding-agent presence backed by a user-controlled Runner.
 
 ## Install
 
 ```bash
 npm install -g @opentag/cli@latest
-```
-
-Then run:
-
-```bash
-opentag setup
-opentag service status
+opentag setup --relay https://relay.example.com --project-target-id target_team
 opentag doctor
-```
-
-`opentag setup` walks through the local governed-loop configuration:
-
-- Choose a language.
-- Choose a platform: Lark / Feishu, Slack, GitHub, GitLab, Linear, Telegram, or Discord.
-- Choose a coding agent: Codex, Claude Code, Cursor, OpenCode, Hermes, OpenClaw, or Echo for local testing, including its executor capability boundary. OpenClaw reports `cancel=no` until its Gateway can prove tool-process termination.
-- Configure platform credentials.
-- Bind the selected project.
-- Choose how OpenTag should run.
-
-The recommended setup option keeps OpenTag running after the terminal closes. It installs and starts a background service on macOS and Linux. If background service mode is unsupported or you choose terminal mode, use `opentag start` and keep that terminal open.
-
-For GitHub, GitLab, Linear, or Discord webhook deployments that use an already configured relay, `opentag setup --relay https://<relay-host>` writes relay mode directly and pairs the local checkout with that relay.
-
-`opentag status --run <run_id>` shows the local context packet, agent work ledger, produced artifacts, queued delivery intents or activation blocks, and safe next actions without turning the source thread into an agent log stream. Provider outcomes are reported only when backed by the delivery journal or signed provider observations.
-
-`opentag status --workstream <workstream_id>` shows the workstream state and next action first, followed by recipe budgets, accepted outcomes, and bounded exception detail. Healthy workstreams stay quiet. Add `--json` to receive structured `workstream`, `recipe`, `metrics`, and `evaluation` objects for automation.
-
-The `factory` commands operate the recipe, workstream, and restart-safe admission-batch lifecycle through the configured dispatcher. Create and submit commands accept a complete JSON document from a file or from stdin with `--input -`. Every command supports `--json` for automation:
-
-```bash
-opentag factory recipe create --input recipe.json --json
-opentag factory recipe get --id recipe_release --version 1 --json
-opentag factory workstream create --input workstream.json --json
-opentag factory workstream get --id workstream_release --json
-opentag factory batch submit --input batch.json --json
-opentag factory batch get --id batch_release --json
-
-# The same create/submit input can be piped through stdin.
-cat batch.json | opentag factory batch submit --input - --json
-```
-
-The JSON documents use the public `FactoryRecipeSnapshotInput`, `WorkstreamInput`, and `WorkstreamAdmissionBatchInput` contracts. A workstream contains an explicit bounded set of existing WorkThread members; a batch contains ordered admission items for those members. These commands do not define a task graph or move project-management ownership into OpenTag.
-
-External local runtimes can report lifecycle hooks through the public [Hook Ingest Contract](../../docs/hook-ingest.md): `opentag ingest-template --format manifest` prints the manifest, and `opentag ingest` records audit-visible progress or terminal state through runner-scoped auth.
-
-## Commands
-
-```bash
-opentag setup
-opentag start
+opentag service install
 opentag service start
-opentag service stop
+```
+
+The setup flow has one product path:
+
+1. deploy the Control Plane and bootstrap its Slack installation and binding;
+2. provide the trusted relay URL and the Control Plane bootstrap pairing token through the local password prompt;
+3. choose the local GitHub Project Target mapping, checkout, and ACP executor;
+4. register that exact Project Target through its active Slack binding and verify Control Plane readback;
+5. verify both sides and start the Runner before the first Slack mention.
+
+Interactive setup prompts for the Project Target ID. `setup --yes` requires
+`--project-target-id`; use the value configured on the active Slack binding in
+Control Plane Compose. No duplicate Runner environment variable is required.
+
+For non-interactive setup or pairing, provide the bootstrap authority in the
+process environment as `OPENTAG_BOOTSTRAP_PAIRING_TOKEN`. OpenTag uses it only
+for that pairing attempt and never writes it to the Runner config. A replayed
+registration enters `recovery_required`; recover the same Runner explicitly
+with `opentag pair --recover <recoveryCredentialId>` rather than starting it.
+
+Repository contents, coding-agent credentials, worktrees, and execution remain
+on the Runner. The optional GitHub credential is collected through the
+interactive secret prompt and is used only for configured provider readback and
+explicitly approved publication.
+
+## Core commands
+
+```bash
+opentag setup --relay https://relay.example.com --project-target-id target_team
+opentag start
+opentag doctor
+opentag status
+opentag service install
+opentag service start
 opentag service status
 opentag service logs
-opentag status
-opentag factory recipe get --id <recipe_id> --version <version>
-opentag factory workstream get --id <workstream_id>
-opentag factory batch get --id <batch_id>
-opentag doctor
-opentag config path
-opentag config show
-opentag platforms
 opentag executors
+opentag config show
 ```
 
-## Local Config
+`opentag pair --relay https://relay.example.com --trust-relay-origin
+https://relay.example.com` is the pairing entry point for an existing unpaired
+config. It reads the bootstrap authority from the local password prompt or the
+environment variable above; there is no secret-bearing CLI option. For an
+already paired Runner, the command only reconciles its declared targets and
+verifies the authoritative Control Plane readback.
 
-OpenTag stores local configuration at:
+Run detail and attention live in the originating Slack thread and the
+self-hosted Control Plane console. The Runner CLI reports its local pairing,
+relay reachability, executor, secret-reference, and Project Target readiness.
+
+Slack is the supported Source App and its credentials remain in the Control
+Plane. The Runner config contains no Slack transport credentials. GitHub is the
+Project Target and publication/evidence provider, not a Source ingress.
+
+## Local config
+
+The default configuration path is:
 
 ```text
 ~/.config/opentag/config.json
 ```
 
-The config contains local secrets, so the CLI writes it with private file permissions.
+The CLI writes configuration with private file permissions and redacts secret values from `opentag config show`, status, doctor, and logs.
 
-## Platform Guides
+The Runner has one relay endpoint: `daemon.relayUrl`. Its paired execution mode
+is implicit; there is no top-level `runtime` block, duplicate relay URL,
+or provider classification to keep synchronized.
 
-The setup wizard links to the matching guide for each platform:
+## Guides
 
-- Lark / Feishu: `docs/platforms/lark.en.md`
-- Slack: `docs/platforms/slack.en.md`
-- GitHub: `docs/platforms/github.en.md`
-- GitLab: `docs/platforms/gitlab.en.md`
-- Linear: `docs/platforms/linear.en.md`
-- Telegram: `docs/platforms/telegram.en.md`
-- Discord: `docs/platforms/discord.en.md`
+- Slack setup: `docs/platforms/slack.en.md`
+- GitHub Project Target and publication: `docs/platforms/github.en.md`
+- Self-hosted paired relay: `docs/architecture/team-relay.md`
+- ACP executors: `docs/acp-agent-integration.md`
 
-## Requirements
+## Verification boundary
 
-- Node.js 22.14 or newer.
-- An existing local login or provider configuration for the selected Codex, Claude Code, Cursor, OpenCode, Hermes, or OpenClaw ACP agent.
-- Platform credentials for the platform you connect.
+Local tests and `opentag doctor` prove only local configuration and software behavior. They do not prove a live Slack delivery, a GitHub publication, a deployed relay, or an externally accepted completion.
 
-## No Install
-
-The scoped CLI package supports one-off runs without a global install:
-
-```bash
-npx @opentag/cli doctor
-npx @opentag/cli setup
-npx @opentag/cli start
-```
-
-For background service mode, install the CLI globally first so the generated service definition points at a stable CLI path instead of an `npx` temporary location.
-
-## Local Development
-
-Inside the OpenTag monorepo, install the development command:
+## Local development
 
 ```bash
 corepack pnpm opentag-dev
-```
-
-Then run:
-
-```bash
-opentag-dev setup
-opentag-dev start
+opentag-dev setup --relay https://relay.example.com
+opentag-dev doctor
 ```

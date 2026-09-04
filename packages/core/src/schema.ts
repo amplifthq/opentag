@@ -531,8 +531,6 @@ export const FollowUpRequestSchema = z.object({
   sourceEventId: z.string().min(1),
   conversationKey: z.string().min(1),
   activeRunId: z.string().min(1).optional(),
-  workstreamId: z.string().min(1).optional(),
-  admissionBatchId: z.string().min(1).optional(),
   event: z.lazy(() => OpenTagEventSchema),
     decision: RunAdmissionDecisionSchema,
     accessProfileSnapshot: AgentAccessProfileSnapshotSchema.optional(),
@@ -543,13 +541,6 @@ export const FollowUpRequestSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
 }).superRefine((value, ctx) => {
-  if (value.admissionBatchId && !value.workstreamId) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "Follow-up batch attribution requires a workstream.",
-      path: ["admissionBatchId"]
-    });
-  }
   if (Boolean(value.accessProfileSnapshot) !== Boolean(value.policySnapshotProvenance)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -1325,8 +1316,7 @@ export const ReassessmentObligationSourceKindSchema = z.enum([
   "material_action_receipt_recorded",
   "material_action_reconciled",
   "human_escalation_changed",
-  "completion_waiver_changed",
-  "continuation_not_before"
+  "completion_waiver_changed"
 ]);
 
 export const ReassessmentObligationStateSchema = z.enum([
@@ -1338,9 +1328,6 @@ export const ReassessmentObligationStateSchema = z.enum([
 
 export const ReassessmentObligationReasonCodeSchema = z.enum([
   "assessment_satisfied",
-  "continuation_dispatched",
-  "continuation_terminal",
-  "continuation_deferred",
   "source_missing",
   "authority_missing",
   "reassessment_failed",
@@ -1348,13 +1335,10 @@ export const ReassessmentObligationReasonCodeSchema = z.enum([
 ]);
 
 const ReassessmentPendingReasonCodes = new Set([
-  "continuation_deferred",
   "reassessment_failed"
 ]);
 const ReassessmentSatisfiedReasonCodes = new Set([
-  "assessment_satisfied",
-  "continuation_dispatched",
-  "continuation_terminal"
+  "assessment_satisfied"
 ]);
 const ReassessmentBlockedReasonCodes = new Set([
   "source_missing",
@@ -1920,16 +1904,16 @@ export const ApplyPlanSchema = z.object({
 
 export const OpenTagEventSchema = z.object({
   id: z.string().min(1),
-  source: SourceSchema,
+  source: z.literal("slack"),
   sourceEventId: z.string().min(1),
   receivedAt: z.string().datetime(),
-  actor: ActorIdentitySchema,
+  actor: ActorIdentitySchema.extend({ provider: z.literal("slack") }),
   target: AgentTargetSchema,
   command: OpenTagCommandSchema,
   context: z.array(ContextPointerSchema),
   workItem: WorkItemReferenceSchema.optional(),
   permissions: z.array(PermissionGrantSchema),
-  callback: CallbackRouteSchema,
+  callback: CallbackRouteSchema.extend({ provider: z.literal("slack") }),
   metadata: z.record(z.string(), z.unknown())
 });
 

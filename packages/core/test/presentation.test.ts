@@ -99,7 +99,7 @@ describe("OpenTagPresentation", () => {
     expect(rendered).toContain("- UI screenshot: opentag/run_1.png");
     expect(rendered).toContain("- Log summary: opentag/run_1-log.md");
     expect(rendered).toContain("- Pull request: https://github.com/acme/demo/pull/1");
-    expect(rendered).toContain("Audit: opentag status --run run_1");
+    expect(rendered).toContain("Audit run: run_1");
   });
 
   it("rejects credential-bearing final presentation fields and accepts the centrally sanitized shape", () => {
@@ -199,7 +199,7 @@ describe("OpenTagPresentation", () => {
     expect(rendered).toContain("Approval: Review impact, then use `apply 1` to approve and apply, or `reject 1`.");
     expect(rendered).toContain("Safe next action: `apply 1` is the safe apply path after reviewing this receipt.");
     expect(rendered).toContain("Actions: apply 1, reject 1");
-    expect(rendered).toContain("Audit: opentag status --run run_receipt_1");
+    expect(rendered).toContain("Audit run: run_receipt_1");
   });
 
   it("carries provider-neutral action details for native renderers", () => {
@@ -263,60 +263,34 @@ describe("OpenTagPresentation", () => {
     expect(JSON.stringify(presentation)).not.toContain("action_id");
   });
 
-  it("renders Linear issue create action receipt details", () => {
+  it("escapes backslashes and backticks in inline action details", () => {
     const presentation = createFinalSummaryPresentation({
       result: {
         conclusion: "needs_human",
-        summary: "Prepared a Linear issue proposal.",
-        suggestedChanges: [
-          {
-            proposalId: "proposal_issue",
-            createdAt: "2026-06-24T00:00:00.000Z",
-            summary: "Create a Linear issue.",
-            intents: [
-              {
-                intentId: "intent_create_issue",
-                domain: "issue",
-                action: "create_issue",
-                summary: "Create a Linear issue for the OAuth callback error.",
-                params: {
-                  title: "Fix OAuth callback error",
-                  body: "Created from a Slack thread.",
-                  teamKey: "ENG",
-                  priority: "high",
-                  labels: ["bug"]
-                }
-              }
-            ]
-          }
-        ]
-      },
-      receiptContext: {
-        capabilityByIntentId: {
-          intent_create_issue: { state: "ready_to_apply" }
-        }
+        summary: "Prepared a PR proposal.",
+        suggestedChanges: [{
+          proposalId: "proposal_escape",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a pull request.",
+          intents: [{
+            intentId: "intent_escape",
+            domain: "pull_request",
+            action: "create_pull_request",
+            summary: "Create a pull request.",
+            params: {
+              head: "feature\\name`tick",
+              base: "main\\base`tick",
+              changedFiles: ["src\\demo`file.ts"]
+            }
+          }]
+        }]
       }
     });
 
-    expect(presentation.actions?.[0]).toMatchObject({
-      title: "Create a Linear issue for the OAuth callback error.",
-      targetLabel: "Linear issue",
-      details: expect.arrayContaining([
-        "Impact: Creates a new Linear issue titled `Fix OAuth callback error` for team `ENG`.",
-        "Title: `Fix OAuth callback error`",
-        "Team: `ENG`",
-        "Labels: `bug`"
-      ]),
-      detailRows: expect.arrayContaining([
-        { label: "Target", value: "Linear issue" },
-        { label: "Title", value: "Fix OAuth callback error" },
-        { label: "Team", value: "`ENG`" },
-        { label: "Priority", value: "`high`" },
-        { label: "Labels", value: "`bug`" },
-        { label: "Description", value: "Created from a Slack thread." }
-      ])
-    });
-    expect(renderOpenTagPresentationPlainText(presentation)).toContain("Actions: apply 1, reject 1");
+    const rendered = renderOpenTagPresentationPlainText(presentation);
+    expect(rendered).toContain("`feature\\\\name\\`tick`");
+    expect(rendered).toContain("`main\\\\base\\`tick`");
+    expect(rendered).toContain("`src\\\\demo\\`file.ts`");
   });
 
   it("renders standalone action receipts with command and audit fallback", () => {
@@ -369,7 +343,7 @@ describe("OpenTagPresentation", () => {
         "Approval: Review impact, then use `apply 1` to approve and apply, or `reject 1`.",
         "Safe next action: `apply 1` is the safe apply path after reviewing this receipt.",
         "Actions: apply 1, reject 1",
-        "Audit: opentag status --run run_receipt_1"
+        "Audit run: run_receipt_1"
       ].join("\n")
     );
   });
@@ -437,7 +411,7 @@ describe("OpenTagPresentation", () => {
   it("creates a provider-neutral source-thread status presentation", () => {
     const presentation = createSourceThreadStatusPresentation({
       title: "OpenTag status",
-      sourceContainer: "lark:tenant_1/oc_chat",
+      sourceContainer: "slack:T1/C1",
       projectTarget: "github:acme/demo",
       bindingState: "bound",
       activeRun: { id: "run_active", status: "running", updatedAt: "2026-06-24T00:01:00.000Z" },
@@ -446,13 +420,13 @@ describe("OpenTagPresentation", () => {
       currentCommand: "fix the failing test",
       nextAction: "wait for the final reply, send a follow-up, or request cancellation with /stop.",
       stopHint: "cancellation is explicit and is not reported as successful completion.",
-      detailHint: "use `opentag status --run run_active` locally for audit detail."
+      detailHint: "open Control Plane run run_active for audit detail."
     });
 
     expect(OpenTagPresentationSchema.parse(presentation)).toEqual({
       kind: "source_thread_status",
       title: "OpenTag status",
-      sourceContainer: "lark:tenant_1/oc_chat",
+      sourceContainer: "slack:T1/C1",
       projectTarget: "github:acme/demo",
       bindingState: "bound",
       activeRun: { id: "run_active", status: "running", updatedAt: "2026-06-24T00:01:00.000Z" },
@@ -461,7 +435,7 @@ describe("OpenTagPresentation", () => {
       currentCommand: "fix the failing test",
       nextAction: "wait for the final reply, send a follow-up, or request cancellation with /stop.",
       stopHint: "cancellation is explicit and is not reported as successful completion.",
-      detailHint: "use `opentag status --run run_active` locally for audit detail."
+      detailHint: "open Control Plane run run_active for audit detail."
     });
     expect(JSON.stringify(presentation)).not.toContain("blocks");
     expect(JSON.stringify(presentation)).not.toContain("mrkdwn");
@@ -469,14 +443,14 @@ describe("OpenTagPresentation", () => {
     expect(renderOpenTagPresentationPlainText(presentation)).toBe(
       [
         "OpenTag status",
-        "Source container: lark:tenant_1/oc_chat",
+        "Source container: slack:T1/C1",
         "Project Target: github:acme/demo",
         "Active run: run_active (running), updated 2026-06-24T00:01:00.000Z",
         "Command: fix the failing test",
         "Queued follow-ups: 3 (follow_up_1 (queued): update the docs, +2 more)",
         "Next action: wait for the final reply, send a follow-up, or request cancellation with /stop.",
         "Stop/timeout: cancellation is explicit and is not reported as successful completion.",
-        "Details: use `opentag status --run run_active` locally for audit detail."
+        "Details: open Control Plane run run_active for audit detail."
       ].join("\n")
     );
   });

@@ -64,7 +64,9 @@ describe("Slack callback rendering", () => {
     ]);
   });
   it("renders Slack-friendly acknowledgement messages", () => {
-    expect(renderSlackAcknowledgement("run_1")).toBe("Working on it.");
+    expect(renderSlackAcknowledgement("run_1")).toBe(
+      "Request received. I’ll update this thread when the paired Runner starts."
+    );
   });
 
   it("uses Slack mrkdwn for final results", () => {
@@ -112,7 +114,7 @@ describe("Slack callback rendering", () => {
       { auditRunId: "run_1" }
     );
 
-    expect(text).toContain("Audit: `opentag status --run run_1`");
+    expect(text).toContain("Audit run: `run_1`");
   });
 
   it("converts common Markdown to Slack mrkdwn", () => {
@@ -236,7 +238,7 @@ describe("Slack callback rendering", () => {
         currentCommand: "fix **this**",
         queuedFollowUps: [{ id: "follow_1", status: "queued", command: "update the docs" }],
         queuedFollowUpsTotal: 3,
-        nextAction: "wait for final reply or run `opentag status --run run_active`.",
+        nextAction: "wait for the final reply or open Control Plane run run_active.",
         stopHint: "cancellation is explicit.",
         detailHint: "audit detail stays local."
       })
@@ -287,7 +289,7 @@ describe("Slack callback rendering", () => {
       elements: [
         {
           type: "mrkdwn",
-          text: "Audit: `opentag status --run run_without_receipts`"
+          text: "Audit run: `run_without_receipts`"
         }
       ]
     });
@@ -328,7 +330,7 @@ describe("Slack callback rendering", () => {
     expect(rendered).toContain("Reply: `apply 1` / `reject 1`");
     expect(rendered).not.toContain("Full action details stay in OpenTag audit/status.");
     expect(rendered).not.toContain("Target: GitHub labels");
-    expect(rendered).toContain("Audit: `opentag status --run run_receipt_1`");
+    expect(rendered).toContain("Audit run: `run_receipt_1`");
     expect(rendered).not.toContain("Proposal:");
     expect(rendered).not.toContain("Intent ID:");
 
@@ -338,7 +340,7 @@ describe("Slack callback rendering", () => {
       elements: [
         {
           type: "mrkdwn",
-          text: "Audit: `opentag status --run run_receipt_1`"
+          text: "Audit run: `run_receipt_1`"
         }
       ]
     });
@@ -454,11 +456,11 @@ describe("Slack callback rendering", () => {
 
     expect(text).toContain("*Ready to apply*");
     expect(text).toContain("1. *Add the bug label.*");
-    expect(text).toContain("Audit: `opentag status --run run_receipt_standalone`");
+    expect(text).toContain("Audit run: `run_receipt_standalone`");
     expect(JSON.stringify(blocks)).toContain("Choose an action in this thread");
     expect(blocks.at(-1)).toEqual({
       type: "context",
-      elements: [{ type: "mrkdwn", text: "Audit: `opentag status --run run_receipt_standalone`" }]
+      elements: [{ type: "mrkdwn", text: "Audit run: `run_receipt_standalone`" }]
     });
 
     const actionsBlock = blocks.find((block) => block.type === "actions");
@@ -522,7 +524,7 @@ describe("Slack callback rendering", () => {
     expect(text).toContain("Reply: `apply 1` / `reject 1`");
     expect(text).not.toContain("Branch: `opentag/run_1` -> `main`");
     expect(text).not.toContain("Changed files: `src/demo.ts`");
-    expect(text).toContain("Audit: `opentag status --run run_semantic_1`");
+    expect(text).toContain("Audit run: `run_semantic_1`");
     expect(JSON.stringify(blocks)).toContain("Create a pull request");
     expect(JSON.stringify(blocks)).not.toContain("Create a pull request for branch opentag/run_1.");
     expect(JSON.stringify(blocks)).not.toContain("Branch: `opentag/run_1` -> `main`");
@@ -543,66 +545,6 @@ describe("Slack callback rendering", () => {
         command: "reject 1",
         proposalId: "proposal_pr",
         intentId: "intent_create_pr"
-      }
-    ]);
-  });
-
-  it("renders interactive Slack actions for Linear issue creation", () => {
-    const presentation = createFinalSummaryPresentation({
-      auditRunId: "run_linear_issue_1",
-      result: {
-        conclusion: "needs_human",
-        summary: "Prepared a Linear issue proposal.",
-        suggestedChanges: [
-          {
-            proposalId: "proposal_linear_issue",
-            createdAt: "2026-06-24T00:00:00.000Z",
-            summary: "Create a Linear issue.",
-            intents: [
-              {
-                intentId: "intent_create_linear_issue",
-                domain: "issue",
-                action: "create_issue",
-                summary: "Create a Linear issue for the OAuth callback error.",
-                params: {
-                  title: "Fix OAuth callback error",
-                  body: "Created from a Slack thread.",
-                  teamKey: "ENG"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      receiptContext: {
-        capabilityByIntentId: {
-          intent_create_linear_issue: { state: "ready_to_apply" }
-        }
-      }
-    });
-
-    const text = renderSlackFinalSummaryPresentation(presentation);
-    const blocks = createSlackFinalSummaryBlocks(presentation);
-
-    expect(text).toContain("Ready to apply");
-    expect(text).toContain("1. *Create a Linear issue for the OAuth callback error.*");
-    expect(text).toContain("Reply: `apply 1` / `reject 1`");
-    expect(text).not.toContain("Description: Created from a Slack thread.");
-    expect(JSON.stringify(blocks)).toContain("Create a Linear issue");
-    const actionsBlock = blocks.find((block) => block.type === "actions");
-    if (actionsBlock?.type !== "actions") throw new Error("expected actions block");
-    expect(actionsBlock.elements.map((element) => parseSlackSuggestedActionButtonValue(element.value))).toEqual([
-      {
-        version: 1,
-        command: "apply 1",
-        proposalId: "proposal_linear_issue",
-        intentId: "intent_create_linear_issue"
-      },
-      {
-        version: 1,
-        command: "reject 1",
-        proposalId: "proposal_linear_issue",
-        intentId: "intent_create_linear_issue"
       }
     ]);
   });

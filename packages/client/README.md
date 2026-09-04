@@ -1,8 +1,10 @@
 # @opentag/client
 
-HTTP client SDK for talking to an OpenTag dispatcher.
+Strict HTTP client for the OpenTag Control V1 protocol.
 
-Use this package from ingress apps, admin setup scripts, local daemons, hosted runners, or tests that need to create, claim, update, or inspect OpenTag runs over the dispatcher API.
+This package connects a trusted local Runner to a self-hosted Control Plane.
+Its surface is limited to paired Control V1 authority and receipt flows;
+provider writes remain behind their governed runtime boundaries.
 
 ## Install
 
@@ -10,48 +12,85 @@ Use this package from ingress apps, admin setup scripts, local daemons, hosted r
 pnpm add @opentag/client
 ```
 
-## Exports
+## Authority model
 
-- `createOpenTagClient`: full dispatcher client for run creation, claiming, progress, completion, and binding management.
-- `createDispatcherClient`: runner-focused compatibility wrapper used by `opentagd`.
-- `createDispatcherAdminClient`: admin-focused compatibility wrapper for runner registration and bindings.
-- `OpenTagClient`, `ClaimedOpenTagRun`, `RepoBindingInput`, `RunProgressInput`: public TypeScript contracts.
+Every authenticated request uses an explicit Control V1 credential:
 
-## Example
+- `bootstrap_pairing` registers a new Runner.
+- `recovery_pairing` re-provisions a Runner whose runtime credential is no
+  longer recoverable.
+- `runtime` reads Runner Control Context and performs fenced Runner work.
+
+Do not place credentials in URLs, command arguments, logs, or persisted
+protocol payloads. The bootstrap and recovery authorities must never become
+runtime credentials.
+
+## Runner example
 
 ```ts
 import { createOpenTagClient } from "@opentag/client";
 
 const client = createOpenTagClient({
-  dispatcherUrl: "https://opentag.example.com",
-  pairingToken: process.env.OPENTAG_DISPATCHER_TOKEN
+  controlPlaneUrl: "https://control.example.com",
+  controlCredential: {
+    kind: "runtime",
+    token: process.env.OPENTAG_RUNNER_TOKEN!
+  }
 });
 
-await client.createRun({
-  runId: `run_${Date.now()}`,
-  event
+const context = await client.getRunnerControlContextV1({
+  runnerId: "runner_local"
 });
 
-const claimed = await client.claim({ runnerId: "runner_local" });
-if (claimed) {
-  await client.markRunning({ runId: claimed.run.id, executor: "custom" });
-  await client.progress({
-    runId: claimed.run.id,
-    type: "executor.progress",
-    message: "Working on the request",
-    at: new Date().toISOString()
-  });
-  await client.complete({
-    runId: claimed.run.id,
-    result: { conclusion: "success", summary: "Done" }
-  });
-}
+const claim = await client.claimHostedRunControlV1({
+  runnerId: context.runnerId,
+  request: hostedClaimRequest
+});
 ```
 
-## Error Handling
+`controlPlaneUrl` is the only endpoint option. The former `dispatcherUrl`
+option is not accepted or migrated.
 
-Non-2xx dispatcher responses throw `Error` values that include the HTTP status and response body excerpt. Treat these messages as diagnostic text, not a stable machine-readable API.
+The caller must construct requests with the canonical schemas and digest
+helpers from `@opentag/control-protocol`.
 
-## Stability
+## Supported surface
 
-The method names and input object shapes are public API. New fields should be optional by default. Breaking changes follow the repository versioning policy.
+Pairing and onboarding:
+
+- `getRelayCapabilitiesControlV1`
+- `registerRunnerControlV1`
+- `reprovisionRunnerControlV1`
+- `getRunnerControlContextV1`
+- `upsertRunnerProjectTargetControlV1`
+
+Runner execution:
+
+- hosted claim and source-content redemption
+- fenced heartbeat, running, progress, completion, and reject-start lifecycle
+  operations
+- readiness, permission, material-action, and proposal-settlement operations
+
+GitHub publication:
+
+- claim-next, begin, receipt, reconciliation, completion, and branch ownership
+  operations
+
+## Result boundary
+
+A successful client call proves only that the strict response passed Control V1
+status, origin, identity, generation, and digest validation. It does not by
+itself prove Slack delivery, GitHub publication, or accepted completion.
+
+Ambiguous provider effects remain `outcome_unknown`. Reconcile the original
+operation; do not create a replacement operation merely because the transport
+result was uncertain.
+
+## Errors
+
+- `OpenTagControlV1HttpError` exposes sanitized Control V1 status, error code,
+  request ID, and retry metadata.
+- `OpenTagClientHttpError` exposes a safe client-side validation or transport
+  reason.
+
+Remote response bodies and credentials are not surfaced as diagnostic text.

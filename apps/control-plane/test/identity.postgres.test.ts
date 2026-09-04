@@ -489,13 +489,13 @@ describe.skipIf(!TEST_DATABASE_URL)("Console identity PostgreSQL module", () => 
 
     const created = await identity.createApiKey(owner, {
       label: "automation",
-      scopes: ["permission:resolve", "run:read", "runner:read"],
+      scopes: ["run:read", "runner:read"],
     });
     expect(created).toEqual({
       apiKey: expect.objectContaining({
         apiKeyId: "api_key_machine",
         label: "automation",
-        scopes: ["permission:resolve", "run:read", "runner:read"],
+        scopes: ["run:read", "runner:read"],
       }),
       token: bearer("api_key_1"),
     });
@@ -507,7 +507,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Console identity PostgreSQL module", () => 
       principal: {
         apiKeyId: "api_key_machine",
         organizationId: "org_console",
-        scopes: ["permission:resolve", "run:read", "runner:read"],
+        scopes: ["run:read", "runner:read"],
       },
     });
 

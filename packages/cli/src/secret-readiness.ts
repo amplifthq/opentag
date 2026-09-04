@@ -41,57 +41,9 @@ export function formatSecretReadiness(redactedConfig: unknown): string[] {
     rows.push(`  ${label}: ${value === undefined && fallback ? fallback : formatSecretSource(value)}`);
   };
 
-  add("daemon.pairingToken", ["daemon", "pairingToken"]);
-  add("daemon.runnerToken", ["daemon", "runnerToken"], "daemon.pairingToken fallback");
-  if (hasPath(redactedConfig, ["daemon", "runnerTokens"])) {
-    add("daemon.runnerTokens", ["daemon", "runnerTokens"]);
-  }
+  add("daemon.runnerToken", ["daemon", "runnerToken"]);
   if (hasPath(redactedConfig, ["daemon", "githubToken"])) {
     add("daemon.githubToken", ["daemon", "githubToken"]);
-  }
-  if (hasPath(redactedConfig, ["daemon", "githubApplyToken"]) || hasPath(redactedConfig, ["daemon", "githubToken"])) {
-    add("daemon.githubApplyToken", ["daemon", "githubApplyToken"], "daemon.githubToken fallback");
-  }
-
-  if (hasPath(redactedConfig, ["platforms", "lark"])) {
-    add("platforms.lark.appSecret", ["platforms", "lark", "appSecret"]);
-  }
-
-  if (hasPath(redactedConfig, ["platforms", "slack"])) {
-    add("platforms.slack.botToken", ["platforms", "slack", "botToken"]);
-    if (hasPath(redactedConfig, ["platforms", "slack", "appToken"])) {
-      add("platforms.slack.appToken", ["platforms", "slack", "appToken"]);
-    }
-    if (hasPath(redactedConfig, ["platforms", "slack", "signingSecret"])) {
-      add("platforms.slack.signingSecret", ["platforms", "slack", "signingSecret"]);
-    }
-  }
-
-  if (hasPath(redactedConfig, ["platforms", "github"])) {
-    add("platforms.github.webhookSecret", ["platforms", "github", "webhookSecret"]);
-  }
-
-  if (hasPath(redactedConfig, ["platforms", "gitlab"])) {
-    add("platforms.gitlab.token", ["platforms", "gitlab", "token"]);
-    add("platforms.gitlab.webhookSecret", ["platforms", "gitlab", "webhookSecret"]);
-  }
-
-  if (hasPath(redactedConfig, ["platforms", "linear"])) {
-    const hostedOAuth = getPath(redactedConfig, ["platforms", "linear", "auth", "method"]) === "hosted_oauth_app";
-    if (hostedOAuth) {
-      rows.push("  platforms.linear.auth: hosted OAuth install (relay stores token and webhook secret)");
-    } else {
-      add("platforms.linear.token", ["platforms", "linear", "token"]);
-      add("platforms.linear.webhookSecret", ["platforms", "linear", "webhookSecret"]);
-    }
-  }
-
-  if (hasPath(redactedConfig, ["platforms", "discord"])) {
-    add("platforms.discord.botToken", ["platforms", "discord", "botToken"]);
-  }
-
-  if (hasPath(redactedConfig, ["platforms", "teams"])) {
-    add("platforms.teams.appPassword", ["platforms", "teams", "appPassword"]);
   }
 
   return rows;

@@ -3,7 +3,7 @@ import {
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
   computeHostedAdmissionEnvelopeDigestV1,
-} from "@opentag/core";
+} from "@opentag/control-protocol";
 import { describe, expect, it, vi } from "vitest";
 import { createOpenTagClient } from "../src/index.js";
 
@@ -62,29 +62,32 @@ async function hostedClaim() {
       organizationId: "org_1",
       bindingId: "binding_1",
       bindingSecretVersion: "secret-v3",
-      provider: "github" as const,
+      provider: "slack" as const,
       deliveryId: "delivery_1",
       deliveryPayloadDigest: digest,
       sourceIdentityDigest: digest,
-      eventName: "issue_comment" as const,
+      eventName: "app_mention" as const,
       action: "created" as const,
       repository: {
+        provider: "github" as const,
         providerRepositoryId: "123",
         owner: "acme",
         repo: "demo",
       },
       sourceThread: {
-        kind: "issue" as const,
-        providerThreadId: "456",
-        number: 7,
+        kind: "channel_thread" as const,
+        providerThreadId: "C123:1700000000.000100",
+        channelId: "C123",
+        threadTs: "1700000000.000100",
       },
       sourceEvent: {
-        providerEventId: "789",
-        kind: "issue_comment" as const,
+        providerEventId: "Ev789",
+        kind: "app_mention" as const,
+        messageId: "1700000001.000200",
       },
       verifiedActor: {
-        providerUserId: "1001",
-        login: "octocat",
+        providerUserId: "U1001",
+        login: "alice",
         authorization: {
           decision: "allowed" as const,
           grantRef: "grant_1",
@@ -94,7 +97,6 @@ async function hostedClaim() {
       },
       projectTarget: {
         projectTargetId: "target_1",
-        version: 1,
         digest,
       },
       runnerId: "runner_1",
@@ -134,14 +136,15 @@ async function hostedClaim() {
         capturedAt: "2026-08-08T00:00:00.000Z",
         tenant: { organizationId: "org_1" },
         actor: {
-          provider: "github",
-          providerUserId: "1001",
-          login: "octocat",
+          provider: "slack",
+          providerUserId: "U1001",
+          login: "alice",
           authorizationRef: "grant_1",
         },
         target: {
           projectTargetId: "target_1",
           bindingId: "binding_1",
+          repositoryProvider: "github",
           providerRepositoryId: "123",
           defaultBranch: "main",
           authorizedPublicationModes: ["proposal_only", "pull_request"] as const,
@@ -156,7 +159,7 @@ async function hostedClaim() {
         },
         requiredRelayCapabilities: hostedClaimCapabilities,
         admissionRules: {
-          profile: "github-pr-exact-head/v1",
+          profile: "slack-app-mention/v1",
           requiredCheckNames: ["test"],
           mergeRequired: false,
           humanApprovalRequiredFor: ["merge"],
@@ -231,7 +234,7 @@ function response(body: unknown, status: number): Response {
 
 function client(fetchImpl: typeof fetch) {
   return createOpenTagClient({
-    dispatcherUrl: "https://control.example",
+    controlPlaneUrl: "https://control.example",
     controlCredential: { kind: "runtime", token: "runtime_secret" },
     fetchImpl,
   });
@@ -339,15 +342,15 @@ describe("claimHostedRunControlV1", () => {
 
   it("requires a runtime credential before transport", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
-    const approver = createOpenTagClient({
-      dispatcherUrl: "https://control.example",
-      controlCredential: { kind: "approver", token: "approver_secret" },
+    const pairing = createOpenTagClient({
+      controlPlaneUrl: "https://control.example",
+      controlCredential: { kind: "bootstrap_pairing", token: "pairing_secret" },
       fetchImpl,
     });
-    await expect(approver.claimHostedRunControlV1({
+    await expect(pairing.claimHostedRunControlV1({
       runnerId: "runner_1",
       request: hostedClaimRequest(),
-    })).rejects.toThrow(/required=runtime actual=approver/iu);
+    })).rejects.toThrow(/required=runtime actual=bootstrap_pairing/iu);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 

@@ -77,19 +77,6 @@ import {
   RunnerDirectoryEntrySchema,
   RunnerRegistrationInputSchema
 } from "./routing.js";
-import {
-  FactoryRecipeSnapshotInputSchema,
-  FactoryRecipeSnapshotSchema,
-  WorkstreamContinuationDecisionInputSchema,
-  WorkstreamContinuationDecisionSchema,
-  WorkstreamContinuationPolicySchema,
-  WorkstreamAdmissionBatchInputSchema,
-  WorkstreamAdmissionBatchReceiptSchema,
-  WorkstreamEvaluationSchema,
-  WorkstreamInputSchema,
-  WorkstreamMetricsSchema,
-  WorkstreamSchema
-} from "./factory.js";
 
 type JsonSchemaValue = null | boolean | number | string | JsonSchemaValue[] | { [key: string]: JsonSchemaValue };
 type OpenTagJsonSchema = {
@@ -224,16 +211,5 @@ export const OpenTagJsonSchemas = {
   RunnerRegistration: toOpenTagJsonSchema(RunnerRegistrationInputSchema, "RunnerRegistration"),
   RunnerDirectoryEntry: toOpenTagJsonSchema(RunnerDirectoryEntrySchema, "RunnerDirectoryEntry"),
   RoutingDecision: toOpenTagJsonSchema(RoutingDecisionSchema, "RoutingDecision"),
-  AcceptedProgressMetrics: toOpenTagJsonSchema(AcceptedProgressMetricsSchema, "AcceptedProgressMetrics"),
-  FactoryRecipeSnapshotInput: toOpenTagJsonSchema(FactoryRecipeSnapshotInputSchema, "FactoryRecipeSnapshotInput"),
-  FactoryRecipeSnapshot: toOpenTagJsonSchema(FactoryRecipeSnapshotSchema, "FactoryRecipeSnapshot"),
-  WorkstreamContinuationPolicy: toOpenTagJsonSchema(WorkstreamContinuationPolicySchema, "WorkstreamContinuationPolicy"),
-  WorkstreamContinuationDecisionInput: toOpenTagJsonSchema(WorkstreamContinuationDecisionInputSchema, "WorkstreamContinuationDecisionInput"),
-  WorkstreamContinuationDecision: toOpenTagJsonSchema(WorkstreamContinuationDecisionSchema, "WorkstreamContinuationDecision"),
-  WorkstreamInput: toOpenTagJsonSchema(WorkstreamInputSchema, "WorkstreamInput"),
-  Workstream: toOpenTagJsonSchema(WorkstreamSchema, "Workstream"),
-  WorkstreamAdmissionBatchInput: toOpenTagJsonSchema(WorkstreamAdmissionBatchInputSchema, "WorkstreamAdmissionBatchInput"),
-  WorkstreamAdmissionBatchReceipt: toOpenTagJsonSchema(WorkstreamAdmissionBatchReceiptSchema, "WorkstreamAdmissionBatchReceipt"),
-  WorkstreamMetrics: toOpenTagJsonSchema(WorkstreamMetricsSchema, "WorkstreamMetrics"),
-  WorkstreamEvaluation: toOpenTagJsonSchema(WorkstreamEvaluationSchema, "WorkstreamEvaluation")
+  AcceptedProgressMetrics: toOpenTagJsonSchema(AcceptedProgressMetricsSchema, "AcceptedProgressMetrics")
 } as const;

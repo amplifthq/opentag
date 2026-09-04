@@ -8,15 +8,8 @@
   "references": [
     { "path": "../client" },
     { "path": "../core" },
-    { "path": "../dispatcher" },
-    { "path": "../discord" },
-    { "path": "../gitlab" },
     { "path": "../github" },
-    { "path": "../linear" },
-    { "path": "../slack" },
-    { "path": "../store" },
-    { "path": "../teams" },
-    { "path": "../telegram" },
-    { "path": "../runner" }
+    { "path": "../runner" },
+    { "path": "../store" }
   ]
 }

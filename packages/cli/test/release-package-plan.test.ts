@@ -165,7 +165,7 @@ describe("public release package plan", () => {
     expect(() => buildPublicPackagePlan(packagesDirectory)).toThrow(/malformed.*package\.json/i);
   });
 
-  it("discovers the repository's complete 20-package public release set", () => {
+  it("discovers the repository's complete public release set", () => {
     const repositoryPackagesDirectory = resolve(
       dirname(fileURLToPath(import.meta.url)),
       "../../../packages"
@@ -180,20 +180,13 @@ describe("public release package plan", () => {
       "@opentag/core",
       "@opentag/delivery-contract",
       "@opentag/delivery-runtime",
-      "@opentag/discord",
-      "@opentag/dispatcher",
       "@opentag/github",
-      "@opentag/gitlab",
       "@opentag/governance",
-      "@opentag/lark",
-      "@opentag/linear",
       "@opentag/local-runtime",
       "@opentag/runner",
       "@opentag/slack",
       "@opentag/source-app-runtime",
-      "@opentag/store",
-      "@opentag/teams",
-      "@opentag/telegram"
+      "@opentag/store"
     ]);
   });
 });

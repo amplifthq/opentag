@@ -3,12 +3,11 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createOpenTagClient, type OpenTagClient } from "@opentag/client";
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import type {
   ActionPermissionRequest,
   ActionPermissionResolution,
-  CompletionAssessmentReceiptEnvelopeV1,
-  CompletionEvidenceObservationReceiptEnvelopeV1,
-  CompletionContractRefReceiptEnvelopeV1,
   HostedClaimRequestV1,
   HostedClaimV1,
   HostedExecutorResultReasonCodeV1,
@@ -18,7 +17,6 @@ import type {
   MaterialActionReceipt,
   RunnerReadinessReceiptEnvelopeV1,
   RunnerControlContextResponseV1,
-  WorkThreadRefReceiptEnvelopeV1,
 } from "@opentag/core";
 import {
   computeControlPayloadDigestV1,
@@ -33,7 +31,6 @@ import {
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
   computePermissionRequestDigestV1,
-  computeGitHubIssueCommentSourceIdentityDigestV1,
   computeSlackAppMentionSourceIdentityDigestV1,
   verifyHostedAdmissionEnvelopeDigestV1,
   HostedSourceContentRedeemRequestV1Schema,
@@ -42,14 +39,16 @@ import {
   RunnerReadinessReceiptEnvelopeV1Schema,
   sortCanonicalUnicodeStrings,
 } from "@opentag/core";
-import { openDispatcherGovernanceStore } from "@opentag/dispatcher";
+import {
+  createPairedRunnerRepository,
+  migratePairedRunnerSchema,
+  type PairedRunnerRepository,
+} from "@opentag/store";
 import {
   createExactDraftPullRequest,
   createGitHubCompletionApi,
   reconcileGitHubCompletionEvidence,
-  refetchGitHubIssueCommentForHostedAdmission,
   type PublicationProviderObservation,
-  type GitHubIssueCommentRefetchReceipt,
 } from "@opentag/github";
 import type {
   PublicationCompletionObservationV1,
@@ -83,6 +82,17 @@ const CONTROL_TRANSFER_TIMEOUT_MS = 30_000;
 const CONTROL_LEASE_SAFETY_MS = 5_000;
 const DEFAULT_CONTROL_LEASE_SECONDS = 90;
 const DEFAULT_CLOSE_DRAIN_TIMEOUT_MS = 5_000;
+
+function openLocalGovernanceStore(databasePath: string) {
+  const sqlite = new Database(databasePath);
+  migratePairedRunnerSchema(sqlite);
+  return {
+    repo: createPairedRunnerRepository(drizzle(sqlite)),
+    close() {
+      sqlite.close();
+    },
+  };
+}
 const HOSTED_CLAIM_CAPABILITIES = [
   "relay.claim-fence.v1",
   "relay.hosted-admission.v1",
@@ -92,17 +102,7 @@ const HOSTED_CLAIM_CAPABILITIES = [
   "relay.source-content-redeem.v1",
 ] as const;
 
-type CallbackObservationReceiptEnvelopeV1 = Parameters<
-  OpenTagClient["projectCallbackObservationControlV1"]
->[0];
-
-export type ControlPlaneProjectionEnvelope =
-  | RunnerReadinessReceiptEnvelopeV1
-  | WorkThreadRefReceiptEnvelopeV1
-  | CompletionContractRefReceiptEnvelopeV1
-  | CompletionAssessmentReceiptEnvelopeV1
-  | CompletionEvidenceObservationReceiptEnvelopeV1
-  | CallbackObservationReceiptEnvelopeV1;
+export type ControlPlaneProjectionEnvelope = RunnerReadinessReceiptEnvelopeV1;
 
 export type ControlPlaneProjectionOutboxEntry = {
   receiptId: string;
@@ -135,11 +135,10 @@ export type ControlProjectionRepository = {
   markControlPlaneProjectionAttention(input: { destinationId: string; organizationId: string; receiptId: string; leaseToken: string; reasonCode: string; httpStatus?: number; now?: Date }): Promise<{ outcome: "attention" | "stale_lease" | "not_found" }>;
 };
 
-export type ControlProjectionClient = Pick<OpenTagClient,
-  "reportRunnerReadinessControlV1" | "projectWorkThreadRefControlV1" |
-  "projectCompletionContractRefControlV1" | "projectCompletionAssessmentControlV1" |
-  "projectCompletionEvidenceControlV1" |
-  "projectCallbackObservationControlV1">;
+export type ControlProjectionClient = Pick<
+  OpenTagClient,
+  "reportRunnerReadinessControlV1"
+>;
 
 export type HostedLifecycleOperationEntry = {
   destinationId: string;
@@ -236,17 +235,7 @@ function retryAfterMs(error: unknown): number {
 }
 
 async function deliverProjection(client: ControlProjectionClient, envelope: ControlPlaneProjectionEnvelope): Promise<number> {
-  const result = envelope.receiptKind === "runner_readiness"
-    ? await client.reportRunnerReadinessControlV1(envelope)
-    : envelope.receiptKind === "work_thread_ref"
-      ? await client.projectWorkThreadRefControlV1(envelope)
-      : envelope.receiptKind === "completion_contract_ref"
-        ? await client.projectCompletionContractRefControlV1(envelope)
-        : envelope.receiptKind === "completion_assessment"
-          ? await client.projectCompletionAssessmentControlV1(envelope)
-          : envelope.receiptKind === "completion_evidence_observation"
-            ? await client.projectCompletionEvidenceControlV1(envelope)
-            : await client.projectCallbackObservationControlV1(envelope);
+  const result = await client.reportRunnerReadinessControlV1(envelope);
   return result.status;
 }
 
@@ -617,7 +606,7 @@ export async function assertHostedClaimCurrentAuthorityV1(input: {
     ? canonicalRepositoryIdentity(target)
     : null;
   const admissionIdentity = canonicalRepositoryIdentity({
-    provider: claim.hostedAdmission.repository.provider ?? claim.hostedAdmission.provider,
+    provider: claim.hostedAdmission.repository.provider,
     owner: claim.hostedAdmission.repository.owner,
     repo: claim.hostedAdmission.repository.repo,
   });
@@ -718,7 +707,8 @@ export async function buildRunnerReadinessReceipt(input: {
     const targetIdentity = canonicalRepositoryIdentity(target);
     const matches = input.repositories.filter((binding) => {
       const bindingIdentity = canonicalRepositoryIdentity(binding);
-      return bindingIdentity.provider === targetIdentity.provider
+      return binding.projectTargetId === target.projectTargetId
+        && bindingIdentity.provider === targetIdentity.provider
         && bindingIdentity.owner === targetIdentity.owner
         && bindingIdentity.repo === targetIdentity.repo
         && binding.defaultExecutor === target.defaultExecutor
@@ -1149,152 +1139,7 @@ async function observePublicationCompletion(input: {
   };
 }
 
-type HostedExecutionRepository = Omit<
-  ReturnType<typeof openDispatcherGovernanceStore>["repo"],
-  "getHostedAssignedRunForRecovery" | "isHostedExecutionCurrent"
-> & {
-  getLatestRunnerReadinessProjection(input: {
-    destinationId: string;
-    organizationId: string;
-    runnerId: string;
-  }): Promise<ControlPlaneProjectionOutboxEntry | null>;
-  getHostedClaimOperationForRetry(input: {
-    destinationId: string;
-    organizationId: string;
-    runnerId: string;
-  }): Promise<{
-    operationId: string;
-    requestId: string;
-    request: HostedClaimRequestV1;
-    state: "pending" | "claimed" | "empty";
-  } | null>;
-  beginHostedClaimOperation(input: {
-    destinationId: string;
-    organizationId: string;
-    runnerId: string;
-    request: HostedClaimRequestV1;
-  }): Promise<{
-    outcome: "created" | "replayed";
-    operation: {
-      operationId: string;
-      requestId: string;
-      request: HostedClaimRequestV1;
-      state: "pending" | "claimed" | "empty";
-    };
-  }>;
-  persistHostedClaimAuthorityShell(input: {
-    destinationId: string;
-    credentialId: string;
-    request: HostedClaimRequestV1;
-    claim: HostedClaimV1;
-  }): Promise<unknown>;
-  getHostedPreImportAuthorityRecovery(input: {
-    destinationId: string;
-    organizationId: string;
-    runnerId: string;
-  }): Promise<
-    | {
-        state: "claim_retry";
-        operation: {
-          operationId: string;
-          requestId: string;
-          request: HostedClaimRequestV1;
-          state: "pending" | "claimed" | "empty";
-        };
-      }
-    | {
-        state: "reject_pending" | "reject_attention";
-        operation: {
-          operationId: string;
-          requestId: string;
-          request: HostedClaimRequestV1;
-          state: "pending" | "claimed" | "empty";
-        };
-        lifecycleOperation: HostedLifecycleOperationEntry;
-      }
-    | null
-  >;
-  acknowledgeHostedClaimEmpty(input: {
-    operationId: string;
-    requestId: string;
-  }): Promise<unknown>;
-  importHostedAssignedRun(input: {
-    event: import("@opentag/core").OpenTagEvent;
-    claim: HostedClaimV1;
-    sourceReceipt: Awaited<ReturnType<typeof redeemHostedClaimSourceContentV1>>["receipt"];
-  }): Promise<{
-    outcome: "created" | "replayed";
-    executionState: "ready_to_start" | "already_started" | "terminal" | "superseded";
-    claimed: ClaimedRun | null;
-    hostedAuthority: HostedClaimV1["authority"] & {
-      policyReceiptDigest: string;
-      importedAt: string;
-    };
-  }>;
-  acquireHostedExecutionStart(input: {
-    runId: string;
-    attemptId: string;
-    fencingToken: string;
-  }): Promise<boolean>;
-  abandonHostedClaimOperation(input: {
-    operationId: string;
-    requestId: string;
-    reasonCode: "stale_control_authority" | "operation_digest_conflict";
-  }): Promise<unknown>;
-  getHostedAssignedRunForRecovery(input: {
-    destinationId: string;
-    organizationId: string;
-    runnerId: string;
-  }): Promise<{
-    claimed: ClaimedRun;
-    leaseExpiresAt: string;
-    hostedAuthority: HostedClaimV1["authority"] & {
-      policyReceiptDigest: string;
-      importedAt: string;
-    };
-  } | null>;
-  getHostedSucceededPublicationAuthority(input: {
-    destinationId: string;
-    organizationId: string;
-    runnerId: string;
-    runId: string;
-    attemptId: string;
-    fencingTokenDigest: string;
-  }): Promise<{ fencingToken: string; attemptNumber: number } | null>;
-  getHostedProposalSettlementForRetry?(input: {
-    destinationId: string;
-    organizationId: string;
-    runnerId: string;
-  }): Promise<{
-    runId: string;
-    attemptId: string;
-    attemptNumber: number;
-    fencingToken: string;
-    fencingTokenDigest: string;
-    runnerGeneration: number;
-    projectTargetId: string;
-    targetBindingDigest: string;
-    candidateId: string;
-    branch: string;
-    baseRevision: string;
-    finalRevision: string;
-    finalTree: string;
-    proposalArtifact: NonNullable<import("@opentag/core").OpenTagRunResult["artifacts"]>[number];
-  } | null>;
-  isHostedExecutionCurrent(input: {
-    runId: string;
-    attemptId: string;
-    fencingToken: string;
-  }): Promise<boolean>;
-  completeRun(input: {
-    runId: string;
-    runnerId: string;
-    attemptId: string;
-    fencingToken: string;
-    result: import("@opentag/core").OpenTagRunResult;
-    idempotencyKey?: string;
-  }): Promise<string>;
-};
+type HostedExecutionRepository = PairedRunnerRepository;
 
 function permissionResolutionFromReceipt(input: {
   receipt: Awaited<ReturnType<OpenTagClient["getActionPermissionCurrentControlV1"]>>["receipt"];
@@ -1386,7 +1231,7 @@ export async function redeemHostedClaimSourceContentV1(input: {
   now?: () => Date;
 }): Promise<{
   event: import("@opentag/core").OpenTagEvent;
-  receipt: GitHubIssueCommentRefetchReceipt | {
+  receipt: {
     provider: "slack";
     providerRepositoryId: string;
     owner: string;
@@ -1396,7 +1241,7 @@ export async function redeemHostedClaimSourceContentV1(input: {
     actor: { providerUserId: string; login: string };
     sourceIdentityDigest: string;
     eventDigest: string;
-    refetchedAt: string;
+    redeemedAt: string;
   };
 }> {
   const { claim } = input;
@@ -1439,28 +1284,21 @@ export async function redeemHostedClaimSourceContentV1(input: {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("hosted_source_content_invalid");
   }
-  const executionBearingCommentBody = (payload as Record<string, unknown>)
-    .executionBearingCommentBody;
+  const executionBearingMessageBody = (payload as Record<string, unknown>)
+    .executionBearingMessageBody;
   const event = OpenTagEventSchema.parse((payload as Record<string, unknown>).event);
-  if (typeof executionBearingCommentBody !== "string"
-    || executionBearingCommentBody.length === 0) {
+  if (typeof executionBearingMessageBody !== "string"
+    || executionBearingMessageBody.length === 0) {
     throw new Error("hosted_source_content_invalid");
   }
   const admission = claim.hostedAdmission;
-  const sourceIdentityDigest = admission.provider === "github"
-    ? await computeGitHubIssueCommentSourceIdentityDigestV1({
-        provider: "github", repository: admission.repository,
-        sourceThread: admission.sourceThread, sourceEvent: admission.sourceEvent,
-        actor: { providerUserId: admission.verifiedActor.providerUserId,
-          login: admission.verifiedActor.login }, executionBearingCommentBody,
-      })
-    : await computeSlackAppMentionSourceIdentityDigestV1({
-        provider: "slack", repository: admission.repository,
-        sourceThread: admission.sourceThread, sourceEvent: admission.sourceEvent,
-        actor: { providerUserId: admission.verifiedActor.providerUserId,
-          login: admission.verifiedActor.login },
-        executionBearingMessageBody: executionBearingCommentBody,
-      });
+  const sourceIdentityDigest = await computeSlackAppMentionSourceIdentityDigestV1({
+    provider: "slack", repository: admission.repository,
+    sourceThread: admission.sourceThread, sourceEvent: admission.sourceEvent,
+    actor: { providerUserId: admission.verifiedActor.providerUserId,
+      login: admission.verifiedActor.login },
+    executionBearingMessageBody,
+  });
   if (sourceIdentityDigest !== admission.sourceIdentityDigest) {
     throw new Error("hosted_source_identity_mismatch");
   }
@@ -1479,7 +1317,7 @@ export async function redeemHostedClaimSourceContentV1(input: {
       },
       sourceIdentityDigest,
       eventDigest: await computeControlPayloadDigestV1(event),
-      refetchedAt: (input.now?.() ?? new Date()).toISOString(),
+      redeemedAt: (input.now?.() ?? new Date()).toISOString(),
     },
   };
 }
@@ -2066,7 +1904,6 @@ export function createHostedControlLoop(input: {
   databasePath: string;
   executors: Record<string, ExecutorAdapter>;
   security?: RunnerSecurityPolicy;
-  githubApiOrigin?: string;
   now?: () => Date;
   fetchImpl?: typeof fetch;
   controlClient?: OpenTagClient;
@@ -2075,18 +1912,19 @@ export function createHostedControlLoop(input: {
     close(): void;
   };
   executeClaimedRunImpl?: typeof executeClaimedRun;
-  refetchGitHubIssueCommentImpl?: typeof refetchGitHubIssueCommentForHostedAdmission;
   buildHostedLifecycleRequestImpl?: typeof buildHostedLifecycleRequestV1;
   closeDrainTimeoutMs?: number;
-}): HostedControlLoop | undefined {
+}): HostedControlLoop {
   const registration = input.config.controlRegistration;
-  if (!registration || registration.state !== "paired" || !input.config.runnerToken) return undefined;
+  if (!registration || registration.state !== "paired" || !input.config.runnerToken) {
+    throw new Error("paired_control_registration_required");
+  }
   const store = input.governanceStore
-    ?? openDispatcherGovernanceStore(input.databasePath);
+    ?? openLocalGovernanceStore(input.databasePath);
   const repo = store.repo as HostedExecutionRepository;
   const abortController = new AbortController();
   const client = input.controlClient ?? createOpenTagClient({
-    dispatcherUrl: input.config.dispatcherUrl,
+    controlPlaneUrl: input.config.relayUrl,
     controlCredential: { kind: "runtime", token: input.config.runnerToken },
     controlSignal: abortController.signal,
   });
@@ -2144,10 +1982,10 @@ export function createHostedControlLoop(input: {
           throw new Error("runner_control_context_stale");
         }
         context = nextContext;
-        const proposalSettlement = await repo.getHostedProposalSettlementForRetry?.({
+        const proposalSettlement = await repo.getHostedProposalSettlementForRetry({
           destinationId: "cloud", organizationId: context.organizationId,
           runnerId: context.runnerId,
-        }) ?? null;
+        });
         if (closed) return false;
         if (proposalSettlement
           && !settledProposalCandidates.has(proposalSettlement.candidateId)) {
@@ -2174,7 +2012,8 @@ export function createHostedControlLoop(input: {
                 && candidate.bindingDigest === proposalSettlement.targetBindingDigest);
             const binding = target ? input.config.repositories.find((candidate) => {
               const actual = canonicalRepositoryIdentity(candidate);
-              return actual.provider === target.provider && actual.owner === target.owner
+              return candidate.projectTargetId === target.projectTargetId
+                && actual.provider === target.provider && actual.owner === target.owner
                 && actual.repo === target.repo;
             }) : null;
             if (!target || !binding || proposalSettlement.branch !== `opentag/${proposalSettlement.runId}`
@@ -2207,8 +2046,7 @@ export function createHostedControlLoop(input: {
           settledProposalCandidates.add(proposalSettlement.candidateId);
           return true;
         }
-        const publicationDidWork = typeof client.claimNextPublicationOperationControlV1 === "function"
-          ? await runPublicationControlV1Iteration({
+        const publicationDidWork = await runPublicationControlV1Iteration({
           organizationId: context.organizationId,
           runnerId: context.runnerId,
           runnerGeneration: context.credentialGeneration,
@@ -2258,17 +2096,15 @@ export function createHostedControlLoop(input: {
             }
             if (!input.config.githubToken) return { kind: "ambiguous" };
             return observeDraftPullRequest({ capability, token: input.config.githubToken,
-              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-              ...(input.githubApiOrigin ? { apiOrigin: input.githubApiOrigin } : {}) });
+              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
           },
           observeCompletion: (capability, receipt) => {
             if (!input.config.githubToken) throw new Error("publication_github_credential_unavailable");
             return observePublicationCompletion({ capability, receipt,
               token: input.config.githubToken, now: clock,
-              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-              ...(input.githubApiOrigin ? { apiOrigin: input.githubApiOrigin } : {}) });
+              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
           },
-          }) : false;
+          });
         if (closed || publicationDidWork) return publicationDidWork;
         const preImportRecovery =
           await repo.getHostedPreImportAuthorityRecovery({
@@ -2420,7 +2256,7 @@ export function createHostedControlLoop(input: {
         let readinessValidation: RunnerReadinessReceiptEnvelopeV1;
         if (operation) {
           // Once an operation exists, Cloud owns reconciliation. This includes
-          // legacy operations whose accepted readiness predates the local
+          // persisted operations whose accepted readiness predates the local
           // projection outbox and requests whose first response was lost. The
           // exact persisted request must be replayed regardless of local TTL.
           // Its expectedAuthority remains the sole accepted-readiness
@@ -2565,10 +2401,7 @@ export function createHostedControlLoop(input: {
             now: clock(),
           });
           if (closed) return false;
-          if (typeof client.redeemHostedSourceContentControlV1 !== "function") {
-            throw new Error("hosted_source_content_redeem_unavailable");
-          }
-          const refetched = await redeemHostedClaimSourceContentV1({
+          const redeemed = await redeemHostedClaimSourceContentV1({
             claim,
             client,
             requestId: `request_redeem_${randomUUID()}`,
@@ -2580,9 +2413,9 @@ export function createHostedControlLoop(input: {
             throw new Error("hosted_claim_lease_expired");
           }
           imported = await repo.importHostedAssignedRun({
-            event: refetched.event,
+            event: redeemed.event,
             claim,
-            sourceReceipt: refetched.receipt,
+            sourceReceipt: redeemed.receipt,
           });
         } catch (error) {
           if (closed) return false;

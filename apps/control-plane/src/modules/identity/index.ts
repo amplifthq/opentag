@@ -38,8 +38,6 @@ type LoginThrottleRow = {
 };
 const API_KEY_SCOPES = new Set([
   "audit:read",
-  "permission:resolve",
-  "publication:approve",
   "run:read",
   "runner:read",
   "target:read",

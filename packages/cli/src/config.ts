@@ -17,10 +17,6 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
-  AdapterMutationMappingSchema,
-  OpenTagManagedChannelBindingOwnershipSchema
-} from "@opentag/core";
-import {
   HostedControlRegistrationSchema,
   TrustedRelayAuthorizationV1Schema,
   assertHostedRelayAuthorization,
@@ -28,53 +24,18 @@ import {
   formatConfigError as formatDaemonConfigError,
   hostedRunnerAuthProblem,
   parseDaemonConfig,
-  runnerDispatcherToken,
-  type LocalDispatcherRuntimeInput,
   type OpenTagDaemonConfig
 } from "@opentag/local-runtime";
 import { z } from "zod";
 import type { CliLanguage } from "./catalogs/languages.js";
-import type { PlatformId } from "./catalogs/platforms.js";
 
 // Executor ids (repository bindings and the last-used preference) accept any
 // trimmed non-empty string so custom executors registered by a standalone runner
 // validate; echo, codex, claude-code, cursor, opencode, hermes, and openclaw remain the documented built-ins.
-// Mirrors the daemon config and the open runtime dispatch.
 const ExecutorIdSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 const CliLanguageSchema = z.enum(["en", "zh-CN"]);
-const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "linear", "telegram", "discord", "teams"]);
-const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
-const SlackModeSchema = z.enum(["socket_mode", "events_api"]);
-const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
-const TelegramModeSchema = z.enum(["polling", "webhook"]);
-const DiscordModeSchema = z.enum(["gateway", "webhook"]);
-const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
-const OptionalPortSchema = z.number().int().min(1).max(65535).optional();
-
-export type GitHubCompletionPolicyConfig = NonNullable<LocalDispatcherRuntimeInput["completionPolicies"]>[number];
-
-const GitHubCompletionPolicySchema = z
-  .object({
-    provider: z.literal("github"),
-    owner: z.string().trim().min(1),
-    repo: z.string().trim().min(1),
-    requiredChecks: z.array(z.string().trim().min(1)).min(1),
-    baseBranch: z.string().trim().min(1).optional(),
-    requireMerge: z.boolean().optional()
-  })
-  .strict()
-  .transform(
-    (policy): GitHubCompletionPolicyConfig => ({
-      provider: policy.provider,
-      owner: policy.owner,
-      repo: policy.repo,
-      requiredChecks: policy.requiredChecks,
-      ...(policy.baseBranch !== undefined ? { baseBranch: policy.baseBranch } : {}),
-      ...(policy.requireMerge !== undefined ? { requireMerge: policy.requireMerge } : {})
-    })
-  );
 
 const SecretRefSchema = z.discriminatedUnion("kind", [
   z
@@ -152,37 +113,6 @@ const SecretStringSchema = z.union([z.string().min(1), SecretRefSchema]).transfo
   return typeof value === "string" ? value : resolveSecretRef(value);
 });
 
-const RuntimeConfigSchema = z.discriminatedUnion("mode", [
-  z
-    .object({
-      mode: z.literal("local_direct")
-    })
-    .strict(),
-  z
-    .object({
-      mode: z.literal("paired_relay"),
-      relayUrl: z.string().url(),
-      relayProvider: z.string().min(1).optional(),
-      localProcessEndpoint: z.string().url().optional()
-    })
-    .strict()
-]);
-
-function canonicalizeLegacyRuntimeMode(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const raw = value as Record<string, unknown>;
-  if (!raw.runtime || typeof raw.runtime !== "object" || Array.isArray(raw.runtime)) return value;
-  const runtime = raw.runtime as Record<string, unknown>;
-  if (runtime.mode !== "local" && runtime.mode !== "relay") return value;
-  return {
-    ...raw,
-    runtime: {
-      ...runtime,
-      mode: runtime.mode === "local" ? "local_direct" : "paired_relay"
-    }
-  };
-}
-
 function isLocalProcessHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/gu, "");
   if (
@@ -201,39 +131,33 @@ function isLocalProcessHostname(hostname: string): boolean {
 
 export function assertRemotePairedRelayEndpoint(input: {
   relayUrl: string;
-  localProcessEndpoint?: string;
 }): void {
   const relay = new URL(input.relayUrl);
   if (isLocalProcessHostname(relay.hostname)) {
-    throw new Error("paired_relay requires a distinct relay process; loopback and unspecified relay hosts are not allowed.");
-  }
-  if (input.localProcessEndpoint) {
-    const local = new URL(input.localProcessEndpoint);
-    if (relay.origin === local.origin) {
-      throw new Error("paired_relay relay origin must not equal runtime.localProcessEndpoint.");
-    }
+    throw new Error("A paired Runner requires a distinct relay process; loopback and unspecified relay hosts are not allowed.");
   }
 }
 
-function assertPairedRelayEndpointSeparation(value: unknown): void {
+function assertRawRelayEndpoint(value: unknown): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const raw = value as Record<string, unknown>;
-  if (!raw.runtime || typeof raw.runtime !== "object" || Array.isArray(raw.runtime)) return;
-  const runtime = raw.runtime as Record<string, unknown>;
-  const mode = runtime.mode === "relay" ? "paired_relay" : runtime.mode;
-  if (mode !== "paired_relay") return;
-  if (typeof runtime.relayUrl !== "string") return;
-  assertRemotePairedRelayEndpoint({
-    relayUrl: runtime.relayUrl,
-    ...(typeof runtime.localProcessEndpoint === "string"
-      ? { localProcessEndpoint: runtime.localProcessEndpoint }
-      : {})
-  });
+  if (raw.runtime !== undefined) {
+    throw new Error("Top-level runtime configuration was removed; use daemon.relayUrl.");
+  }
+  if (!raw.daemon || typeof raw.daemon !== "object" || Array.isArray(raw.daemon)) return;
+  const daemon = raw.daemon as Record<string, unknown>;
+  if (daemon.dispatcherUrl !== undefined) {
+    throw new Error("daemon.dispatcherUrl was removed; use daemon.relayUrl.");
+  }
+  const relayUrl = z.string().url().parse(daemon.relayUrl);
+  canonicalHostedRelayOrigin(relayUrl);
+  assertRemotePairedRelayEndpoint({ relayUrl });
 }
 
 const RepositoryBindingSchema = z
   .object({
-    provider: z.string().min(1),
+    projectTargetId: z.string().trim().min(1),
+    provider: z.literal("github"),
     owner: z.string().min(1),
     repo: z.string().min(1),
     checkoutPath: z.string().min(1),
@@ -245,35 +169,10 @@ const RepositoryBindingSchema = z
   })
   .strict();
 
-const ChannelBindingSchema = z
-  .object({
-    provider: z.string().min(1),
-    accountId: z.string().min(1),
-    conversationId: z.string().min(1),
-    repoProvider: z.string().min(1).optional(),
-    owner: z.string().min(1).optional(),
-    repo: z.string().min(1).optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
-    ownership: OpenTagManagedChannelBindingOwnershipSchema.optional()
-  })
-  .strict()
-  .superRefine((binding, context) => {
-    const repositoryFields = [binding.repoProvider, binding.owner, binding.repo];
-    const configuredCount = repositoryFields.filter((value) => value !== undefined).length;
-    if (configuredCount !== 0 && configuredCount !== repositoryFields.length) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["repoProvider"],
-        message: "Channel binding repository fields repoProvider, owner, and repo must be provided together."
-      });
-    }
-  });
-
 const HermesSchema = z
   .object({
     command: z.string().trim().min(1).optional(),
-    profile: z.string().trim().min(1).optional(),
-    profileTemplate: z.string().trim().min(1).optional()
+    profile: z.string().trim().min(1).optional()
   })
   .strict();
 
@@ -319,27 +218,18 @@ const AcpAgentSchema = z
 const DaemonConfigSchema = z
   .object({
     runnerId: z.string().min(1),
-    dispatcherUrl: z.string().url(),
+    relayUrl: z.string().url(),
     repositories: z.array(RepositoryBindingSchema).default([]),
     agents: z.record(z.string(), AcpAgentSchema).optional(),
     scratchRoot: z.string().min(1).optional(),
     keepScratch: KeepWorktreeSchema.optional(),
     approvalMode: z.enum(["ask", "auto", "autonomous"]).optional(),
-    channelBindings: z.array(ChannelBindingSchema).optional(),
     hermes: HermesSchema.optional(),
     openclaw: OpenClawSchema.optional(),
     agentSessionProfile: AgentSessionProfileSchema.optional(),
     security: SecuritySchema.optional(),
     githubToken: SecretStringSchema.optional(),
-    githubApplyToken: SecretStringSchema.nullable().optional(),
-    completionPolicies: z.array(GitHubCompletionPolicySchema).optional(),
-    defaultGitHubCompletion: z.enum(["governed", "compat"]).optional(),
-    preparePullRequestBranch: z.boolean().optional(),
-    allowAutoCreatePullRequest: z.boolean().optional(),
     runnerToken: SecretStringSchema.optional(),
-    runnerTokens: z.array(SecretStringSchema).optional(),
-    revokedRunnerTokenFingerprints: z.array(z.string().trim().min(1)).optional(),
-    pairingToken: SecretStringSchema.optional(),
     controlRegistration: HostedControlRegistrationSchema.optional(),
     trustedRelay: TrustedRelayAuthorizationV1Schema.optional(),
     pollIntervalMs: PositiveIntegerSchema,
@@ -348,259 +238,9 @@ const DaemonConfigSchema = z
   })
   .strict();
 
-const LarkPlatformSchema = z
-  .object({
-    appId: z.string().min(1),
-    appSecret: SecretStringSchema,
-    domain: z.enum(["lark", "feishu"]),
-    botOpenId: z.string().min(1).optional(),
-    defaultProjectBinding: z.boolean().optional()
-  })
-  .strict();
-
-const SlackPlatformSchema = z
-  .object({
-    mode: SlackModeSchema.optional(),
-    appToken: SecretStringSchema.optional(),
-    signingSecret: SecretStringSchema.optional(),
-    botToken: SecretStringSchema,
-    teamId: z.string().min(1),
-    channelId: z.string().min(1),
-    appId: z.string().min(1).optional(),
-    installations: z.array(z.object({ recordVersion: z.literal(1), installationId: z.string().min(1), teamId: z.string().min(1), appId: z.string().min(1),
-      providerInstanceId: z.string().min(1), bindingDigest: DigestSchema, principalDigest: DigestSchema, configGeneration: PositiveIntegerSchema,
-      principalAssurance: z.enum(["provider_verified", "configured_declared"]), lifecycle: z.literal("active"),
-      configGenerationDigest: DigestSchema, credentialReference: z.object({ custody: z.literal("local"), id: z.string().min(1) }).strict(),
-      channelIds: z.array(z.string().min(1)).min(1) }).strict()).optional(),
-    defaultProjectBinding: z.boolean().optional(),
-    port: OptionalPortSchema
-  })
-  .strict()
-  .superRefine((value, context) => {
-    const mode = value.mode ?? "events_api";
-    if (mode === "socket_mode" && !value.appToken) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["appToken"],
-        message: "Slack Socket Mode requires appToken."
-      });
-    }
-    if (mode === "events_api" && !value.signingSecret) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["signingSecret"],
-        message: "Slack Events API requires signingSecret."
-      });
-    }
-  });
-
-const GitHubPlatformSchema = z
-  .object({
-    webhookSecret: SecretStringSchema,
-    owner: z.string().min(1),
-    repo: z.string().min(1),
-    webhookPath: z.string().min(1).optional(),
-    port: OptionalPortSchema
-  })
-  .strict();
-
-const GitLabPlatformSchema = z
-  .object({
-    token: SecretStringSchema,
-    webhookSecret: SecretStringSchema,
-    projectPathWithNamespace: z.string().min(1),
-    baseUrl: z.string().url(),
-    webhookPath: z.string().min(1).optional(),
-    port: OptionalPortSchema
-  })
-  .strict();
-
-const LinearAuthSchema = z.discriminatedUnion("method", [
-  z
-    .object({
-      method: z.literal("api_key")
-    })
-    .strict(),
-  z
-    .object({
-      method: z.literal("oauth_app"),
-      actor: z.literal("app"),
-      clientId: z.string().min(1),
-      clientSecret: SecretStringSchema.optional(),
-      redirectUri: z.string().url().optional(),
-      refreshToken: SecretStringSchema.optional(),
-      accessTokenExpiresAt: z.string().min(1).optional(),
-      scopes: z.array(z.string().min(1)).optional()
-    })
-    .strict(),
-  z
-    .object({
-      method: z.literal("hosted_oauth_app"),
-      actor: z.literal("app"),
-      installationId: z.string().min(1).optional(),
-      authorizationUrl: z.string().url().optional(),
-      stateExpiresAt: z.string().min(1).optional(),
-      scopes: z.array(z.string().min(1)).optional()
-    })
-    .strict()
-]);
-
-const LinearChannelSchema = z
-  .object({
-    teamId: z.string().trim().min(1),
-    channelId: z.string().trim().min(1),
-    projectId: z.string().trim().min(1),
-    connection: z.string().trim().min(1).optional()
-  })
-  .strict();
-
-const LinearConnectionSchema = z
-  .object({
-    token: SecretStringSchema
-  })
-  .strict();
-
-const LinearPlatformSchema = z
-  .object({
-    token: SecretStringSchema.optional(),
-    auth: LinearAuthSchema.optional(),
-    webhookSecret: SecretStringSchema.optional(),
-    teamId: z.string().min(1).optional(),
-    teamKey: z.string().min(1).optional(),
-    projectId: z.string().min(1).optional(),
-    channels: z.array(LinearChannelSchema).optional(),
-    connections: z.record(z.string().trim().min(1), LinearConnectionSchema).optional(),
-    graphqlUrl: z.string().url().optional(),
-    webhookPath: z.string().min(1).optional(),
-    port: OptionalPortSchema,
-    mappings: z.array(AdapterMutationMappingSchema).optional(),
-    projectTarget: z
-      .object({
-        repoProvider: z.string().min(1),
-        owner: z.string().min(1),
-        repo: z.string().min(1)
-      })
-      .strict()
-      .optional()
-  })
-  .strict()
-  .superRefine((value, context) => {
-    const seenChannels = new Set<string>();
-    value.channels?.forEach((channel, index) => {
-      const key = `${channel.teamId}\u0000${channel.channelId}`;
-      if (seenChannels.has(key)) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["channels", index],
-          message: `Duplicate Linear channel mapping for ${channel.teamId}/${channel.channelId}.`
-        });
-      }
-      seenChannels.add(key);
-    });
-
-    if (value.auth?.method === "hosted_oauth_app") return;
-
-    const hasConnectionToken = Object.keys(value.connections ?? {}).length > 0;
-    if (value.webhookSecret && !value.token) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["token"],
-        message: "Linear webhook/apply configuration requires the top-level Linear token. connections.*.token is query-only."
-      });
-    } else if (!value.token && !hasConnectionToken) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["token"],
-        message: "Linear token or connections.*.token is required unless auth.method is hosted_oauth_app."
-      });
-    }
-    if (!value.webhookSecret && !value.projectId && !value.channels?.length) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["webhookSecret"],
-        message:
-          "Linear webhookSecret is required unless auth.method is hosted_oauth_app or the config is query-only (projectId or channels set)."
-      });
-    }
-  });
-
-const TelegramPlatformSchema = z
-  .object({
-    mode: TelegramModeSchema.optional(),
-    botId: z.string().min(1),
-    agentId: z.string().min(1).optional(),
-    botUsername: z.string().min(1).optional(),
-    botToken: SecretStringSchema,
-    bindingAdminUserIds: z.array(z.string().min(1)).optional(),
-    secretToken: SecretStringSchema.optional(),
-    callbackUri: z.string().url().optional()
-  })
-  .strict();
-
-const DiscordPlatformSchema = z
-  .object({
-    mode: DiscordModeSchema.optional(),
-    publicKey: z.string().min(1).optional(),
-    botToken: SecretStringSchema,
-    webhookPath: z.string().min(1).optional()
-  })
-  .strict()
-  .superRefine((value, context) => {
-    const mode = value.mode ?? "gateway";
-    if (mode === "webhook" && !value.publicKey) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["publicKey"],
-        message: "Discord webhook mode requires publicKey."
-      });
-    }
-  });
-
-const TeamsPlatformSchema = z
-  .object({
-    appId: z.string().min(1),
-    appPassword: SecretStringSchema,
-    tenantId: z.string().min(1).optional(),
-    webhookPath: z.string().min(1).optional()
-  })
-  .strict();
-
 const PreferencesSchema = z
   .object({
     language: CliLanguageSchema.optional(),
-    lastSetup: z
-      .object({
-        platforms: z.array(PlatformSchema).optional(),
-        executor: ExecutorIdSchema.optional(),
-        projectPath: z.string().min(1).optional(),
-        larkSetupMethod: LarkSetupMethodSchema.optional(),
-        larkDomain: z.enum(["lark", "feishu"]).optional(),
-        bindingMethod: BindingMethodSchema.optional(),
-        slackMode: SlackModeSchema.optional(),
-        slackTeamId: z.string().min(1).optional(),
-        slackChannelId: z.string().min(1).optional(),
-        slackPort: OptionalPortSchema,
-        githubOwner: z.string().min(1).optional(),
-        githubRepo: z.string().min(1).optional(),
-        githubPort: OptionalPortSchema,
-        githubAutoCreatePullRequest: z.boolean().optional(),
-        gitlabProjectPathWithNamespace: z.string().min(1).optional(),
-        gitlabBaseUrl: z.string().url().optional(),
-        gitlabPort: OptionalPortSchema,
-        linearAuth: z.enum(["api_key", "oauth_app"]).optional(),
-        linearTeamId: z.string().min(1).optional(),
-        linearTeamKey: z.string().min(1).optional(),
-        linearPort: OptionalPortSchema,
-        telegramMode: TelegramModeSchema.optional(),
-        telegramBotId: z.string().min(1).optional(),
-        telegramBotUsername: z.string().min(1).optional(),
-        discordMode: DiscordModeSchema.optional(),
-        discordWebhookPath: z.string().min(1).optional(),
-        teamsTenantId: z.string().min(1).optional(),
-        teamsWebhookPath: z.string().min(1).optional()
-      })
-      .strict()
-      .optional()
   })
   .strict();
 
@@ -614,65 +254,15 @@ const CanonicalOpenTagCliConfigSchema = z
         worktreeRoot: z.string().min(1)
       })
       .strict(),
-    runtime: RuntimeConfigSchema.optional(),
     preferences: PreferencesSchema.optional(),
-    daemon: DaemonConfigSchema,
-    platforms: z
-      .object({
-        lark: LarkPlatformSchema.optional(),
-        slack: SlackPlatformSchema.optional(),
-        github: GitHubPlatformSchema.optional(),
-        gitlab: GitLabPlatformSchema.optional(),
-        linear: LinearPlatformSchema.optional(),
-        telegram: TelegramPlatformSchema.optional(),
-        discord: DiscordPlatformSchema.optional(),
-        teams: TeamsPlatformSchema.optional()
-      })
-      .strict()
+    daemon: DaemonConfigSchema
   })
   .strict()
   .superRefine((config, context) => {
-    if (!config.daemon.controlRegistration) {
-      if (!config.daemon.pairingToken) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["daemon", "pairingToken"],
-          message: "Legacy OpenTag configuration requires daemon.pairingToken."
-        });
-      }
-      return;
-    }
-    if (config.runtime?.mode !== "paired_relay") {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["runtime", "mode"],
-        message: "Hosted Control V1 configuration requires runtime.mode=paired_relay."
-      });
-      return;
-    }
-    let relayOrigin: string | undefined;
-    let dispatcherOrigin: string | undefined;
-    try {
-      relayOrigin = canonicalHostedRelayOrigin(config.runtime.relayUrl);
-      dispatcherOrigin = canonicalHostedRelayOrigin(config.daemon.dispatcherUrl);
-    } catch (error) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["runtime", "relayUrl"],
-        message: error instanceof Error ? error.message : "Hosted relay URL is invalid."
-      });
-      return;
-    }
-    if (relayOrigin !== dispatcherOrigin) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["runtime", "relayUrl"],
-        message: "Hosted Control V1 relay origin must match daemon.dispatcher origin."
-      });
-    }
+    if (!config.daemon.controlRegistration) return;
     try {
       assertHostedRelayAuthorization({
-        dispatcherUrl: config.daemon.dispatcherUrl,
+        relayUrl: config.daemon.relayUrl,
         trustedRelay: config.daemon.trustedRelay
       });
     } catch (error) {
@@ -684,28 +274,15 @@ const CanonicalOpenTagCliConfigSchema = z
     }
   });
 
-export const OpenTagCliConfigSchema = z.preprocess(
-  canonicalizeLegacyRuntimeMode,
-  CanonicalOpenTagCliConfigSchema
-);
+export const OpenTagCliConfigSchema = CanonicalOpenTagCliConfigSchema;
 
 export type OpenTagCliConfig = Omit<z.infer<typeof OpenTagCliConfigSchema>, "daemon"> & {
-  daemon: OpenTagDaemonConfig & {
-    completionPolicies?: GitHubCompletionPolicyConfig[];
-    defaultGitHubCompletion?: "governed" | "compat";
-  };
+  daemon: OpenTagDaemonConfig;
 };
 
 export type OpenTagCliPreferences = NonNullable<OpenTagCliConfig["preferences"]>;
-export type OpenTagCliLastSetup = NonNullable<OpenTagCliPreferences["lastSetup"]>;
 export type OpenTagCliLanguage = CliLanguage;
-export type OpenTagCliPlatform = PlatformId;
 export type OpenTagCliExecutor = string;
-export type OpenTagRuntimeMode = NonNullable<OpenTagCliConfig["runtime"]>["mode"];
-export type OpenTagRuntimeModeProfile = {
-  offlineSafe: false;
-  executionLocality: "local" | "paired_runner";
-};
 
 export type PathEnvironment = Partial<
   Record<"OPENTAG_CONFIG_PATH" | "OPENTAG_CONFIG_HOME" | "OPENTAG_STATE_DIR" | "XDG_CONFIG_HOME" | "XDG_STATE_HOME", string>
@@ -745,24 +322,9 @@ function assertHostedControlRawTrust(value: unknown): void {
   if (!raw.daemon || typeof raw.daemon !== "object" || Array.isArray(raw.daemon)) return;
   const daemon = raw.daemon as Record<string, unknown>;
   if (daemon.controlRegistration === undefined) return;
-
-  if (!raw.runtime || typeof raw.runtime !== "object" || Array.isArray(raw.runtime)) {
-    throw new Error("Hosted Control V1 requires runtime.mode=paired_relay before secrets or network access.");
-  }
-  const runtime = raw.runtime as Record<string, unknown>;
-  const canonicalMode = runtime.mode === "relay" ? "paired_relay" : runtime.mode;
-  if (canonicalMode !== "paired_relay") {
-    throw new Error("Hosted Control V1 requires runtime.mode=paired_relay before secrets or network access.");
-  }
-  const relayUrl = z.string().url().parse(runtime.relayUrl);
-  const dispatcherUrl = z.string().url().parse(daemon.dispatcherUrl);
-  const relayOrigin = canonicalHostedRelayOrigin(relayUrl);
-  const dispatcherOrigin = canonicalHostedRelayOrigin(dispatcherUrl);
-  if (relayOrigin !== dispatcherOrigin) {
-    throw new Error("Hosted Control V1 relay origin does not match dispatcher origin.");
-  }
+  const relayUrl = z.string().url().parse(daemon.relayUrl);
   assertHostedRelayAuthorization({
-    dispatcherUrl,
+    relayUrl,
     trustedRelay: daemon.trustedRelay === undefined
       ? undefined
       : TrustedRelayAuthorizationV1Schema.parse(daemon.trustedRelay)
@@ -770,37 +332,19 @@ function assertHostedControlRawTrust(value: unknown): void {
 }
 
 export function parseCliConfig(value: unknown): OpenTagCliConfig {
-  assertPairedRelayEndpointSeparation(value);
+  assertRawRelayEndpoint(value);
   assertHostedControlRawTrust(value);
   const parsed = OpenTagCliConfigSchema.parse(value);
   return {
     ...parsed,
-    daemon: {
-      ...parseDaemonConfig(parsed.daemon),
-      ...(parsed.daemon.completionPolicies !== undefined
-        ? { completionPolicies: parsed.daemon.completionPolicies }
-        : {}),
-      ...(parsed.daemon.defaultGitHubCompletion !== undefined
-        ? { defaultGitHubCompletion: parsed.daemon.defaultGitHubCompletion }
-        : {})
-    }
+    daemon: parseDaemonConfig(parsed.daemon)
   };
 }
 
-export { hostedRunnerAuthProblem, runnerDispatcherToken };
+export { hostedRunnerAuthProblem };
 
-export function runtimeModeFromConfig(config: OpenTagCliConfig): OpenTagRuntimeMode {
-  return config.runtime?.mode ?? "local_direct";
-}
-
-export function runtimeModeProfileFromConfig(config: OpenTagCliConfig): OpenTagRuntimeModeProfile {
-  return runtimeModeFromConfig(config) === "paired_relay"
-    ? { offlineSafe: false, executionLocality: "paired_runner" }
-    : { offlineSafe: false, executionLocality: "local" };
-}
-
-export function relayUrlFromConfig(config: OpenTagCliConfig): string | undefined {
-  return config.runtime?.mode === "paired_relay" ? config.runtime.relayUrl : undefined;
+export function relayUrlFromConfig(config: OpenTagCliConfig): string {
+  return config.daemon.relayUrl;
 }
 
 export function readCliConfig(path = defaultConfigPath()): OpenTagCliConfig {
@@ -1097,11 +641,8 @@ export function writeCliConfigAtomic(
 
 export type HostedControlConfigPatch = {
   controlRegistration: NonNullable<OpenTagDaemonConfig["controlRegistration"]>;
-  dispatcherUrl: string;
-  relayProvider?: string;
   relayUrl: string;
   trustedRelay?: NonNullable<OpenTagDaemonConfig["trustedRelay"]>;
-  removePairingToken?: boolean;
   runnerToken?: string | null;
 };
 
@@ -1145,26 +686,7 @@ const RawSecretValueSchema = z.union([z.string().min(1), SecretRefSchema]);
 
 const RAW_SECRET_STRING_PATHS = [
   ["daemon", "githubToken"],
-  ["daemon", "githubApplyToken"],
   ["daemon", "runnerToken"],
-  ["daemon", "runnerTokens", "*"],
-  ["daemon", "pairingToken"],
-  ["platforms", "lark", "appSecret"],
-  ["platforms", "slack", "appToken"],
-  ["platforms", "slack", "signingSecret"],
-  ["platforms", "slack", "botToken"],
-  ["platforms", "github", "webhookSecret"],
-  ["platforms", "gitlab", "token"],
-  ["platforms", "gitlab", "webhookSecret"],
-  ["platforms", "linear", "token"],
-  ["platforms", "linear", "auth", "clientSecret"],
-  ["platforms", "linear", "auth", "refreshToken"],
-  ["platforms", "linear", "connections", "*", "token"],
-  ["platforms", "linear", "webhookSecret"],
-  ["platforms", "telegram", "botToken"],
-  ["platforms", "telegram", "secretToken"],
-  ["platforms", "discord", "botToken"],
-  ["platforms", "teams", "appPassword"]
 ] as const satisfies readonly (readonly string[])[];
 
 function replaceKnownRawSecretField(
@@ -1214,27 +736,15 @@ export const OpenTagCliRawConfigSchema = z.preprocess(
 function validateHostedControlRawConfig(value: unknown): void {
   const raw = requireRawConfigObject(value);
   OpenTagCliRawConfigSchema.parse(raw);
-  const runtime = RuntimeConfigSchema.parse(raw.runtime);
-  if (runtime.mode !== "paired_relay") {
-    throw new Error("Hosted Control V1 config requires runtime.mode=paired_relay.");
-  }
   const daemon = requireRawConfigObject(raw.daemon);
-  const dispatcherUrl = z.string().url().parse(daemon.dispatcherUrl);
-  const relayOrigin = canonicalHostedRelayOrigin(runtime.relayUrl);
-  const dispatcherOrigin = canonicalHostedRelayOrigin(dispatcherUrl);
-  if (relayOrigin !== dispatcherOrigin) {
-    throw new Error("Hosted Control V1 relay origin must match daemon.dispatcher origin.");
-  }
+  const relayUrl = z.string().url().parse(daemon.relayUrl);
   HostedControlRegistrationSchema.parse(daemon.controlRegistration);
   assertHostedRelayAuthorization({
-    dispatcherUrl,
+    relayUrl,
     trustedRelay: TrustedRelayAuthorizationV1Schema.parse(daemon.trustedRelay)
   });
   if (daemon.runnerToken !== undefined) {
     RawSecretValueSchema.parse(daemon.runnerToken);
-  }
-  if (daemon.pairingToken !== undefined) {
-    RawSecretValueSchema.parse(daemon.pairingToken);
   }
 }
 
@@ -1249,11 +759,10 @@ export function writeHostedControlConfigAtomic(
     const daemon = requireRawConfigObject(raw.daemon);
     const patchedDaemon: Record<string, unknown> = {
       ...daemon,
-      dispatcherUrl: patch.dispatcherUrl,
+      relayUrl: patch.relayUrl,
       controlRegistration: patch.controlRegistration,
       trustedRelay: patch.trustedRelay ?? daemon.trustedRelay
     };
-    if (patch.removePairingToken) delete patchedDaemon.pairingToken;
     if (patch.runnerToken === null) delete patchedDaemon.runnerToken;
     else if (patch.runnerToken !== undefined) {
       patchedDaemon.runnerToken = z.string().min(1).parse(patch.runnerToken);
@@ -1261,11 +770,6 @@ export function writeHostedControlConfigAtomic(
 
     const patched: Record<string, unknown> = {
       ...raw,
-      runtime: {
-        mode: "paired_relay",
-        relayUrl: patch.relayUrl,
-        ...(patch.relayProvider ? { relayProvider: patch.relayProvider } : {})
-      },
       daemon: patchedDaemon
     };
     validateHostedControlRawConfig(patched);
@@ -1304,9 +808,6 @@ function redactSecretValue(value: unknown): unknown {
 }
 
 function redactValue(key: string, value: unknown): unknown {
-  if (key === "runnerTokens" && Array.isArray(value)) {
-    return value.map((entry) => redactSecretValue(entry));
-  }
   if (
     [
       "appPassword",
@@ -1315,11 +816,8 @@ function redactValue(key: string, value: unknown): unknown {
       "botToken",
       "clientSecret",
       "githubToken",
-      "githubApplyToken",
       "refreshToken",
       "runnerToken",
-      "runnerTokens",
-      "pairingToken",
       "secretToken",
       "signingSecret",
       "token",

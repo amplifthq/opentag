@@ -34,10 +34,6 @@ const RawConfigSchema = z
     ),
     OPENTAG_ENVIRONMENT: z.enum(["local", "staging", "production"]).default("local"),
     OPENTAG_HOST: z.string().min(1).default("0.0.0.0"),
-    OPENTAG_GITHUB_INGRESS_MASTER_SECRET: z.preprocess(
-      (value) => value === "" ? undefined : value,
-      z.string().min(32).max(4096).optional(),
-    ),
     OPENTAG_FENCING_TOKEN_SECRET: z.preprocess(
       (value) => value === "" ? undefined : value,
       z.string().min(32).max(4096).optional(),
@@ -82,7 +78,6 @@ export type ControlPlaneConfig = {
   databaseUrl: string;
   environment: "local" | "staging" | "production";
   fencingTokenSecret: string;
-  githubIngressMasterSecret: string | null;
   host: string;
   jobLeaseDurationMs: number;
   jobPollIntervalMs: number;
@@ -311,7 +306,6 @@ export function parseControlPlaneConfig(
       parsed.OPENTAG_RECOVERY_PAIRING_TOKEN,
       parsed.OPENTAG_FENCING_TOKEN_SECRET,
       parsed.OPENTAG_LOGIN_THROTTLE_SECRET,
-      parsed.OPENTAG_GITHUB_INGRESS_MASTER_SECRET,
       parsed.OPENTAG_RELAY_CONTENT_KEK_FILE,
     ]) {
       if (secret?.startsWith(PLACEHOLDER_SECRET_PREFIX)) {
@@ -351,7 +345,6 @@ export function parseControlPlaneConfig(
       && [
         parsed.OPENTAG_BOOTSTRAP_PAIRING_TOKEN,
         parsed.OPENTAG_RECOVERY_PAIRING_TOKEN,
-        parsed.OPENTAG_GITHUB_INGRESS_MASTER_SECRET,
       ].includes(parsed.OPENTAG_FENCING_TOKEN_SECRET)
     ) {
       throw new Error("fencing token authority must be independent");
@@ -365,7 +358,6 @@ export function parseControlPlaneConfig(
       parsed.OPENTAG_BOOTSTRAP_PAIRING_TOKEN,
       parsed.OPENTAG_RECOVERY_PAIRING_TOKEN,
       parsed.OPENTAG_FENCING_TOKEN_SECRET,
-      parsed.OPENTAG_GITHUB_INGRESS_MASTER_SECRET,
     ].filter((value): value is string => value !== undefined);
     if (
       parsed.OPENTAG_ENVIRONMENT !== "local"
@@ -381,7 +373,6 @@ export function parseControlPlaneConfig(
       environment: parsed.OPENTAG_ENVIRONMENT,
       fencingTokenSecret: parsed.OPENTAG_FENCING_TOKEN_SECRET
         ?? parsed.OPENTAG_BOOTSTRAP_PAIRING_TOKEN,
-      githubIngressMasterSecret: parsed.OPENTAG_GITHUB_INGRESS_MASTER_SECRET ?? null,
       host: parsed.OPENTAG_HOST,
       jobLeaseDurationMs: parsed.OPENTAG_JOB_LEASE_MS,
       jobPollIntervalMs: parsed.OPENTAG_JOB_POLL_MS,

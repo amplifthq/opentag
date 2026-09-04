@@ -1,4 +1,7 @@
-import { RelayCapabilitiesResponseV1Schema } from "@opentag/control-protocol";
+import {
+  computeGitHubProjectTargetBindingDigestV1,
+  RelayCapabilitiesResponseV1Schema,
+} from "@opentag/control-protocol";
 import { describe, expect, it, vi } from "vitest";
 import { createControlPlaneApplication } from "../src/application.js";
 
@@ -6,7 +9,7 @@ const capabilities = RelayCapabilitiesResponseV1Schema.parse({
   schemaVersion: 1,
   protocolVersion: "1.0",
   registryVersion: "opentag.control.capabilities/v1",
-  capabilities: ["relay.readiness.v1"],
+  capabilities: ["relay.readiness.v1", "relay.repository-binding.v1"],
   minimumClient: { schemaVersion: 1, protocolVersion: "1.0" },
   deployment: { environment: "local", releaseSha: "local" },
   artifact: {
@@ -108,6 +111,99 @@ describe("Control Plane Fetch application", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
   });
 
+  it("upserts a Project Target only for the exact runtime authority and route identity", async () => {
+    const principal = {
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      credentialId: "credential_1",
+      registrationGeneration: 3,
+      credentialGeneration: 2,
+    };
+    const target = {
+      projectTargetId: "target_1",
+      provider: "github" as const,
+      owner: "acme",
+      repo: "demo",
+      defaultExecutor: "codex",
+      defaultBranch: "main",
+    };
+    const bindingDigest = await computeGitHubProjectTargetBindingDigestV1(target);
+    const context = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const,
+      ...principal,
+      capabilities: ["relay.repository-binding.v1"] as const,
+      targets: [{ ...target, bindingDigest }],
+      observedAt: "2026-08-15T06:00:00.000Z",
+    };
+    const upsertProjectTarget = vi.fn(async () => ({
+      kind: "upserted" as const,
+      context,
+    }));
+    const application = createControlPlaneApplication({
+      capabilities,
+      readiness: { check: async () => ({ ready: true }) },
+      control: {
+        bootstrap: { authenticate: () => null },
+        runners: {
+          authenticate: async (token: string) => token === "runtime_secret"
+            ? { kind: "authenticated" as const, principal }
+            : { kind: "invalid_credential" as const },
+          upsertProjectTarget,
+        } as never,
+        hosted: {} as never,
+      },
+    });
+    const request = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.repository-binding.v1"] as const,
+      requestId: "request_target_1",
+      expectedAuthority: {
+        credentialId: principal.credentialId,
+        registrationGeneration: principal.registrationGeneration,
+        credentialGeneration: principal.credentialGeneration,
+      },
+      target,
+    };
+    const accepted = await application.fetch(new Request(
+      "http://control.test/v1/runners/runner_1/project-targets/target_1",
+      { method: "PUT", headers: { authorization: "Bearer runtime_secret",
+        "content-type": "application/json" }, body: JSON.stringify(request) },
+    ));
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual(context);
+    expect(upsertProjectTarget).toHaveBeenCalledWith({ principal, request });
+
+    const mismatched = await application.fetch(new Request(
+      "http://control.test/v1/runners/runner_1/project-targets/target_other",
+      { method: "PUT", headers: { authorization: "Bearer runtime_secret",
+        "content-type": "application/json" }, body: JSON.stringify(request) },
+    ));
+    expect(mismatched.status).toBe(409);
+    expect(await mismatched.json()).toMatchObject({
+      error: "stale_attempt",
+      requestId: request.requestId,
+    });
+    expect(upsertProjectTarget).toHaveBeenCalledTimes(1);
+
+    upsertProjectTarget.mockResolvedValueOnce({
+      kind: "conflict",
+      reason: "target_not_bound_to_slack",
+    } as never);
+    const unbound = await application.fetch(new Request(
+      "http://control.test/v1/runners/runner_1/project-targets/target_1",
+      { method: "PUT", headers: { authorization: "Bearer runtime_secret",
+        "content-type": "application/json" }, body: JSON.stringify(request) },
+    ));
+    expect(unbound.status).toBe(409);
+    expect(await unbound.json()).toMatchObject({
+      error: "target_not_bound_to_slack",
+      requestId: request.requestId,
+    });
+  });
+
   it("prevents caching authenticated console and secret responses", async () => {
     const application = createControlPlaneApplication({
       capabilities,
@@ -126,6 +222,58 @@ describe("Control Plane Fetch application", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
     expect(response.headers.get("permissions-policy")).toContain("camera=()");
+  });
+
+  it("serves Agent Presence only through an authenticated tenant-scoped read", async () => {
+    const presence = vi.fn(async (principal: { organizationId: string }) => ({
+      state: "available" as const,
+      reason: `ready for ${principal.organizationId}`,
+      agents: [],
+    }));
+    const application = createControlPlaneApplication({
+      capabilities,
+      readiness: { check: async () => ({ ready: true }) },
+      console: {
+        publicOrigin: "http://control.test",
+        identity: {
+          authenticateSession: async (token: string) => token === "session_1"
+            ? {
+                kind: "authenticated" as const,
+                principal: {
+                  operatorId: "operator_1",
+                  organizationId: "org_1",
+                  role: "viewer" as const,
+                  email: "viewer@example.test",
+                  displayName: "Viewer",
+                },
+              }
+            : { kind: "invalid_credential" as const },
+        } as never,
+        reads: { presence } as never,
+      },
+    });
+
+    const unauthorized = await application.fetch(
+      new Request("http://control.test/api/console/presence"),
+    );
+    expect(unauthorized.status).toBe(401);
+    expect(presence).not.toHaveBeenCalled();
+
+    const authorized = await application.fetch(new Request(
+      "http://control.test/api/console/presence",
+      { headers: { cookie: "opentag_session=session_1" } },
+    ));
+    expect(authorized.status).toBe(200);
+    expect(await authorized.json()).toEqual({
+      presence: {
+        state: "available",
+        reason: "ready for org_1",
+        agents: [],
+      },
+    });
+    expect(presence).toHaveBeenCalledWith(expect.objectContaining({
+      organizationId: "org_1",
+    }));
   });
 
   it("returns a bounded retry response when console login is throttled", async () => {
@@ -224,180 +372,4 @@ describe("Control Plane Fetch application", () => {
     });
   });
 
-  it("does not misclassify unexpected console failures as client errors", async () => {
-    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const secretCanaries = [
-      "postgresql://operator:database-secret@db/private",
-      "Bearer github-token-secret",
-      "eyJhbGciOiJIUzI1NiJ9.jwt-secret",
-      "-----BEGIN PRIVATE KEY-----private-key-secret",
-    ];
-    const application = createControlPlaneApplication({
-      capabilities,
-      readiness: { check: async () => ({ ready: true }) },
-      console: {
-        publicOrigin: "http://control.test",
-        identity: {
-          authenticateSession: async () => ({
-            kind: "authenticated" as const,
-            principal: {
-              operatorId: "operator_1",
-              organizationId: "org_1",
-              role: "owner" as const,
-              email: "owner@example.test",
-              displayName: "Owner",
-            },
-          }),
-        } as never,
-        reads: {} as never,
-        targets: {
-          declareProjectTarget: async () => {
-            throw new Error(secretCanaries.join(" "));
-          },
-        },
-      },
-    });
-
-    const response = await application.fetch(new Request(
-      "http://control.test/api/console/project-targets",
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: "opentag_session=session_1",
-          origin: "http://control.test",
-        },
-        body: JSON.stringify({
-          projectTargetId: "target_1",
-          runnerId: "runner_1",
-          bindingDigest: `sha256:${"a".repeat(64)}`,
-          provider: "github",
-          owner: "amplifthq",
-          repo: "opentag",
-          defaultExecutor: "codex",
-          defaultBranch: "main",
-          version: 1,
-        }),
-      },
-    ));
-    const body = await response.json() as {
-      error: string;
-      requestId: string;
-    };
-
-    expect(response.status).toBe(500);
-    expect(body.error).toBe("internal_error");
-    expect(body.requestId).toMatch(/^[0-9a-f-]{36}$/u);
-    for (const canary of secretCanaries) {
-      expect(JSON.stringify(body)).not.toContain(canary);
-      expect(JSON.stringify(errorLog.mock.calls)).not.toContain(canary);
-    }
-    expect(errorLog).toHaveBeenCalledWith(
-      "control_plane_request_failed",
-      expect.objectContaining({
-        method: "POST",
-        path: "/api/console/project-targets",
-        classification: "unexpected_error",
-      }),
-    );
-    errorLog.mockRestore();
-  });
-
-  it("preserves raw GitHub webhook bytes and keeps ingress disabled by omission", async () => {
-    const rawBody = '{"body":"line\\nfeed"}';
-    const receive = vi.fn(async () => ({ kind: "accepted" as const, runId: "run_1" }));
-    const base = {
-      capabilities,
-      readiness: { check: async () => ({ ready: true as const }) },
-    };
-    const disabled = createControlPlaneApplication(base);
-    expect((await disabled.fetch(new Request(
-      "http://control.test/v1/providers/github/webhooks/binding_1",
-      { method: "POST", body: rawBody },
-    ))).status).toBe(404);
-
-    const enabled = createControlPlaneApplication({
-      ...base,
-      github: {
-        receive,
-      },
-    });
-    const response = await enabled.fetch(new Request(
-      "http://control.test/v1/providers/github/webhooks/binding_1",
-      {
-        method: "POST",
-        headers: {
-          "x-github-delivery": "delivery_1",
-          "x-github-event": "issue_comment",
-          "x-hub-signature-256": `sha256:${"a".repeat(64)}`,
-        },
-        body: rawBody,
-      },
-    ));
-    expect(response.status).toBe(202);
-    expect(receive).toHaveBeenCalledWith(expect.objectContaining({
-      bindingId: "binding_1",
-      body: new TextEncoder().encode(rawBody),
-      deliveryId: "delivery_1",
-      eventName: "issue_comment",
-    }));
-  });
-
-  it("accepts GitHub deliveries above the generic Control V1 body limit", async () => {
-    const rawBody = JSON.stringify({ body: "x".repeat(300 * 1024) });
-    const receive = vi.fn(async () => ({
-      kind: "evidence_recorded" as const,
-    }));
-    const application = createControlPlaneApplication({
-      capabilities,
-      readiness: { check: async () => ({ ready: true }) },
-      github: { receive },
-    });
-
-    const response = await application.fetch(new Request(
-      "http://control.test/v1/providers/github/webhooks/binding_large",
-      {
-        method: "POST",
-        headers: {
-          "x-github-delivery": "delivery_large",
-          "x-github-event": "pull_request",
-          "x-hub-signature-256": `sha256:${"a".repeat(64)}`,
-        },
-        body: rawBody,
-      },
-    ));
-
-    expect(response.status).toBe(202);
-    expect(receive).toHaveBeenCalledWith(expect.objectContaining({
-      body: expect.objectContaining({ byteLength: expect.any(Number) }),
-    }));
-    expect(receive.mock.calls[0]?.[0].body.byteLength).toBeGreaterThan(
-      256 * 1024,
-    );
-  });
-
-  it("rejects GitHub deliveries above the dedicated webhook limit", async () => {
-    const receive = vi.fn();
-    const application = createControlPlaneApplication({
-      capabilities,
-      readiness: { check: async () => ({ ready: true }) },
-      github: { receive },
-    });
-    const response = await application.fetch(new Request(
-      "http://control.test/v1/providers/github/webhooks/binding_too_large",
-      {
-        method: "POST",
-        headers: {
-          "content-length": String(10 * 1024 * 1024 + 1),
-          "x-github-delivery": "delivery_too_large",
-          "x-github-event": "pull_request",
-          "x-hub-signature-256": `sha256:${"a".repeat(64)}`,
-        },
-        body: "{}",
-      },
-    ));
-
-    expect(response.status).toBe(413);
-    expect(receive).not.toHaveBeenCalled();
-  });
 });

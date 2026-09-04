@@ -1,8 +1,9 @@
 # @opentag/local-runtime
 
-Local OpenTag runtime helpers used by `@opentag/cli`.
+Local paired Runner helpers used by `@opentag/cli`.
 
-Use this package when embedding the same local dispatcher, daemon, diagnostics, and GitHub PR helpers that the CLI uses.
+Use this package when embedding the same Control V1 Runner loop, local recovery
+store, diagnostics, and GitHub publication helpers that the CLI uses.
 
 ## Install
 
@@ -12,18 +13,14 @@ pnpm add @opentag/local-runtime
 
 ## Exports
 
-- `startDispatcher`: starts the local dispatcher with the unified delivery
-  producer and provider registry.
-- `serveDaemon`: starts the local daemon loop.
-- `createDaemonRuntimeInput`: derives daemon runtime input from config.
-- `runDoctor`: checks dispatcher, bindings, checkouts, and executors.
-- `parseDaemonConfig`: parses daemon config with compatibility aliases.
-- `maybeCreatePullRequest`: deprecated, side-effect-free compatibility tombstone for the retired automatic-PR path.
+- `serveDaemon`: starts the paired Runner loop.
+- `createDaemonRuntimeInput`: derives the Control V1 Runner input from config.
+- `runDoctor`: checks relay reachability, Project Targets, checkouts, and executors.
+- `parseDaemonConfig`: parses the local Runner configuration.
 
 Subpath exports are also available:
 
 ```ts
-import { startDispatcher } from "@opentag/local-runtime/dispatcher";
 import { serveDaemon } from "@opentag/local-runtime/daemon";
 import { runDoctor } from "@opentag/local-runtime/doctor";
 ```
@@ -31,9 +28,13 @@ import { runDoctor } from "@opentag/local-runtime/doctor";
 ## Requirements
 
 - Node.js 22.14 or newer.
-- A writable SQLite database path for the dispatcher.
+- A writable, fresh local database path for Runner recovery and execution
+  evidence. An unmarked earlier database is rejected and left unchanged.
 - A local checkout for any Project Target you bind.
+- One canonical `daemon.relayUrl`: an HTTPS origin whose exact origin is
+  authorized by `daemon.trustedRelay` after pairing.
 
 ## Stability
 
-This package is the local runtime boundary for the CLI. Keep app wrappers thin and put reusable local runtime behavior here.
+This package is the paired Runner boundary for the CLI. Repositories,
+credentials, worktrees, and coding-agent execution remain local.

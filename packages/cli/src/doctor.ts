@@ -1,10 +1,7 @@
-import { createHash } from "node:crypto";
 import { createDoctorSummaryPresentation, renderOpenTagPresentationPlainText } from "@opentag/core";
 import { doctorHasFailures, executorsFromConfig, runDoctor, type DoctorCheck } from "@opentag/local-runtime";
 import { formatConfiguredCapabilities } from "./catalogs/capabilities.js";
-import type { PlatformId } from "./catalogs/platforms.js";
-import { defaultConfigPath, readCliConfig, readRedactedCliConfig, redactedCliConfig, runtimeModeFromConfig, runtimeModeProfileFromConfig } from "./config.js";
-import { linearBacklogConfigDiagnostics } from "./linear-backlog-config.js";
+import { defaultConfigPath, readCliConfig, readRedactedCliConfig, redactedCliConfig } from "./config.js";
 import { relaySecurityChecksFromConfig } from "./relay-security.js";
 import { formatSecretReadiness } from "./secret-readiness.js";
 
@@ -20,24 +17,11 @@ function credentialSourcesCheck(secretConfig: unknown): DoctorCheck {
   };
 }
 
-function digestEvidence(parts: Array<string | undefined>): string {
-  if (parts.some((part) => !part)) return "unknown";
-  return `sha256:${createHash("sha256").update(parts.join("\u0000")).digest("hex")}`;
-}
-
 function operationalDeclarationChecks(config: ReturnType<typeof readCliConfig>): DoctorCheck[] {
-  const mode = runtimeModeFromConfig(config);
-  const profile = runtimeModeProfileFromConfig(config);
   const control = config.daemon.controlRegistration;
   const registration = control && "registration" in control ? control.registration : undefined;
-  const slack = config.platforms.slack;
   const executors = [...new Set(config.daemon.repositories.map((repository) => repository.defaultExecutor))].sort();
   return [
-    {
-      status: "ok",
-      name: "runtime mode profile",
-      message: `declared=${mode}; offlineSafe=${profile.offlineSafe}; executionLocality=${profile.executionLocality}`
-    },
     {
       status: registration ? "ok" : "warn",
       name: "relay deployment identity",
@@ -46,16 +30,16 @@ function operationalDeclarationChecks(config: ReturnType<typeof readCliConfig>):
         : "unknown; configuration does not prove a relay deployment identity"
     },
     {
-      status: slack ? "warn" : "ok",
-      name: "Slack installation and binding",
-      message: slack
-        ? `installationDigest=${digestEvidence([slack.appId, slack.teamId])}; bindingDigest=${digestEvidence([slack.teamId, slack.channelId])}; verification=unavailable`
-        : "unsupported; Slack is not configured"
+      status: config.daemon.repositories.length ? "ok" : "fail",
+      name: "Project Target mapping",
+      message: config.daemon.repositories.length
+        ? `${config.daemon.repositories.length} local GitHub target mapping(s) configured`
+        : "no GitHub Project Target is configured"
     },
     {
       status: config.daemon.runnerToken ? "ok" : "warn",
       name: "Runner credential and generation",
-      message: `credential=${config.daemon.runnerToken ? "runner_scoped_configured" : config.daemon.pairingToken ? "legacy_pairing_fallback" : "missing"}; generation=${registration?.credentialGeneration ?? "unknown"}; readiness=unverified`
+      message: `credential=${config.daemon.runnerToken ? "runner_scoped_configured" : "missing"}; generation=${registration?.credentialGeneration ?? "unknown"}; readiness=unverified`
     },
     {
       status: executors.length ? "warn" : "fail",
@@ -80,19 +64,13 @@ function operationalDeclarationChecks(config: ReturnType<typeof readCliConfig>):
     {
       status: "warn",
       name: "installation certification",
-      message: mode === "local_direct"
-        ? "unsupported for local_direct; this mode has no provider-independent offline-safe guarantee"
-        : "unverified; configuration and reachability are not installation certification"
+      message: "unverified; configuration and reachability are not installation certification"
     }
   ];
 }
 
 export function appendCliDoctorChecks(config: ReturnType<typeof readCliConfig>, checks: DoctorCheck[], secretConfig: unknown = redactedCliConfig(config)): DoctorCheck[] {
-  const platforms = Object.entries(config.platforms)
-    .filter(([, value]) => value !== undefined)
-    .map(([key]) => key as PlatformId);
   const capabilityLines = formatConfiguredCapabilities({
-    platforms,
     executors: config.daemon.repositories.map((repository) => repository.defaultExecutor)
   }).slice(1);
   return [
@@ -108,11 +86,6 @@ export function appendCliDoctorChecks(config: ReturnType<typeof readCliConfig>, 
       status: check.status,
       name: check.name,
       message: check.message
-    })),
-    ...linearBacklogConfigDiagnostics(config).map((diagnostic) => ({
-      status: "warn" as const,
-      name: diagnostic.code === "legacy-project-id" ? "Linear /linear channel mapping" : "Linear workspace connection",
-      message: diagnostic.message
     }))
   ];
 }

@@ -8,7 +8,7 @@ describe("runner security", () => {
       workspacePath: "/tmp/demo",
       command: { rawText: "fix this", intent: "fix", args: {} },
       context: [],
-      permissions: [{ scope: "issue:comment", reason: "reply to source thread" }]
+      permissions: [{ scope: "chat:postMessage", reason: "reply to source thread" }]
     });
 
     expect(assessment.allowed).toBe(false);
@@ -21,7 +21,7 @@ describe("runner security", () => {
       workspacePath: "/tmp/demo",
       command: { rawText: "fix this", intent: "fix", args: {} },
       context: [],
-      permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
+      permissions: [{ scope: "chat:postMessage", reason: "reply to source thread" }],
       policy: { mode: "audit" }
     });
 

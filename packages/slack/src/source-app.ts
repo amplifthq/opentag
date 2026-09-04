@@ -6,7 +6,7 @@ import type { SourceAppDefinition, SourceAppInstallation } from "@opentag/source
 import { readSlackThreadContext } from "./context.js";
 import { createSlackDeliveryAdapter, type SlackDeliveryOperation,
   type SlackDeliveryPresentation } from "./delivery-adapter.js";
-import { verifySlackSignature, verifySlackTimestamp } from "./ingress.js";
+import { verifySlackSignature, verifySlackTimestamp } from "./signature.js";
 import { normalizeSlackChannelMessage } from "./normalize.js";
 import { createSlackActionReceiptBlocks, createSlackApprovalPromptBlocks,
   createSlackDoctorSummaryBlocks, createSlackFinalSummaryBlocks, createSlackRunStatusBlocks,

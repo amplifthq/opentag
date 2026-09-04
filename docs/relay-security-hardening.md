@@ -1,182 +1,122 @@
-# Relay Security Hardening Memo
+# Self-Hosted Relay Security
 
-OpenTag relay mode keeps code execution local, but it moves ingress and run
-leasing to a remote control plane. Treat any relay as trusted infrastructure:
-it can observe run metadata, command text, progress, and completion summaries,
-and it controls which queued runs the local runner claims.
+## Status
 
-## P0 Guardrails
+Current security boundary for the Slack paired-relay profile, 2026-09-04.
 
-These are required for the self-hosted relay MVP:
+The Control Plane is always-on self-hosted infrastructure. Treat it as trusted
+operator infrastructure: it can see bounded source/run metadata and controls
+which authorized work the one paired Runner may claim. It must not receive
+raw repository contents or provider credentials outside an authorized grant.
 
-- Public relay URLs must use HTTPS. The CLI allows HTTP only for localhost
-  development URLs such as `http://localhost:8787`.
-- `opentag pair --relay` prints an explicit trust warning before telling the
-  user to start a relay-backed runner.
-- `opentag start` refuses public HTTP relay configs, disables local dispatcher
-  and local webhook ingress in relay mode, and reminds the user that the relay
-  must verify the configured source-platform webhook secret/signature.
-- `opentag status`, `opentag doctor`, and `opentag service status` show relay
-  security checks for transport, relay trust, Project Target allowlisting,
-  source webhook secret configuration, unsupported relay-mode platforms, and
-  missing runner security policy.
-- Relay processes expose `/v1/relay/capabilities` without secrets so setup and
-  pairing flows can confirm source ingress and direct apply readiness before
-  users point provider webhooks at the relay. Outbound delivery readiness is
-  derived separately from the activated provider registry and delivery kernel.
-- The local daemon refuses claimed runs whose Project Target metadata is
-  missing, outside the local config allowlist, or a GitHub source event pointing
-  at a non-GitHub Project Target. This check happens before executor startup.
+## Slack signature and route verification
 
-Relay deployments must also verify source-platform webhook signatures before
-creating runs. For GitHub repository webhooks, verify
-`X-Hub-Signature-256` using `platforms.github.webhookSecret`. For GitLab Note
-Hooks, verify `X-Gitlab-Token` using `platforms.gitlab.webhookSecret`. For
-Linear workspace webhooks, verify `Linear-Signature` and the webhook timestamp
-using `platforms.linear.webhookSecret` for static self-hosted ingress, or the
-per-install secret selected by a unique `/linear/webhooks/<install-id>` path for
-dynamic relay ingress. Hosted Linear OAuth App ingress uses a fixed
-`/linear/oauth/webhooks` path: verify that shared OAuth App signing secret
-first, then route the verified payload by `organizationId` to the completed
-OAuth installation. Do not accept unsigned source events on `/github/webhooks`,
-`/gitlab/webhooks`, or Linear webhook paths.
+Slack is the only Source App. The Control Plane must:
 
-## P1 Beta Hardening
+1. verify the raw Slack request signature before parsing or side effects;
+2. reject stale timestamps and malformed signatures;
+3. resolve the configured workspace/application/channel route;
+4. verify the current binding generation and event identity;
+5. deduplicate the source event before creating a Run;
+6. return bounded errors without exposing secrets or raw request bodies.
 
-Before relay mode is treated as beta-ready, split the current shared pairing
-token into narrower credentials:
+Interactivity requests use the same signed Control Plane boundary and must carry
+enough route and action identity to bind the decision to the current source
+thread. A stale, duplicated, or mismatched action is rejected or replayed
+idempotently; it never invokes a provider directly.
 
-- Registration token: used only during `opentag pair --relay`.
-- Runner claim token: used by the local runner to claim, heartbeat, report
-  progress, and complete runs.
-- Webhook secret: used only for source-platform webhook verification.
-- Rotation and revocation: support replacing a runner token without rebuilding
-  all Project Target and channel bindings.
-- Token display rules: never print full tokens in CLI output, status, doctor,
-  service logs, or relay logs.
-- Failure behavior: revoked or expired runner tokens should fail closed and
-  tell the user to pair again.
+The Slack signing secret is Control Plane configuration. Protect it at rest,
+redact it from logs/status/traces, and never place it in an ACP prompt or source
+event payload.
 
-The goal is to reduce blast radius: a leaked registration token should not let
-an attacker claim runs, and a leaked runner token should be revocable without
-reconfiguring the GitHub webhook secret.
+## Binding and credential custody
 
-Until those narrower credentials exist, relay readiness output should warn that
-the self-hosted MVP still uses the daemon pairing token for both registration
-and runner calls. When `daemon.runnerToken` is configured, local runner,
-status, cancel, and hook-ingest calls prefer that token while `pairingToken`
-remains available for legacy pairing/bootstrap compatibility. When the
-dispatcher also has `runnerToken` / `OPENTAG_RUNNER_TOKEN`, runner claim,
-heartbeat, progress, and completion endpoints reject the pairing token and
-require the runner token. Self-hosted dispatchers can also accept additional
-runner tokens during a rotation window and reject revoked runner-token
-fingerprints without printing token values. This state belongs in
-`opentag status`, `opentag doctor`, and `opentag service status` so operators do
-not mistake self-hosted relay mode for a beta-ready credential model before
-registration, runner, and webhook credentials are independently rotatable and
-revocable with durable audit.
+Bindings identify the Slack source route, the GitHub Project Target, and the one
+paired Runner. A binding must not silently change its application, workspace,
+target, or credential generation while a Run is active.
 
-## P2 Hosted Relay Requirements
+Credential rules:
 
-These are required before any public hosted or multi-tenant relay:
+- Slack signing and app credentials remain in the Control Plane credential
+  boundary.
+- GitHub credentials required for publication/readback remain in the paired
+  Runner's protected credential store.
+- ACP Agents receive only scoped, operation-specific grants.
+- Tokens, authorization headers, refresh material, and raw credential errors
+  never enter Run records, prompts, presentations, or public logs.
+- A credential rotation changes the binding generation and invalidates stale
+  grants and actions.
 
-- Tenant isolation for runners, Project Targets, channel bindings, webhook
-  secrets, and run history.
-- Per-install Linear relay secrets and tokens stored server-side, with webhook
-  paths that let the relay select the signing secret before parsing trusted
-  tenant metadata.
-- Audit logs for pairing, binding changes, webhook admission, run creation,
-  runner claim, progress, completion, token rotation, and token revocation.
-- Rate limits per tenant, source platform, relay token, runner id, and webhook
-  endpoint.
-- Replay protection for webhook deliveries and runner calls using delivery ids,
-  idempotency keys, timestamps, and bounded retention.
-- Request body size limits and schema validation on every public endpoint.
-- Run provenance: each run should record source delivery id, verified signature
-  state, matched Project Target, admission decision, and runner id.
-- Alerting for repeated signature failures, unknown Project Targets, token
-  misuse, abnormal runner claim rates, and large payload rejection.
-- Operational recovery: token revocation should stop new claims immediately
-  while preserving audit history.
+## Runner identity and fencing
 
-The self-hosted dispatcher exposes `/v1/control-plane-alerts` as an
-authenticated alert-candidate summary over control-plane and run audit events.
-The in-process rules currently cover repeated authorization failures, source
-webhook signature failures, unknown Project Targets, abnormal runner claim
-volume, large payload rejection, malformed/schema-invalid request bodies, and
-terminal platform-token misuse. GitHub repository webhook ingress, Slack Events
-API ingress, and Telegram webhook secret-token checks record missing, invalid,
-or stale verification failures as `security.signature_failed` without storing
-raw signatures, secret tokens, or request bodies. Slack Socket Mode records
-terminal app-token auth/config failures such as `invalid_auth`,
-`token_revoked`, and `token_expired` as `security.token_misuse` without storing
-the app token.
-`opentag status` also surfaces these candidates when the dispatcher is online,
-so operators can see warning signals without calling the API directly. Hosted
-deployments should connect these candidates to durable notification, retention,
-tenant-aware thresholds, and on-call workflows.
+Only one paired Runner is supported for execution. The Control Plane verifies:
 
-The self-hosted dispatcher also records control-plane audit events for runner
-registration, Project Target binding upserts, generic channel binding
-upserts/deletes, repository policy-rule upserts, repository mutation-mapping
-upserts, and the Slack channel-binding compatibility endpoint. These events
-capture safe identifiers, target coordinates, and summary flags such as
-`hasWorkspacePath`, `allowedActorsCount`, `hasMetadata`, `hasReason`,
-`valueCount`, or `hasDescription`; they intentionally do not store local
-workspace paths, token values, request bodies, binding metadata payloads, policy
-reason text, or mutation mapping values. Hosted relays still need tenant-scoped
-retention, export, and operator review workflows around these management events.
+- Runner identity and pairing generation;
+- current credential generation;
+- lease ownership and expiry;
+- Attempt identity and fencing token;
+- target and workspace binding;
+- cancellation and terminal-write authority.
 
-The dispatcher package can enforce an optional in-process fixed-window limit for
-`/v1/*` calls keyed by relay-token fingerprint, runner id, source platform,
-tenant or account hint, and normalized endpoint. The tenant hint is derived from
-safe path dimensions such as GitHub owner, channel account id, or Slack team id;
-same-tenant source containers share the same bucket while different tenants do
-not consume each other's local fixed-window allowance. A public hosted relay
-still needs a durable or edge-backed limiter for multi-instance deployments and
-tenant-level quotas.
-Self-hosted dispatcher processes can enable the current limiter with
-`OPENTAG_RATE_LIMIT_WINDOW_MS` and `OPENTAG_RATE_LIMIT_MAX_REQUESTS`, or leave it
-explicitly off with `OPENTAG_RATE_LIMIT_DISABLED=true`. They can also override
-the JSON request body cap with `OPENTAG_MAX_REQUEST_BODY_BYTES`. These process
-local knobs are hardening aids for MVP/self-hosted deployments, not a hosted
-relay quota system.
-Local source ingress endpoints also enforce a request body cap before parsing
-payloads or verifying signatures that require the raw body. GitHub repository
-webhooks, Slack Events API, and Telegram webhooks share the same default cap and
-return `413 request_body_too_large` without storing request bodies. They also
-validate the payload shape for fields OpenTag consumes before creating runs,
-submitting source-thread actions, or dispatching self-service commands; valid but
-unsupported platform events remain ignored instead of hard-failing. When
-connected to the dispatcher they record `security.request_body_rejected` audit
-events for oversized, malformed JSON, and schema-invalid bodies with provider,
-endpoint, reason, max bytes when relevant, optional delivery id, and content
-length only.
-When the dispatcher is started by `opentag service`, persist only these
-non-secret knobs with `opentag service install --max-request-body-bytes ...`
-and `--rate-limit-window-ms ... --rate-limit-max-requests ...`; launchd will not
-inherit an interactive shell's temporary environment.
+The Runner must fail closed when any generation, lease, or fence is stale. A
+heartbeat is an observation, not permission to claim work or write terminal
+state. Presence/readiness is a derived status projection and is not a durable
+security or execution authority.
 
-Runner running, progress, and completion calls accept an idempotency key,
-including from local `opentag ingest --idempotency-key ...` hook integrations.
-Replaying the same key for the same run returns success but does not append
-another `run.running` / `run.progress` / `run.completed` audit event or
-source-thread running/progress/final presentation intent. Hosted relays still need durable
-idempotency-key retention across instances and for additional runner call types.
+## GitHub publication intent and readback
 
-Source webhook deliveries are also tracked by source delivery id when the
-ingress provides one. The store exposes a bounded-retention prune operation for
-stale source delivery replay keys, and it keeps keys for non-terminal runs so
-active work remains protected from replay. The dispatcher exposes the explicit
-maintenance endpoint `POST /v1/source-deliveries/prune`, and the CLI wraps it as
-`opentag maintenance prune-source-deliveries --older-than <iso-timestamp> --limit <n>`.
-The operation returns `scanned`, `pruned`, and `retainedActive` counts and
-records a control-plane maintenance event without exposing delivery ids or
-secrets. Hosted relays still need a scheduled retention policy, tenant-aware
-windows, durable metrics, and alerts around pruned versus retained-active
-delivery keys.
+GitHub is the only Project Target. Every publication requires:
 
-Hosted relay mode should not expand into hosted code execution unless the
-product explicitly changes direction. The local-first boundary remains: relay
-handles ingress and dispatch, while user code and agents run on the user's
-machine.
+1. an explicit target and exact current head/branch intent;
+2. a current Run and Attempt fence;
+3. policy and approval for the exact proposal;
+4. a stable idempotency key;
+5. a material-action receipt;
+6. exact-head readback and provider observation.
+
+Readback must record the repository, resource identity, expected head, observed
+head, check conclusions, observation time, and assurance level. A changed head
+invalidates the prior intent. A provider response that may have succeeded but
+cannot be verified is `outcome_unknown`; never blind-retry it.
+
+## Data minimization
+
+The Control Plane stores only the bounded metadata and evidence required by the
+Run contract. Do not persist:
+
+- raw Slack signing material or tokens;
+- GitHub credential values;
+- full ACP transcripts or terminal streams;
+- complete repository checkouts;
+- unbounded provider request/response bodies.
+
+Logs should contain stable IDs, reason codes, redacted target references, and
+bounded recovery guidance. They must not contain secrets, cookies, authorization
+headers, or raw provider credential material.
+
+## Failure posture
+
+Security failures are explicit and fail closed:
+
+- invalid Slack signature: do not parse or admit;
+- unknown or stale route/binding: do not create or mutate a Run;
+- stale Runner credential or fence: reject the operation;
+- expired lease: stop the Attempt and require reconciliation;
+- target/proposal mismatch: reject before provider I/O;
+- ambiguous GitHub result: retain `outcome_unknown` and require readback;
+- unavailable Control Plane: do not infer presence or completion locally.
+
+## Required verification
+
+The self-hosted profile is security-ready only when tests cover signature
+verification, route/binding fencing, credential redaction, duplicate
+interactivity, stale Runner credentials, lease expiry, exact-head target
+validation, publication idempotency, readback assurance, and
+`outcome_unknown` preservation.
+
+## Related documents
+
+- [Slack Source App](./platforms/slack.en.md)
+- [GitHub Project Target](./platforms/github.en.md)
+- [Control Plane runtime architecture](./control-plane-runtime-architecture.md)
+- [ADR 0004: Slack Persistent Presence](./adr/0004-always-on-channel-ingress-local-execution.md)

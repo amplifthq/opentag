@@ -322,7 +322,7 @@ function writeReport(ok: boolean, error?: string): void {
   );
 }
 
-async function main(): Promise<void> {
+export async function runOpenClawAcpConformance(): Promise<void> {
   results.length = 0;
   assert(Number.isFinite(runTimeoutMs) && runTimeoutMs > 0, "OPENTAG_OPENCLAW_RUN_TIMEOUT_MS must be positive.");
   assert(
@@ -501,7 +501,7 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
-  main().catch((error) => {
+  runOpenClawAcpConformance().catch((error) => {
     const redacted = safeDiagnostic(error);
     writeReport(false, redacted);
     process.stderr.write(`OpenClaw ACP conformance failed: ${redacted}\n`);

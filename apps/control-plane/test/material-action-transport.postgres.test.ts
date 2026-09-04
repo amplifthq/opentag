@@ -85,6 +85,8 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       suffix: "95",
       organizationId: "org_material_http",
       runnerId: "runner_material_http",
+      permissionActions: ["github.pull_request.merge"],
+      publicationMode: "pull_request",
     });
     await hosted.admit({
       runId: "run_material_http",
@@ -127,29 +129,6 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       Object.defineProperty(response, "url", { value: String(url) });
       return response;
     };
-    const proofBody = {
-      schemaVersion: 1, protocolVersion: "1.0",
-      requiredCapabilities: ["relay.material-receipt.v1"],
-      requestId: "request_non_start_http", operationId: "operation_non_start_http",
-      organizationId: "org_material_http", runnerId: "runner_material_http",
-      runId: "run_material_http", attempt: { attemptId: claim.attempt.id,
-        attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
-        fencingToken: claim.attempt.fencingToken,
-        fencingTokenDigest: claim.attempt.fencingTokenDigest },
-      proofId: "proof_non_start_http", proofDigest: `sha256:${"6".repeat(64)}`,
-      recordedAt: now.toISOString(),
-    };
-    for (const expectedStatus of [201, 200]) {
-      const response = await fetchImpl(
-        "http://control.test/v1/runners/runner_material_http/runs/run_material_http/material-actions/non-start-proof",
-        { method: "POST", headers: { authorization: "Bearer runtime_material_http",
-          "content-type": "application/json" }, body: JSON.stringify(proofBody) },
-      );
-      expect(response.status).toBe(expectedStatus);
-    }
-    expect((await fixture.pool.query(
-      "SELECT count(*)::int AS count FROM cp_material_action_non_start_proof WHERE proof_id = $1",
-      [proofBody.proofId])).rows[0]?.count).toBe(1);
     const payload = {
       actionId: "action_material_http",
       actionDescriptor: "github.pull_request.merge" as const,
@@ -208,80 +187,43 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       receiptDigest: await computeMaterialActionReceiptDigestV1(digestInput),
     });
     const client = createOpenTagClient({
-      dispatcherUrl: "http://control.test",
+      controlPlaneUrl: "http://control.test",
       controlCredential: {
         kind: "runtime",
         token: "runtime_material_http",
       },
       fetchImpl,
     });
-    await expect(client.recordMaterialActionReceiptControlV1({
-      runnerId: "runner_material_http",
-      fencingToken: claim.attempt.fencingToken,
-      receipt,
-    })).resolves.toMatchObject({ status: 201, replayed: false });
-    await expect(hosted.inspect({ organizationId: "org_material_http",
-      runId: "run_material_http" })).resolves.toMatchObject({
-        canonicalStatus: "interrupted", outcome: "outcome_unknown",
-        terminalReason: "late_material_evidence_after_non_start_proof",
-      });
-    const recordAdmission = await hostedAdmissionFixture({
-      runId: "run_material_http_record", suffix: "96",
-      organizationId: "org_material_http", runnerId: "runner_material_http",
-      permissionActions: ["github.pull_request.merge"], publicationMode: "pull_request",
-    });
-    await hosted.admit({ runId: "run_material_http_record",
-      admission: recordAdmission.admission, policy: recordAdmission.policy });
-    const recordClaimOutcome = await hosted.claim({ principal: authentication.principal,
-      request: hostedClaimRequest({ operationId: "operation_claim_material_http_record",
-        requestId: "request_claim_material_http_record",
-        credentialId: "credential_material_http" }) });
-    if (recordClaimOutcome.kind !== "claimed") throw new Error("record claim failed");
-    const recordClaim = recordClaimOutcome.claim;
-    const recordPayload = { ...payload, operationId: "operation_material_http_record",
-      idempotencyKey: "material_action_http_record" };
-    const recordSeed = { ...seed, runId: recordClaim.runId,
-      operationId: recordPayload.operationId, payload: recordPayload,
-      payloadDigest: await computeMaterialActionPayloadDigestV1(recordPayload),
-      identity: { ...seed.identity, parts: ["org_material_http", recordClaim.runId,
-        recordClaim.attempt.id, payload.actionId, "receipt_material_http_record"] },
-      receiptId: "receipt_material_http_record",
-      attempt: { attemptId: recordClaim.attempt.id,
-        attemptNumber: recordClaim.attempt.number, epoch: recordClaim.attempt.epoch,
-        fencingTokenDigest: recordClaim.attempt.fencingTokenDigest } };
-    const { receiptDigest: _recordDigest, ...recordDigestInput } = recordSeed;
-    const recordReceipt = MaterialActionReceiptEnvelopeV1Schema.parse({ ...recordSeed,
-      receiptDigest: await computeMaterialActionReceiptDigestV1(recordDigestInput) });
     const authorization = await authorizeHostedMaterialActionFixture({
       pool: fixture.pool, clock: { now: () => now }, principal: authentication.principal,
-      runId: recordClaim.runId, attempt: recordClaim.attempt,
-      actionId: recordPayload.actionId, actionDescriptor: recordPayload.actionDescriptor,
-      targetFingerprint: recordPayload.targetFingerprint,
-      policySnapshotRef: recordAdmission.policy.payload.snapshotId,
-      policySnapshotDigest: recordAdmission.policy.receiptDigest,
-      suffix: "material_http_record",
+      runId: claim.runId, attempt: claim.attempt,
+      actionId: payload.actionId, actionDescriptor: payload.actionDescriptor,
+      targetFingerprint: payload.targetFingerprint,
+      policySnapshotRef: admission.policy.payload.snapshotId,
+      policySnapshotDigest: admission.policy.receiptDigest,
+      suffix: "material_http",
     });
     await expect(client.beginMaterialActionControlV1({ schemaVersion: 1,
       protocolVersion: "1.0", requiredCapabilities: ["relay.material-receipt.v1"],
-      requestId: "begin_material_http_record", operationId: "begin_material_http_record",
+      requestId: "begin_material_http", operationId: "begin_material_http",
       organizationId: "org_material_http", runnerId: "runner_material_http",
-      runId: recordClaim.runId, attempt: { attemptId: recordClaim.attempt.id,
-        attemptNumber: recordClaim.attempt.number, epoch: recordClaim.attempt.epoch,
-        fencingToken: recordClaim.attempt.fencingToken,
-        fencingTokenDigest: recordClaim.attempt.fencingTokenDigest },
-      actionId: recordPayload.actionId,
-      actionDescriptor: recordPayload.actionDescriptor,
-      actionDescriptorDigest: recordPayload.actionDescriptorDigest,
-      targetFingerprint: recordPayload.targetFingerprint,
-      policySnapshotRef: recordAdmission.policy.payload.snapshotId,
-      policySnapshotDigest: recordAdmission.policy.receiptDigest,
+      runId: claim.runId, attempt: { attemptId: claim.attempt.id,
+        attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
+        fencingToken: claim.attempt.fencingToken,
+        fencingTokenDigest: claim.attempt.fencingTokenDigest },
+      actionId: payload.actionId,
+      actionDescriptor: payload.actionDescriptor,
+      actionDescriptorDigest: payload.actionDescriptorDigest,
+      targetFingerprint: payload.targetFingerprint,
+      policySnapshotRef: admission.policy.payload.snapshotId,
+      policySnapshotDigest: admission.policy.receiptDigest,
       workspaceAttestationDigest: authorization.authority.workspaceAttestationDigest!,
       authority: authorization.authority,
-      idempotencyKey: recordPayload.idempotencyKey, begunAt: now.toISOString(),
+      idempotencyKey: payload.idempotencyKey, begunAt: now.toISOString(),
     })).resolves.toMatchObject({ status: 201, replayed: false });
     await expect(client.recordMaterialActionReceiptControlV1({
-      runnerId: "runner_material_http", fencingToken: recordClaim.attempt.fencingToken,
-      receipt: recordReceipt,
+      runnerId: "runner_material_http", fencingToken: claim.attempt.fencingToken,
+      receipt,
     })).resolves.toMatchObject({ status: 201, replayed: false });
     await expect(client.reconcileMaterialActionControlV1({
       schemaVersion: 1,
@@ -290,14 +232,14 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       requestId: "request_reconcile_material_http",
       organizationId: "org_material_http",
       runnerId: "runner_material_http",
-      runId: recordClaim.runId,
+      runId: claim.runId,
       actionId: payload.actionId,
       attempt: {
-        ...recordReceipt.attempt,
-        fencingToken: recordClaim.attempt.fencingToken,
+        ...receipt.attempt,
+        fencingToken: claim.attempt.fencingToken,
       },
-      expectedCurrentReceiptId: recordReceipt.receiptId,
-      expectedCurrentReceiptDigest: recordReceipt.receiptDigest,
+      expectedCurrentReceiptId: receipt.receiptId,
+      expectedCurrentReceiptDigest: receipt.receiptDigest,
     })).resolves.toMatchObject({ status: 200, outcome: "resolved" });
   });
 });

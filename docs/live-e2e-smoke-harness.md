@@ -1,82 +1,94 @@
 # Live E2E Smoke Harness
 
-The smoke harness inventories local contract checks and the provider-live cases
-that remain valid after the single-stack delivery cutover.
+The smoke harness groups the current Slack Source App, paired Runner, and ACP
+runtime checks. It does not turn local or executor evidence into a claim about
+a real Slack or GitHub provider outcome.
 
 ## Cases
 
 | Case | Live | Scope |
 | --- | --- | --- |
-| `protocol-runtime` | No | GitHub-shaped run lifecycle through a captured unified delivery producer |
-| `slack-protocol` | No | Slack-shaped presentations, quiet progress, and Block Kit final rendering through the unified producer |
-| `factory-conformance` | No | Restart-safe recipe, workstream, batch, runner, and delivery-presentation conformance |
-| `builtin-acp` | Yes | Real built-in ACP readiness, isolated worktree, and cancellation behavior |
+| `slack-protocol` | No | Slack mention normalization, Run lifecycle, quiet progress, and final presentation enqueue through the delivery producer |
+| `paired-relay` | No | Self-hosted Control Plane, Slack ingress, paired Runner recovery, and GitHub publication-control contracts against PostgreSQL |
+| `builtin-acp` | Yes | Real built-in coding-agent readiness, isolated worktree, and declared cancellation behavior |
 | `openclaw-acp` | Yes | Real OpenClaw Gateway ACP conformance |
-| `slack-linear-registry-live` | Yes | Exact registry release, real Slack `/linear`, read-only Linear queries, and a provider-visible Slack reply |
 
-List the authoritative cases directly from the harness:
+List the case definitions directly from the harness:
 
 ```bash
 corepack pnpm smoke:live -- --list
 ```
 
-Preflight without provider or executor side effects:
+Preflight without executing a case:
 
 ```bash
-corepack pnpm smoke:live -- --case protocol-runtime,slack-protocol,factory-conformance --dry-run
-corepack pnpm smoke:live -- --case slack-linear-registry-live --dry-run --allow-missing
+corepack pnpm smoke:live -- --case slack-protocol --dry-run
+corepack pnpm smoke:live -- --case paired-relay,builtin-acp,openclaw-acp --dry-run --allow-missing
 ```
 
-Run the credential-free cases:
+## Local protocol and paired-relay checks
+
+Run the credential-free Slack protocol case:
 
 ```bash
-corepack pnpm smoke:live -- --case protocol-runtime,slack-protocol,factory-conformance
+corepack pnpm smoke:live -- --case slack-protocol
 ```
+
+The paired-relay case requires an isolated PostgreSQL test database but clears
+Slack and GitHub provider credentials before running:
+
+```bash
+test -n "${OPENTAG_TEST_DATABASE_URL:-}"
+corepack pnpm smoke:live -- --case paired-relay
+```
+
+Run the Control Plane composition checks separately when validating the
+self-hosted distribution:
+
+```bash
+corepack pnpm smoke:control-plane-compose:typecheck
+corepack pnpm e2e:control-plane
+```
+
+The browser E2E requires its documented Docker and Playwright environment. A
+passing local composition proves the packaged services cooperate; it does not
+prove that Slack accepted a reply or GitHub accepted a publication.
+
+## ACP checks
+
+Select only the installed, authenticated agents you intend to verify:
+
+```bash
+OPENTAG_BUILTIN_ACP_AGENTS=codex corepack pnpm smoke:live -- --case builtin-acp
+corepack pnpm smoke:live -- --case openclaw-acp
+```
+
+These cases execute real local agent runtimes. They prove executor readiness,
+workspace isolation, and the declared cancellation contract, not provider
+delivery.
 
 ## Evidence boundary
 
-The local protocol cases prove that dispatcher presentations reach the unified
-producer and that successful enqueue emits `delivery.intent.queued`. They do
-not claim a provider accepted a message. A missing production composition emits
-`delivery.activation_blocked` and means no provider I/O was attempted.
+`slack-protocol` and `paired-relay` may prove that a canonical delivery intent
+was durably queued. Only the delivery journal can establish whether provider I/O
+began and whether the terminal outcome was `accepted`, `rejected`,
+`outcome_unknown`, or `attention`. A real provider acceptance additionally
+requires provider-visible or provider-reconciled evidence.
 
-Provider outcomes belong to the delivery journal or verified hosted delivery
-observations. The harness must not synthesize `delivered` from run events,
-metrics, external IDs, or executor success.
-
-## Registry-installed provider case
-
-The Slack `/linear` case installs a declared release into a fresh directory.
-For the current release line, the install shape is:
-
-```bash
-smoke_root="$(mktemp -d)"
-(
-  set -euo pipefail
-  cd "$smoke_root"
-  npm init -y >/dev/null
-  npm install --no-audit --no-fund @opentag/cli@0.11.0
-  ./node_modules/.bin/opentag --version
-)
-```
-
-The live case additionally verifies exact lockfile package identities and
-integrities before accepting a real human Slack command. It fails closed on
-Linear mutations and retains redacted evidence only. Follow its printed
-preflight requirements; do not place provider tokens in reports or command-line
-arguments.
+Never infer delivery from Run completion, an external-looking URI, or
+`delivery.intent.queued`. Never replay an ambiguous provider operation merely
+because the local process restarted.
 
 ## Reports
 
-Use `--report` to retain a local JSON result:
+Use `--report` to retain a mode-0600 JSON result:
 
 ```bash
 corepack pnpm smoke:live -- \
-  --case protocol-runtime,slack-protocol,factory-conformance \
-  --report .omx/live-e2e/local-delivery-contracts.json
+  --case slack-protocol \
+  --report .omx/live-e2e/slack-protocol.json
 ```
 
-The report records commands, preflight state, exit status, and elapsed time. It
-does not turn a local contract smoke into provider-live evidence. Keep release
-identity, delivery journal truth, and provider-visible proof as separate
-receipts.
+The report records the selected command, preflight state, exit status, and
+elapsed time. Keep release identity, local contract evidence, provider journal
+truth, and provider-visible proof as separate receipts.

@@ -275,16 +275,16 @@ describe("ActionPermissionRequestSchema", () => {
 });
 
 describe("OpenTagEventSchema", () => {
-  it("accepts a valid GitHub event", () => {
+  it("accepts a valid Slack event", () => {
     const parsed = OpenTagEventSchema.parse({
       id: "evt_1",
-      source: "github",
-      sourceEventId: "12345",
+      source: "slack",
+      sourceEventId: "Ev12345",
       receivedAt: "2026-06-24T00:00:00.000Z",
       actor: {
-        provider: "github",
-        providerUserId: "42",
-        handle: "octocat"
+        provider: "slack",
+        providerUserId: "U42",
+        handle: "alice"
       },
       target: {
         mention: "@opentag",
@@ -297,53 +297,9 @@ describe("OpenTagEventSchema", () => {
       },
       context: [
         {
-          provider: "github",
-          kind: "issue",
-          uri: "https://github.com/acme/demo/issues/1",
-          visibility: "public"
-        }
-      ],
-      permissions: [
-        {
-          scope: "issue:comment",
-          reason: "reply to source thread"
-        }
-      ],
-      callback: {
-        provider: "github",
-        uri: "https://api.github.com/repos/acme/demo/issues/1/comments"
-      },
-      metadata: {}
-    });
-
-    expect(parsed.source).toBe("github");
-  });
-
-  it("accepts a valid Telegram event", () => {
-    const parsed = OpenTagEventSchema.parse({
-      id: "evt_tg_1",
-      source: "telegram",
-      sourceEventId: "update_123",
-      receivedAt: "2026-06-25T00:00:00.000Z",
-      actor: {
-        provider: "telegram",
-        providerUserId: "456",
-        handle: "alice"
-      },
-      target: {
-        mention: "@opentag_bot",
-        agentId: "opentag"
-      },
-      command: {
-        rawText: "fix this",
-        intent: "fix",
-        args: {}
-      },
-      context: [
-        {
-          provider: "telegram",
+          provider: "slack",
           kind: "message",
-          uri: "telegram://bot/123/chat/456/message/789",
+          uri: "slack://team/T1/channel/C1/message/1.0",
           visibility: "organization"
         }
       ],
@@ -354,70 +310,34 @@ describe("OpenTagEventSchema", () => {
         }
       ],
       callback: {
-        provider: "telegram",
-        uri: "https://api.telegram.org/sendMessage",
-        threadKey: "123|456|789|"
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage"
       },
       metadata: {}
     });
 
-    expect(parsed.source).toBe("telegram");
-    expect(parsed.callback.provider).toBe("telegram");
-  });
-
-  it("accepts adapter-defined providers and context kinds without changing core", () => {
-    const parsed = OpenTagEventSchema.parse({
-      id: "evt_linear_1",
-      source: "linear",
-      sourceEventId: "comment_123",
-      receivedAt: "2026-06-25T00:00:00.000Z",
-      actor: {
-        provider: "linear",
-        providerUserId: "user_123"
-      },
-      target: {
-        mention: "@opentag",
-        agentId: "opentag"
-      },
-      command: {
-        rawText: "triage this",
-        intent: "run",
-        args: {}
-      },
-      context: [
-        {
-          provider: "linear",
-          kind: "issue",
-          uri: "linear://issue/ENG-123",
-          visibility: "organization"
-        }
-      ],
-      permissions: [
-        {
-          scope: "issue:comment",
-          reason: "reply to source thread"
-        }
-      ],
-      callback: {
-        provider: "linear",
-        uri: "linear://comment/123"
-      },
-      metadata: {}
-    });
-
-    expect(parsed.context[0]).toMatchObject({ provider: "linear", kind: "issue" });
+    expect(parsed.source).toBe("slack");
+    expect(OpenTagEventSchema.safeParse({ ...parsed, source: "github" }).success).toBe(false);
+    expect(OpenTagEventSchema.safeParse({
+      ...parsed,
+      actor: { ...parsed.actor, provider: "github" },
+    }).success).toBe(false);
+    expect(OpenTagEventSchema.safeParse({
+      ...parsed,
+      callback: { ...parsed.callback, provider: "github" },
+    }).success).toBe(false);
   });
 
   it("rejects legacy provider-prefixed context kinds", () => {
     expect(() =>
       OpenTagEventSchema.parse({
         id: "evt_legacy_kind",
-        source: "github",
-        sourceEventId: "comment_legacy_kind",
+        source: "slack",
+        sourceEventId: "EvLegacyKind",
         receivedAt: "2026-06-25T00:00:00.000Z",
         actor: {
-          provider: "github",
-          providerUserId: "42"
+          provider: "slack",
+          providerUserId: "U42"
         },
         target: {
           mention: "@opentag",
@@ -430,20 +350,20 @@ describe("OpenTagEventSchema", () => {
         },
         context: [
           {
-            kind: "github.issue",
-            uri: "https://github.com/acme/demo/issues/1",
-            visibility: "public"
+            kind: "slack.message",
+            uri: "slack://team/T1/channel/C1/message/1.0",
+            visibility: "organization"
           }
         ],
         permissions: [
           {
-            scope: "issue:comment",
+            scope: "chat:postMessage",
             reason: "reply to source thread"
           }
         ],
         callback: {
-          provider: "github",
-          uri: "https://api.github.com/repos/acme/demo/issues/1/comments"
+          provider: "slack",
+          uri: "https://slack.com/api/chat.postMessage"
         },
         metadata: {}
       })
@@ -455,10 +375,10 @@ describe("OpenTagEventSchema", () => {
       expect(
         OpenTagEventSchema.parse({
           id: `evt_${executorHint}`,
-          source: "github",
-          sourceEventId: `comment_${executorHint}`,
+          source: "slack",
+          sourceEventId: `Ev_${executorHint}`,
           receivedAt: "2026-06-24T00:00:00.000Z",
-          actor: { provider: "github", providerUserId: "42" },
+          actor: { provider: "slack", providerUserId: "U42" },
           target: {
             mention: "@opentag",
             agentId: "opentag",
@@ -467,7 +387,7 @@ describe("OpenTagEventSchema", () => {
           command: { rawText: "run this", intent: "run", args: {} },
           context: [],
           permissions: [{ scope: "runner:local", reason: "execute locally" }],
-          callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+          callback: { provider: "slack", uri: "https://slack.com/api/chat.postMessage" },
           metadata: { owner: "acme", repo: "demo" }
         }).target.executorHint
       ).toBe(executorHint);
@@ -478,10 +398,10 @@ describe("OpenTagEventSchema", () => {
     expect(() =>
       OpenTagEventSchema.parse({
         id: "evt_old_executor",
-        source: "github",
-        sourceEventId: "comment_old_executor",
+        source: "slack",
+        sourceEventId: "EvOldExecutor",
         receivedAt: "2026-06-24T00:00:00.000Z",
-        actor: { provider: "github", providerUserId: "42" },
+        actor: { provider: "slack", providerUserId: "U42" },
         target: {
           mention: "@opentag",
           agentId: "opentag",
@@ -490,7 +410,7 @@ describe("OpenTagEventSchema", () => {
         command: { rawText: "run this", intent: "run", args: {} },
         context: [],
         permissions: [{ scope: "runner:local", reason: "execute locally" }],
-        callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+        callback: { provider: "slack", uri: "https://slack.com/api/chat.postMessage" },
         metadata: { owner: "acme", repo: "demo" }
       })
     ).toThrow();

@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
-import { canonicalJsonStringify } from "@opentag/core";
+import {
+  canonicalJsonStringify,
+  type MaterialActionReceiptEnvelopeV1,
+  type RunnerMaterialActionBeginV1,
+  type RunnerMaterialActionReconcileRequestV1,
+} from "@opentag/control-protocol";
 import { describe, expect, it } from "vitest";
 import {
   createOpenTagClient,
   OpenTagControlV1HttpError,
   type ControlCredential,
-  type MaterialActionReceiptEnvelopeV1,
-  type RunnerMaterialActionBeginV1,
-  type RunnerMaterialActionReconcileRequestV1,
 } from "../src/index.js";
 
 const observedAt = "2026-08-08T00:00:00.000Z";
@@ -158,7 +160,7 @@ function client(
   },
 ) {
   return createOpenTagClient({
-    dispatcherUrl: "https://control.example/base",
+    controlPlaneUrl: "https://control.example/base",
     controlCredential,
     fetchImpl,
   });
@@ -202,8 +204,6 @@ describe("Control V1 material action transport", () => {
     for (const kind of [
       "bootstrap_pairing",
       "recovery_pairing",
-      "operator",
-      "approver",
     ] as const) {
       const sdk = client(async () => {
         calls += 1;

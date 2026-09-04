@@ -118,37 +118,14 @@ describe("Control Plane deployment contract", () => {
     expect(registrationCapabilities).toContain("relay.source-content-redeem.v1");
   });
 
-  it("attests the browser E2E workspace before requesting material permission", async () => {
+  it("keeps the Compose smoke on the current Runner lifecycle", async () => {
     const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
-    const runningAt = e2e.indexOf("markHostedRunRunningControlV1");
-    const permissionAt = e2e.indexOf("requestActionPermissionControlV1");
-
-    expect(runningAt).toBeGreaterThan(0);
-    expect(permissionAt).toBeGreaterThan(runningAt);
-    expect(e2e).toContain("workspaceAttestationDigest");
-    expect(e2e).toContain('const actionDescriptor = "workspace.write"');
-    expect(e2e).not.toContain('const actionDescriptor = "github.pull_request.merge"');
-  });
-
-  it("begins the authorized browser E2E material action before recording its receipt", async () => {
-    const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
-    const beginAt = e2e.indexOf("beginMaterialActionControlV1");
-    const receiptAt = e2e.indexOf("recordMaterialActionReceiptControlV1");
-
-    expect(beginAt).toBeGreaterThan(0);
-    expect(receiptAt).toBeGreaterThan(beginAt);
-    expect(e2e).toContain('kind: "permission_resolution"');
-    expect(e2e).toContain("resolutionReceiptDigest: resolved.receipt.receiptDigest");
-  });
-
-  it("carries the accepted workspace attestation into browser E2E cancellation", async () => {
-    const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
-    const cancellation = e2e.slice(
-      e2e.indexOf("const cancellation ="),
-      e2e.indexOf("const cancelled ="),
-    );
-
-    expect(cancellation).toContain("workspaceAttestation");
+    expect(e2e).toContain("reportRunnerReadinessControlV1");
+    expect(e2e).toContain("claimHostedRunControlV1");
+    expect(e2e).toContain("markHostedRunRunningControlV1");
+    expect(e2e).not.toContain("resolveActionPermissionControlV1");
+    expect(e2e).not.toContain("beginMaterialActionControlV1");
+    expect(e2e).not.toContain("cancelHostedRunControlV1");
   });
 
   it("documents one Postgres-and-KEK recovery set without claiming HA or certification", async () => {
@@ -268,7 +245,6 @@ describe("Control Plane deployment contract", () => {
 
   it("documents the production fencing and login-throttle configuration", async () => {
     const [
-      configuration,
       deployment,
       composeReadme,
       appReadme,
@@ -276,7 +252,6 @@ describe("Control Plane deployment contract", () => {
       browserE2e,
     ] =
       await Promise.all([
-        read("docs/configuration.md"),
         read("docs/control-plane-deployment.md"),
         read("deploy/compose/README.md"),
         read("apps/control-plane/README.md"),
@@ -293,11 +268,9 @@ describe("Control Plane deployment contract", () => {
       "OPENTAG_LOGIN_WINDOW_MS",
       "OPENTAG_LOGIN_LOCKOUT_MS",
     ]) {
-      expect(configuration).toContain(variable);
       expect(deployment).toContain(variable);
       expect(compose).toContain(variable);
     }
-    expect(configuration).toContain("OpenTag Control Plane");
     expect(deployment).toContain("fencing-token digest");
     expect(composeReadme).toContain(
       "independently generated fencing-token and login-throttle secrets",

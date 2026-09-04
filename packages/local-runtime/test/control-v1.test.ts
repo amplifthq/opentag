@@ -1,137 +1,58 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildHostedLifecycleRequestV1, computeControlPayloadDigestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, HostedCompleteRequestV1Schema, RunnerReadinessReceiptEnvelopeV1Schema, type HostedClaimRequestV1 } from "@opentag/core";
-import { serveDaemon, type DaemonClient } from "../src/daemon.js";
+import { buildHostedLifecycleRequestV1, computeControlPayloadDigestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, computeSlackAppMentionSourceIdentityDigestV1, HostedCompleteRequestV1Schema, RunnerReadinessReceiptEnvelopeV1Schema, type HostedClaimRequestV1 } from "@opentag/core";
+import { serveDaemon } from "../src/daemon.js";
 import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistrationV1, buildHostedClaimRequestV1, buildHostedCompletionMetadataForControlV1, buildHostedProgressMetadataForControlV1, buildRunnerReadinessReceipt, createHostedControlLoop, hasSameRunnerReadinessAuthorityV1, isRunnerControlContextFreshV1, pumpControlPlaneProjections, pumpHostedLifecycleOperations, redeemHostedClaimSourceContentV1, runnerReadinessReuseWindowV1, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository, type HostedLifecycleOperationEntry, type HostedLifecycleRepository } from "../src/control-v1.js";
 
 const now = new Date("2026-08-09T00:00:00.000Z");
 
-function callbackEntry(): ControlPlaneProjectionOutboxEntry {
-  return {
-    receiptId: "receipt_callback_1",
-    destinationId: "cloud",
+function readinessEntry(): ControlPlaneProjectionOutboxEntry {
+  const envelope = RunnerReadinessReceiptEnvelopeV1Schema.parse({
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    receiptKind: "runner_readiness",
+    receiptId: "receipt_readiness_1",
     organizationId: "org_1",
-    runId: "run_1",
-    workThreadId: "work_thread_1",
-    receiptKind: "callback_intent_observation",
-    identity: { namespace: "opentag.control.receipt/callback-intent-observation/v1", parts: ["org_1", "work_thread_1", "intent_1"], key: "identity" },
-    operationId: "operation_1",
+    operationId: "operation_readiness_1",
+    requiredCapabilities: ["relay.readiness.v1"],
+    producer: {
+      kind: "runner",
+      id: "runner_1",
+      credentialId: "runtime_credential_1",
+      registrationGeneration: 1,
+    },
+    identity: {
+      namespace: "opentag.control.receipt/runner-readiness/v1",
+      parts: ["org_1", "runner_1", "1", "readiness_1"],
+    },
+    observedAt: now.toISOString(),
+    payload: {
+      readinessId: "readiness_1",
+      runnerId: "runner_1",
+      registrationGeneration: 1,
+      capabilities: ["relay.readiness.v1"],
+      executors: [],
+      targets: [],
+      observedAt: now.toISOString(),
+      expiresAt: "2026-08-09T00:01:00.000Z",
+    },
     payloadDigest: `sha256:${"a".repeat(64)}`,
     receiptDigest: `sha256:${"b".repeat(64)}`,
-    envelope: {
-      schemaVersion: 1,
-      protocolVersion: "1.0",
-      receiptKind: "callback_intent_observation",
-      receiptId: "receipt_callback_1",
-      organizationId: "org_1",
-      operationId: "operation_1",
-      requiredCapabilities: ["relay.callback-observation.v1"],
-      producer: { kind: "local_opentag", id: "runner_1" },
-      identity: { namespace: "opentag.control.receipt/callback-intent-observation/v1", parts: ["org_1", "work_thread_1", "intent_1"] },
-      observedAt: now.toISOString(),
-      payloadDigest: `sha256:${"a".repeat(64)}`,
-      receiptDigest: `sha256:${"b".repeat(64)}`,
-      runId: "run_1",
-      workThreadId: "work_thread_1",
-      payload: {
-        localIntentId: "intent_1",
-        assessmentRef: "assessment_1",
-        assessmentDigest: `sha256:${"c".repeat(64)}`,
-        provider: "github",
-        sourceThreadIdentityDigest: `sha256:${"d".repeat(64)}`,
-        operationId: "operation_1",
-        payloadDigest: `sha256:${"e".repeat(64)}`,
-        createdAt: now.toISOString(),
-      },
-    },
-    state: "leased",
-    attemptCount: 1,
-    leaseOwner: "pump_1",
-    leaseToken: "lease_1",
-    leaseExpiresAt: "2026-08-09T00:01:30.000Z",
-    createdAt: now.toISOString(),
-    updatedAt: now.toISOString(),
-  };
-}
-
-function completionEvidenceEntry(): ControlPlaneProjectionOutboxEntry {
-  const authorityDigest = `sha256:${"a".repeat(64)}`;
-  const contractReceiptDigest = `sha256:${"e".repeat(64)}`;
-  const payloadDigest = `sha256:${"c".repeat(64)}`;
-  const receiptDigest = `sha256:${"d".repeat(64)}`;
+  });
   return {
-    receiptId: "completion_evidence_receipt_1",
+    receiptId: envelope.receiptId,
     destinationId: "cloud",
-    organizationId: "org_1",
-    runId: "run_1",
-    workThreadId: "work_thread_1",
-    receiptKind: "completion_evidence_observation",
+    organizationId: envelope.organizationId,
+    runnerId: envelope.payload.runnerId,
+    receiptKind: "runner_readiness",
     identity: {
-      namespace:
-        "opentag.control.receipt/completion-evidence-observation/v1",
-      parts: [
-        "org_1",
-        "work_thread_1",
-        "run_1",
-        "human_escalation",
-        "escalation_1",
-        authorityDigest,
-        contractReceiptDigest,
-      ],
+      namespace: envelope.identity.namespace,
+      parts: [...envelope.identity.parts],
       key: "identity",
     },
-    operationId: "completion_evidence_operation_1",
-    payloadDigest,
-    receiptDigest,
-    envelope: {
-      schemaVersion: 1,
-      protocolVersion: "1.0",
-      receiptKind: "completion_evidence_observation",
-      receiptId: "completion_evidence_receipt_1",
-      organizationId: "org_1",
-      operationId: "completion_evidence_operation_1",
-      requiredCapabilities: ["relay.completion-evidence.v1"],
-      producer: {
-        kind: "local_opentag",
-        id: "runner_1",
-        credentialId: "runtime_credential_1",
-        registrationGeneration: 1,
-      },
-      identity: {
-        namespace:
-          "opentag.control.receipt/completion-evidence-observation/v1",
-        parts: [
-          "org_1",
-          "work_thread_1",
-          "run_1",
-          "human_escalation",
-          "escalation_1",
-          authorityDigest,
-          contractReceiptDigest,
-        ],
-      },
-      predecessorReceiptDigests: [contractReceiptDigest],
-      observedAt: now.toISOString(),
-      payloadDigest,
-      receiptDigest,
-      runId: "run_1",
-      workThreadId: "work_thread_1",
-      attempt: {
-        attemptId: "attempt_1",
-        attemptNumber: 1,
-        epoch: 1,
-        fencingTokenDigest: `sha256:${"b".repeat(64)}`,
-      },
-      payload: {
-        evidenceType: "human_escalation",
-        evidenceId: "escalation_1",
-        authorityDigest,
-        class: "human_acceptance_missing",
-        state: "open",
-        blocking: true,
-        reasonDigest: `sha256:${"b".repeat(64)}`,
-        observedAt: now.toISOString(),
-      },
-    },
+    operationId: envelope.operationId,
+    payloadDigest: envelope.payloadDigest,
+    receiptDigest: envelope.receiptDigest,
+    envelope,
     state: "leased",
     attemptCount: 1,
     leaseOwner: "pump_1",
@@ -152,12 +73,12 @@ function harness(entry: ControlPlaneProjectionOutboxEntry) {
     markControlPlaneProjectionAttention: vi.fn(async () => { current = undefined; return { outcome: "attention" as const }; }),
   };
   const client = {
-    reportRunnerReadinessControlV1: vi.fn(),
-    projectWorkThreadRefControlV1: vi.fn(),
-    projectCompletionContractRefControlV1: vi.fn(),
-    projectCompletionAssessmentControlV1: vi.fn(),
-    projectCompletionEvidenceControlV1: vi.fn(async (receipt) => ({ status: 201 as const, replayed: false as const, outcome: "accepted" as const, receipt })),
-    projectCallbackObservationControlV1: vi.fn(async (receipt) => ({ status: 201 as const, replayed: false as const, outcome: "accepted" as const, receipt })),
+    reportRunnerReadinessControlV1: vi.fn(async (receipt) => ({
+      status: 201 as const,
+      replayed: false as const,
+      outcome: "accepted" as const,
+      receipt,
+    })),
   } satisfies ControlProjectionClient;
   return { repo, client };
 }
@@ -244,6 +165,7 @@ function memoryProjectionRepository() {
 function emptyLifecycleRepository() {
   return {
     ...memoryProjectionRepository(),
+    getHostedProposalSettlementForRetry: vi.fn(async () => null),
     getHostedPreImportAuthorityRecovery: vi.fn(async () => null),
     getHostedClaimOperationForRetry: vi.fn(async () => null),
     recoverExpiredHostedLifecycleOperations: vi.fn(async () => 0),
@@ -269,29 +191,32 @@ async function validHostedClaim(input: {
     organizationId: "org_1",
     bindingId: "binding_1",
     bindingSecretVersion: "secret_v1",
-    provider: "github" as const,
+    provider: "slack" as const,
     deliveryId: "delivery_1",
     deliveryPayloadDigest: `sha256:${"b".repeat(64)}`,
     sourceIdentityDigest: `sha256:${"c".repeat(64)}`,
-    eventName: "issue_comment" as const,
+    eventName: "app_mention" as const,
     action: "created" as const,
     repository: {
+      provider: "github" as const,
       providerRepositoryId: "123",
       owner: input.repository?.owner ?? "acme",
       repo: input.repository?.repo ?? "widget",
     },
     sourceThread: {
-      kind: "issue" as const,
-      providerThreadId: "456",
-      number: 42,
+      kind: "channel_thread" as const,
+      providerThreadId: "C123:1700000000.000100",
+      channelId: "C123",
+      threadTs: "1700000000.000100",
     },
     sourceEvent: {
-      providerEventId: "789",
-      kind: "issue_comment" as const,
+      providerEventId: "Ev789",
+      kind: "app_mention" as const,
+      messageId: "1700000001.000200",
     },
     verifiedActor: {
-      providerUserId: "1001",
-      login: "octocat",
+      providerUserId: "U1001",
+      login: "alice",
       authorization: {
         decision: "allowed" as const,
         grantRef: "grant_1",
@@ -301,7 +226,6 @@ async function validHostedClaim(input: {
     },
     projectTarget: {
       projectTargetId: "target_1",
-      version: 1,
       digest: `sha256:${"a".repeat(64)}`,
     },
     runnerId: "runner_1",
@@ -395,30 +319,28 @@ describe("Control V1 projection pump", () => {
         credentialGeneration: 1, runnerReadinessReceiptId: "readiness_1",
         runnerReadinessReceiptDigest: `sha256:${"a".repeat(64)}` } };
     const event = {
-      id: "789", source: "github", sourceEventId: "789", receivedAt: now.toISOString(),
-      actor: { provider: "github", providerUserId: "1001", handle: "octocat" },
+      id: "Ev789", source: "slack", sourceEventId: "Ev789", receivedAt: now.toISOString(),
+      actor: { provider: "slack", providerUserId: "U1001", handle: "alice", organizationId: "T123" },
       target: { mention: "@opentag", agentId: "opentag" },
       command: { rawText: "fix this", intent: "fix", args: {} }, context: [],
       permissions: [{ scope: "repo:write", reason: "fix the repository" }],
-      callback: { provider: "github", uri: "https://api.github.com/repos/acme/widget/issues/42/comments" },
-      workItem: { provider: "github", kind: "issue", externalId: "acme/widget#42",
-        uri: "https://github.com/acme/widget/issues/42",
-        ownerContainer: { id: "github:acme/widget", provider: "github", kind: "repository", externalId: "acme/widget",
-          uri: "https://github.com/acme/widget" } },
-      metadata: { owner: "acme", repo: "widget", repoProvider: "github",
-        issueNumber: 42, deliveryId: "delivery_1" },
+      callback: { provider: "slack", uri: "https://slack.com/api/chat.postMessage",
+        threadKey: "T123|C123|1700000000.000100" },
+      metadata: { teamId: "T123", channelId: "C123", messageTs: "1700000001.000200",
+        owner: "acme", repo: "widget", repoProvider: "github", deliveryId: "delivery_1" },
     } as const;
-    const sourceIdentityDigest = await import("@opentag/core").then(({ computeGitHubIssueCommentSourceIdentityDigestV1 }) =>
-      computeGitHubIssueCommentSourceIdentityDigestV1({ provider: "github",
-        repository: { providerRepositoryId: "123", owner: "acme", repo: "widget" },
-        sourceThread: { kind: "issue", providerThreadId: "456", number: 42 },
-        sourceEvent: { providerEventId: "789", kind: "issue_comment" },
-        actor: { providerUserId: "1001", login: "octocat" },
-        executionBearingCommentBody: "@opentag fix this" }));
     const baseClaim = await validHostedClaim({ request, executorCapabilityDigest: `sha256:${"b".repeat(64)}` });
+    const sourceIdentityDigest = await computeSlackAppMentionSourceIdentityDigestV1({
+      provider: "slack", repository: baseClaim.hostedAdmission.repository,
+      sourceThread: baseClaim.hostedAdmission.sourceThread,
+      sourceEvent: baseClaim.hostedAdmission.sourceEvent,
+      actor: { providerUserId: baseClaim.hostedAdmission.verifiedActor.providerUserId,
+        login: baseClaim.hostedAdmission.verifiedActor.login },
+      executionBearingMessageBody: "fix this",
+    });
     const admissionSeed = { ...baseClaim.hostedAdmission, sourceIdentityDigest,
       envelopeDigest: `sha256:${"0".repeat(64)}` };
-    const executionPayload = { executionBearingCommentBody: "@opentag fix this", event };
+    const executionPayload = { executionBearingMessageBody: "fix this", event };
     const payloadDigest = await computeControlPayloadDigestV1(executionPayload);
     const digestBoundAdmissionSeed = { ...admissionSeed,
       sourceContextEnvelope: { ...admissionSeed.sourceContextEnvelope, payloadDigest } };
@@ -441,7 +363,7 @@ describe("Control V1 projection pump", () => {
     const redeemed = await redeemHostedClaimSourceContentV1({ claim: claim as never,
       client: { redeemHostedSourceContentControlV1: redeem } as never,
       requestId: "request_redeem", operationId: "operation_redeem", now: () => now });
-    expect(redeemed.event).toMatchObject({ id: "789", command: { rawText: "fix this" } });
+    expect(redeemed.event).toMatchObject({ id: "Ev789", command: { rawText: "fix this" } });
     expect(redeemed.receipt.eventDigest).toMatch(/^sha256:/u);
     expect(redeem).toHaveBeenCalledOnce();
   });
@@ -811,6 +733,7 @@ describe("Control V1 projection pump", () => {
 
   it("commits completion locally during outage and replays it before a restart can claim work", async () => {
     const repository = {
+      projectTargetId: "target_1",
       provider: "github",
       owner: "acme",
       repo: "widget",
@@ -872,6 +795,7 @@ describe("Control V1 projection pump", () => {
     const projectionNoops = memoryProjectionRepository();
     const repo = {
       ...projectionNoops,
+      getHostedProposalSettlementForRetry: vi.fn(async () => null),
       getHostedPreImportAuthorityRecovery: vi.fn(async () => null),
       recoverExpiredHostedLifecycleOperations: vi.fn(async () => 0),
       claimDueHostedLifecycleOperations: vi.fn(async ({ now: claimedAt }) => {
@@ -1008,7 +932,7 @@ describe("Control V1 projection pump", () => {
     });
     const config = {
       runnerId: "runner_1",
-      dispatcherUrl: "https://control.example",
+      relayUrl: "https://control.example",
       runnerToken: "runtime_secret",
       repositories: [repository],
       agents: {},
@@ -1030,6 +954,7 @@ describe("Control V1 projection pump", () => {
       },
     } as never;
     const client = {
+      claimNextPublicationOperationControlV1: vi.fn(async () => null),
       getRunnerControlContextV1: vi.fn(async () => context),
       markHostedRunRunningControlV1,
       completeHostedRunControlV1,
@@ -1106,6 +1031,7 @@ describe("Control V1 projection pump", () => {
       observedAt: now.toISOString(),
     };
     const client = {
+      claimNextPublicationOperationControlV1: vi.fn(async () => null),
       getRunnerControlContextV1: vi.fn(async () => {
         events.push("context");
         return { ...context, observedAt: currentNow.toISOString() };
@@ -1149,7 +1075,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         githubToken: "github_secret",
         repositories: [],
@@ -1218,6 +1144,7 @@ describe("Control V1 projection pump", () => {
 
   it("rejects a claim when fresh readiness capabilities diverge from the current context", async () => {
     const repository = {
+      projectTargetId: "target_1",
       provider: "github",
       owner: "acme",
       repo: "widget",
@@ -1313,6 +1240,7 @@ describe("Control V1 projection pump", () => {
 
   it("persists an outcome-unknown claim before capability revocation and replays its exact rejection after restart", async () => {
     const repository = {
+      projectTargetId: "target_1",
       provider: "github",
       owner: "acme",
       repo: "widget",
@@ -1368,7 +1296,6 @@ describe("Control V1 projection pump", () => {
     let nextAttemptAt = now.toISOString();
     const events: string[] = [];
     const importHostedAssignedRun = vi.fn();
-    const refetchGitHubIssueCommentImpl = vi.fn();
     const executeClaimedRunImpl = vi.fn();
     let persistCount = 0;
     const persistHostedClaimAuthorityShell = vi.fn(async () => {
@@ -1489,29 +1416,32 @@ describe("Control V1 projection pump", () => {
         organizationId: "org_1",
         bindingId: "binding_1",
         bindingSecretVersion: "secret_v1",
-        provider: "github" as const,
+        provider: "slack" as const,
         deliveryId: "delivery_1",
         deliveryPayloadDigest: `sha256:${"b".repeat(64)}`,
         sourceIdentityDigest: `sha256:${"c".repeat(64)}`,
-        eventName: "issue_comment" as const,
+        eventName: "app_mention" as const,
         action: "created" as const,
         repository: {
+          provider: "github" as const,
           providerRepositoryId: "123",
           owner: "acme",
           repo: "widget",
         },
         sourceThread: {
-          kind: "issue" as const,
-          providerThreadId: "456",
-          number: 42,
+          kind: "channel_thread" as const,
+          providerThreadId: "C123:1700000000.000100",
+          channelId: "C123",
+          threadTs: "1700000000.000100",
         },
         sourceEvent: {
-          providerEventId: "789",
-          kind: "issue_comment" as const,
+          providerEventId: "Ev789",
+          kind: "app_mention" as const,
+          messageId: "1700000001.000200",
         },
         verifiedActor: {
-          providerUserId: "1001",
-          login: "octocat",
+          providerUserId: "U1001",
+          login: "alice",
           authorization: {
             decision: "allowed" as const,
             grantRef: "grant_1",
@@ -1521,7 +1451,6 @@ describe("Control V1 projection pump", () => {
         },
         projectTarget: {
           projectTargetId: "target_1",
-          version: 1,
           digest: `sha256:${"a".repeat(64)}`,
         },
         runnerId: "runner_1",
@@ -1600,6 +1529,7 @@ describe("Control V1 projection pump", () => {
       };
     });
     const client = {
+      claimNextPublicationOperationControlV1: vi.fn(async () => null),
       getRunnerControlContextV1: vi.fn(async () => ({
         ...currentContext,
         observedAt: currentNow.toISOString(),
@@ -1615,7 +1545,7 @@ describe("Control V1 projection pump", () => {
     } as never;
     const config = {
       runnerId: "runner_1",
-      dispatcherUrl: "https://control.example",
+      relayUrl: "https://control.example",
       runnerToken: "runtime_secret",
       repositories: [repository],
       agents: {},
@@ -1644,7 +1574,6 @@ describe("Control V1 projection pump", () => {
       controlClient: client,
       governanceStore: { repo, close: vi.fn() },
       executeClaimedRunImpl: executeClaimedRunImpl as never,
-      refetchGitHubIssueCommentImpl: refetchGitHubIssueCommentImpl as never,
     });
 
     await expect(first?.beforeIteration()).rejects.toThrow(
@@ -1673,7 +1602,6 @@ describe("Control V1 projection pump", () => {
       controlClient: client,
       governanceStore: { repo, close: vi.fn() },
       executeClaimedRunImpl: executeClaimedRunImpl as never,
-      refetchGitHubIssueCommentImpl: refetchGitHubIssueCommentImpl as never,
     });
     await expect(restarted?.beforeIteration()).rejects.toThrow(
       "hosted_claim_current_capability_mismatch",
@@ -1701,7 +1629,6 @@ describe("Control V1 projection pump", () => {
     expect(claimHostedRunControlV1).toHaveBeenCalledTimes(2);
     expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(1);
     expect(client.reportRunnerReadinessControlV1).toHaveBeenCalledTimes(1);
-    expect(refetchGitHubIssueCommentImpl).not.toHaveBeenCalled();
     expect(importHostedAssignedRun).not.toHaveBeenCalled();
     expect(executeClaimedRunImpl).not.toHaveBeenCalled();
 
@@ -1711,7 +1638,6 @@ describe("Control V1 projection pump", () => {
     expect(claimHostedRunControlV1).toHaveBeenCalledTimes(2);
     expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(1);
     expect(client.reportRunnerReadinessControlV1).toHaveBeenCalledTimes(1);
-    expect(refetchGitHubIssueCommentImpl).not.toHaveBeenCalled();
     expect(importHostedAssignedRun).not.toHaveBeenCalled();
     expect(executeClaimedRunImpl).not.toHaveBeenCalled();
 
@@ -1723,7 +1649,6 @@ describe("Control V1 projection pump", () => {
     expect(claimHostedRunControlV1).toHaveBeenCalledTimes(2);
     expect(repo.beginHostedClaimOperation).toHaveBeenCalledTimes(1);
     expect(client.reportRunnerReadinessControlV1).toHaveBeenCalledTimes(1);
-    expect(refetchGitHubIssueCommentImpl).not.toHaveBeenCalled();
     expect(importHostedAssignedRun).not.toHaveBeenCalled();
     expect(executeClaimedRunImpl).not.toHaveBeenCalled();
     expect(events).toContain("reject_ack");
@@ -1797,7 +1722,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         repositories: [],
         agents: {},
@@ -1822,6 +1747,7 @@ describe("Control V1 projection pump", () => {
       executors: {},
       now: () => now,
       controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         reportRunnerReadinessControlV1,
         claimHostedRunControlV1,
@@ -1844,6 +1770,7 @@ describe("Control V1 projection pump", () => {
 
   it("does not start an executor until the local running operation is acknowledged", async () => {
     const repository = {
+      projectTargetId: "target_1",
       provider: "github",
       owner: "acme",
       repo: "widget",
@@ -2020,7 +1947,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         repositories: [repository],
         agents: {},
@@ -2045,6 +1972,7 @@ describe("Control V1 projection pump", () => {
       executors: { reviewer: executor },
       now: () => currentNow,
       controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         markHostedRunRunningControlV1,
       } as never,
@@ -2090,6 +2018,7 @@ describe("Control V1 projection pump", () => {
 
   it("requeues hosted pre-execution completion paths without inventing running", async () => {
     const repository = {
+      projectTargetId: "target_1",
       provider: "github",
       owner: "acme",
       repo: "widget",
@@ -2225,7 +2154,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         repositories: [repository],
         agents: {},
@@ -2250,6 +2179,7 @@ describe("Control V1 projection pump", () => {
       executors: { reviewer: executor },
       now: () => now,
       controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         rejectHostedAttemptStartControlV1,
         markHostedRunRunningControlV1,
@@ -2276,6 +2206,7 @@ describe("Control V1 projection pump", () => {
 
   it("replays an uncertain hosted heartbeat and renews again only from the accepted local lease", async () => {
     const repository = {
+      projectTargetId: "target_1",
       provider: "github",
       owner: "acme",
       repo: "widget",
@@ -2470,7 +2401,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         repositories: [repository],
         agents: {},
@@ -2495,6 +2426,7 @@ describe("Control V1 projection pump", () => {
       executors: { reviewer: executor },
       now: () => currentNow,
       controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         heartbeatHostedRunControlV1,
       } as never,
@@ -2601,7 +2533,7 @@ describe("Control V1 projection pump", () => {
         credentialId: "credential_1",
         registrationGeneration: 1,
         credentialGeneration: 2,
-        capabilities: ["relay.readiness.v1", "relay.work-thread-ref.v1"],
+        capabilities: ["relay.lifecycle.v1", "relay.readiness.v1"],
         targets: [{
           projectTargetId: "target_1",
           bindingDigest: `sha256:${"a".repeat(64)}`,
@@ -2622,6 +2554,7 @@ describe("Control V1 projection pump", () => {
         } as never,
       },
       repositories: [{
+        projectTargetId: "target_1",
         provider: "github",
         owner: "acme",
         repo: "app",
@@ -2670,6 +2603,7 @@ describe("Control V1 projection pump", () => {
       },
       executors: {},
       repositories: [{
+        projectTargetId: "target_1",
         provider: "github",
         owner: "acme",
         repo: "app",
@@ -2693,7 +2627,7 @@ describe("Control V1 projection pump", () => {
     } as never)).rejects.toThrow("runner_control_context_missing_readiness_capability");
   });
 
-  it("matches mixed-case GitHub identities but preserves non-GitHub case sensitivity", async () => {
+  it("matches mixed-case GitHub identities", async () => {
     const baseContext = {
       schemaVersion: 1 as const,
       protocolVersion: "1.0" as const,
@@ -2707,6 +2641,7 @@ describe("Control V1 projection pump", () => {
       observedAt: now.toISOString(),
     };
     const repository = {
+      projectTargetId: "target_1",
       checkoutPath: process.cwd(),
       defaultExecutor: "echo",
       baseBranch: "main",
@@ -2741,26 +2676,7 @@ describe("Control V1 projection pump", () => {
       }],
       now: () => now,
     });
-    const gitlab = await buildRunnerReadinessReceipt({
-      context: {
-        ...baseContext,
-        targets: [{ ...target, provider: "GitLab", owner: "AcMe", repo: "App" }],
-      },
-      executors,
-      repositories: [{
-        ...repository,
-        provider: "GitLab",
-        owner: "acme",
-        repo: "App",
-      }],
-      now: () => now,
-    });
-
     expect(github.payload.targets[0]?.state).toBe("ready");
-    expect(gitlab.payload.targets[0]).toMatchObject({
-      state: "unknown",
-      reasonCode: "target_binding_stale",
-    });
   });
 
   it("compares durable readiness by semantic authority and enforces the five-second safety window", async () => {
@@ -2811,8 +2727,8 @@ describe("Control V1 projection pump", () => {
     )).toBe("expired");
   });
 
-  it("acks callback custody once and does not duplicate the provider observation on replay", async () => {
-    const { repo, client } = harness(callbackEntry());
+  it("acknowledges readiness once and does not duplicate it on replay", async () => {
+    const { repo, client } = harness(readinessEntry());
     const clock = vi.fn()
       .mockReturnValueOnce(now)
       .mockReturnValueOnce(now)
@@ -2824,27 +2740,13 @@ describe("Control V1 projection pump", () => {
       now: new Date("2026-08-09T00:01:00.000Z"),
     }));
     await expect(pumpControlPlaneProjections(input)).resolves.toEqual({ delivered: 0, retried: 0, attention: 0 });
-    expect(client.projectCallbackObservationControlV1).toHaveBeenCalledTimes(1);
+    expect(client.reportRunnerReadinessControlV1).toHaveBeenCalledTimes(1);
     expect(repo.acknowledgeControlPlaneProjection).toHaveBeenCalledTimes(1);
   });
 
-  it("routes completion evidence through its typed endpoint before callback fallback", async () => {
-    const { repo, client } = harness(completionEvidenceEntry());
-    await expect(pumpControlPlaneProjections({
-      repo,
-      client,
-      destinationId: "cloud",
-      organizationId: "org_1",
-      leaseOwner: "pump_1",
-      now,
-    })).resolves.toEqual({ delivered: 1, retried: 0, attention: 0 });
-    expect(client.projectCompletionEvidenceControlV1).toHaveBeenCalledTimes(1);
-    expect(client.projectCallbackObservationControlV1).not.toHaveBeenCalled();
-  });
-
   it("retries transport failures with bounded backoff and leaves no false acknowledgement", async () => {
-    const { repo, client } = harness(callbackEntry());
-    client.projectCallbackObservationControlV1.mockRejectedValueOnce(Object.assign(new Error("unavailable"), { status: 503 }));
+    const { repo, client } = harness(readinessEntry());
+    client.reportRunnerReadinessControlV1.mockRejectedValueOnce(Object.assign(new Error("unavailable"), { status: 503 }));
     const clock = vi.fn()
       .mockReturnValueOnce(now)
       .mockReturnValueOnce(now)
@@ -2860,8 +2762,8 @@ describe("Control V1 projection pump", () => {
   });
 
   it("retries an explicitly classified status-zero transport failure", async () => {
-    const { repo, client } = harness(callbackEntry());
-    client.projectCallbackObservationControlV1.mockRejectedValueOnce(
+    const { repo, client } = harness(readinessEntry());
+    client.reportRunnerReadinessControlV1.mockRejectedValueOnce(
       Object.assign(new Error("transport_failed"), { status: 0 }),
     );
     await expect(pumpControlPlaneProjections({
@@ -2879,8 +2781,8 @@ describe("Control V1 projection pump", () => {
   });
 
   it("retries an outcome-unknown transport exception instead of requiring attention", async () => {
-    const { repo, client } = harness(callbackEntry());
-    client.projectCallbackObservationControlV1.mockRejectedValueOnce(
+    const { repo, client } = harness(readinessEntry());
+    client.reportRunnerReadinessControlV1.mockRejectedValueOnce(
       new TypeError("fetch failed after request dispatch"),
     );
     await expect(pumpControlPlaneProjections({
@@ -2899,8 +2801,8 @@ describe("Control V1 projection pump", () => {
   });
 
   it("honors Retry-After when it exceeds exponential backoff", async () => {
-    const { repo, client } = harness(callbackEntry());
-    client.projectCallbackObservationControlV1.mockRejectedValueOnce(
+    const { repo, client } = harness(readinessEntry());
+    client.reportRunnerReadinessControlV1.mockRejectedValueOnce(
       Object.assign(new Error("rate limited"), { status: 429, retryAfterSeconds: 11 }),
     );
     await expect(pumpControlPlaneProjections({
@@ -2921,8 +2823,8 @@ describe("Control V1 projection pump", () => {
   });
 
   it("sends an unexpected ordinary error to attention instead of retrying it as transport", async () => {
-    const { repo, client } = harness(callbackEntry());
-    client.projectCallbackObservationControlV1.mockRejectedValueOnce(new Error("adapter_bug"));
+    const { repo, client } = harness(readinessEntry());
+    client.reportRunnerReadinessControlV1.mockRejectedValueOnce(new Error("adapter_bug"));
     await expect(pumpControlPlaneProjections({
       repo,
       client,
@@ -2938,10 +2840,10 @@ describe("Control V1 projection pump", () => {
   });
 
   it("claims each projection independently after a slow first transfer", async () => {
-    const first = callbackEntry();
+    const first = readinessEntry();
     const second = {
-      ...callbackEntry(),
-      receiptId: "receipt_callback_2",
+      ...readinessEntry(),
+      receiptId: "receipt_readiness_2",
       leaseToken: "lease_2",
       leaseExpiresAt: "2026-08-09T00:02:10.000Z",
     };
@@ -2953,7 +2855,7 @@ describe("Control V1 projection pump", () => {
       retryControlPlaneProjection: vi.fn(async () => ({ outcome: "retried" as const })),
       markControlPlaneProjectionAttention: vi.fn(async () => ({ outcome: "attention" as const })),
     };
-    const client = harness(callbackEntry()).client;
+    const client = harness(readinessEntry()).client;
     const clock = vi.fn()
       .mockReturnValueOnce(now)
       .mockReturnValueOnce(now)
@@ -2985,7 +2887,7 @@ describe("Control V1 projection pump", () => {
   });
 
   it("does not send when the remaining lease cannot cover the transfer window", async () => {
-    const entry = { ...callbackEntry(), leaseExpiresAt: "2026-08-09T00:00:34.999Z" };
+    const entry = { ...readinessEntry(), leaseExpiresAt: "2026-08-09T00:00:34.999Z" };
     const { repo, client } = harness(entry);
     await expect(pumpControlPlaneProjections({
       repo,
@@ -2996,14 +2898,14 @@ describe("Control V1 projection pump", () => {
       limit: 1,
       now: () => now,
     })).resolves.toEqual({ delivered: 0, retried: 1, attention: 0 });
-    expect(client.projectCallbackObservationControlV1).not.toHaveBeenCalled();
+    expect(client.reportRunnerReadinessControlV1).not.toHaveBeenCalled();
     expect(repo.retryControlPlaneProjection).toHaveBeenCalledWith(
       expect.objectContaining({ reasonCode: "lease_window_insufficient" }),
     );
   });
 
   it("does not count a slow delivery as acknowledged after its lease becomes stale", async () => {
-    const { repo, client } = harness(callbackEntry());
+    const { repo, client } = harness(readinessEntry());
     vi.mocked(repo.acknowledgeControlPlaneProjection).mockResolvedValueOnce({
       outcome: "stale_lease",
     });
@@ -3059,6 +2961,7 @@ describe("Control V1 projection pump", () => {
         } as never,
       },
       repositories: [{
+        projectTargetId: "target_1",
         provider: "github",
         owner: "acme",
         repo: "app",
@@ -3083,14 +2986,10 @@ describe("Control V1 projection pump", () => {
     expect(canRun).toHaveBeenCalledTimes(1);
   });
 
-  it("runs only the Control V1 sidecar and never calls the legacy claim path", async () => {
+  it("runs only the paired Control V1 loop", async () => {
     const abort = new AbortController();
     const events: string[] = [];
-    const client = {
-      claim: vi.fn(async () => null),
-    } as unknown as DaemonClient;
     await serveDaemon({
-      mode: "control-v1-sidecar",
       pollIntervalMs: 1,
       signal: abort.signal,
       controlLoop: {
@@ -3101,7 +3000,6 @@ describe("Control V1 projection pump", () => {
       },
     });
     expect(events).toEqual(["before", "abort", "after", "close"]);
-    expect(client.claim).not.toHaveBeenCalled();
   });
 
   it("bounds shutdown when an in-flight control transport ignores abort", async () => {
@@ -3113,7 +3011,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         repositories: [],
         agents: {},
@@ -3137,6 +3035,7 @@ describe("Control V1 projection pump", () => {
       databasePath: ":memory:",
       executors: {},
       controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(() => delayedContext),
       } as never,
       governanceStore: { repo: {} as never, close: closeStore },
@@ -3193,7 +3092,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         repositories: [],
         agents: {},
@@ -3218,6 +3117,7 @@ describe("Control V1 projection pump", () => {
       executors: {},
       now: () => now,
       controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         completeHostedRunControlV1: lifecycleProvider,
       } as never,
@@ -3245,6 +3145,7 @@ describe("Control V1 projection pump", () => {
 
   it("keeps delayed execution authority checks fail closed after close", async () => {
     const repository = {
+      projectTargetId: "target_1",
       provider: "github",
       owner: "acme",
       repo: "widget",
@@ -3347,7 +3248,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         repositories: [repository],
         agents: {},
@@ -3372,6 +3273,7 @@ describe("Control V1 projection pump", () => {
       executors: { reviewer: executor },
       now: () => now,
       controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
       } as never,
       governanceStore: { repo, close: closeStore },
@@ -3434,7 +3336,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         repositories: [],
         agents: {},
@@ -3459,6 +3361,7 @@ describe("Control V1 projection pump", () => {
       executors: {},
       now: () => now,
       controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         reportRunnerReadinessControlV1,
         claimHostedRunControlV1,
@@ -3488,151 +3391,9 @@ describe("Control V1 projection pump", () => {
     expect(executeClaimedRunImpl).not.toHaveBeenCalled();
   });
 
-  it("requires one-time redemption and never falls back to a GitHub refetch", async () => {
-    const repository = {
-      provider: "github",
-      owner: "acme",
-      repo: "widget",
-      checkoutPath: process.cwd(),
-      defaultExecutor: "reviewer",
-      baseBranch: "main",
-      pushRemote: "origin",
-      keepWorktree: "on_failure" as const,
-    };
-    const executor = {
-      id: "reviewer",
-      displayName: "Review Agent",
-      capability: { id: "reviewer", protocol: "acp" },
-      canRun: vi.fn(async () => ({ ready: true })),
-    } as never;
-    const context = {
-      schemaVersion: 1 as const,
-      protocolVersion: "1.0" as const,
-      contextKind: "runner_control" as const,
-      organizationId: "org_1",
-      runnerId: "runner_1",
-      credentialId: "credential_1",
-      registrationGeneration: 1,
-      credentialGeneration: 1,
-      capabilities: [
-        "relay.claim-fence.v1",
-        "relay.hosted-admission.v1",
-        "relay.hosted-claim.v1",
-        "relay.lifecycle.v1",
-        "relay.readiness.v1",
-        "relay.source-content-redeem.v1",
-      ] as const,
-      targets: [{
-        projectTargetId: "target_1",
-        bindingDigest: `sha256:${"a".repeat(64)}`,
-        provider: "github",
-        owner: "acme",
-        repo: "widget",
-        defaultExecutor: "reviewer",
-        defaultBranch: "main",
-      }],
-      observedAt: now.toISOString(),
-    };
-    const readiness = await buildRunnerReadinessReceipt({
-      context,
-      executors: { reviewer: executor },
-      repositories: [repository],
-      now: () => now,
-    });
-    const executorCapabilityDigest =
-      readiness.payload.executors[0]?.capabilityDigest;
-    expect(executorCapabilityDigest).toMatch(/^sha256:[0-9a-f]{64}$/u);
-    const refetchGitHubIssueCommentImpl = vi.fn();
-    const rejectHostedAttemptStartLocally = vi.fn(async () => ({
-      outcome: "requeued" as const,
-      operation: { state: "acknowledged" as const },
-    }));
-    const importHostedAssignedRun = vi.fn();
-    const executeClaimedRunImpl = vi.fn();
-    const closeStore = vi.fn();
-    const repo = {
-      ...emptyLifecycleRepository(),
-      getHostedAssignedRunForRecovery: vi.fn(async () => null),
-      getHostedClaimOperationForRetry: vi.fn(async () => null),
-      beginHostedClaimOperation: vi.fn(async ({ request }) => ({
-        outcome: "created" as const,
-        operation: {
-          operationId: request.operationId,
-          requestId: request.requestId,
-          request,
-          state: "pending" as const,
-        },
-      })),
-      persistHostedClaimAuthorityShell: vi.fn(async () => ({
-        outcome: "created" as const,
-      })),
-      rejectHostedAttemptStartLocally,
-      importHostedAssignedRun,
-      acknowledgeHostedClaimEmpty: vi.fn(async () => undefined),
-    } as never;
-    const rejectHostedAttemptStartControlV1 = vi.fn();
-    const client = {
-      getRunnerControlContextV1: vi.fn(async () => context),
-      reportRunnerReadinessControlV1: vi.fn(async (receipt) => ({
-        status: 201,
-        replayed: false,
-        outcome: "accepted",
-        receipt,
-      })),
-      claimHostedRunControlV1: vi.fn(async ({ request }) =>
-        validHostedClaim({
-          request,
-          executorCapabilityDigest: executorCapabilityDigest!,
-        })
-      ),
-      rejectHostedAttemptStartControlV1,
-    } as never;
-    const loop = createHostedControlLoop({
-      config: {
-        runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
-        runnerToken: "runtime_secret",
-        githubToken: "github_secret",
-        repositories: [repository],
-        agents: {},
-        controlRegistration: {
-          kind: "hosted_control_v1",
-          state: "paired",
-          operationId: "pair_1",
-          registration: {
-            schemaVersion: 1,
-            protocolVersion: "1.0",
-            organizationId: "org_1",
-            runnerId: "runner_1",
-            credentialId: "credential_1",
-            registrationGeneration: 1,
-            credentialGeneration: 1,
-            credentialPurpose: "runtime",
-            createdAt: now.toISOString(),
-          },
-        },
-      } as never,
-      databasePath: ":memory:",
-      executors: { reviewer: executor },
-      now: () => now,
-      controlClient: client,
-      governanceStore: { repo, close: closeStore },
-      executeClaimedRunImpl: executeClaimedRunImpl as never,
-      githubApiOrigin: "http://127.0.0.1:43123",
-      refetchGitHubIssueCommentImpl: refetchGitHubIssueCommentImpl as never,
-      closeDrainTimeoutMs: 1,
-    });
-    await expect(loop!.beforeIteration()).rejects.toThrow(
-      "hosted_source_content_redeem_unavailable",
-    );
-    expect(refetchGitHubIssueCommentImpl).not.toHaveBeenCalled();
-    expect(importHostedAssignedRun).not.toHaveBeenCalled();
-    expect(executeClaimedRunImpl).not.toHaveBeenCalled();
-    await loop!.close();
-  });
-
   it("does not journal rejection when close wins delayed reject request construction", async () => {
     const repository = {
+      projectTargetId: "target_1",
       provider: "github",
       owner: "acme",
       repo: "widget",
@@ -3722,7 +3483,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         githubToken: "github_secret",
         repositories: [repository],
@@ -3748,6 +3509,7 @@ describe("Control V1 projection pump", () => {
       executors: { reviewer: executor },
       now: () => now,
       controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         reportRunnerReadinessControlV1: vi.fn(async (receipt) => ({
           status: 201,
@@ -3765,9 +3527,6 @@ describe("Control V1 projection pump", () => {
       } as never,
       governanceStore: { repo, close: closeStore },
       executeClaimedRunImpl: executeClaimedRunImpl as never,
-      refetchGitHubIssueCommentImpl: vi.fn(async () => {
-        throw new Error("refetch failed");
-      }) as never,
       buildHostedLifecycleRequestImpl:
         buildHostedLifecycleRequestImpl as never,
       closeDrainTimeoutMs: 1,
@@ -3821,6 +3580,7 @@ describe("Control V1 projection pump", () => {
     const closeStore = vi.fn();
     const repo = {
       ...memoryProjectionRepository(),
+      getHostedProposalSettlementForRetry: vi.fn(async () => null),
       recoverExpiredHostedLifecycleOperations: vi.fn(async () => 0),
       claimDueHostedLifecycleOperations: vi.fn(async () => pending ? [pending] : []),
       acknowledgeHostedLifecycleOperation: acknowledge,
@@ -3860,6 +3620,7 @@ describe("Control V1 projection pump", () => {
       observedAt: now.toISOString(),
     };
     const client = {
+      claimNextPublicationOperationControlV1: vi.fn(async () => null),
       getRunnerControlContextV1: vi.fn(async () => context),
       reportRunnerReadinessControlV1: vi.fn(async (receipt) => ({
         status: 201,
@@ -3873,7 +3634,7 @@ describe("Control V1 projection pump", () => {
     const loop = createHostedControlLoop({
       config: {
         runnerId: "runner_1",
-        dispatcherUrl: "https://control.example",
+        relayUrl: "https://control.example",
         runnerToken: "runtime_secret",
         repositories: [],
         agents: {},
@@ -3932,28 +3693,11 @@ describe("Control V1 projection pump", () => {
     expect(acknowledge).not.toHaveBeenCalled();
   });
 
-  it("keeps the legacy daemon claim path when Control V1 is absent", async () => {
-    const abort = new AbortController();
-    const client = {
-      claim: vi.fn(async () => { abort.abort(); return null; }),
-    } as unknown as DaemonClient;
-    await serveDaemon({
-      mode: "legacy",
-      runnerId: "runner_legacy",
-      repositories: [],
-      executors: {},
-      pollIntervalMs: 1,
-      signal: abort.signal,
-      client,
-    });
-    expect(client.claim).toHaveBeenCalledTimes(1);
-  });
-
   it("rejects a hosted material receipt whose target differs from the pending permission", async () => {
     const lease = { attemptId: "attempt_target_mismatch", fencingToken: "fence_target_mismatch" };
     const targetFingerprint = `sha256:${"1".repeat(64)}`;
     const mismatchedTargetFingerprint = `sha256:${"2".repeat(64)}`;
-    const repository = { provider: "github", owner: "acme", repo: "widget",
+    const repository = { projectTargetId: "target_1", provider: "github", owner: "acme", repo: "widget",
       checkoutPath: process.cwd(), defaultExecutor: "reviewer", baseBranch: "main",
       pushRemote: "origin", keepWorktree: "on_failure" as const };
     const executor = { id: "reviewer", displayName: "Review Agent",
@@ -4053,7 +3797,7 @@ describe("Control V1 projection pump", () => {
       return true;
     });
     const loop = createHostedControlLoop({
-      config: { runnerId: "runner_1", dispatcherUrl: "https://control.example",
+      config: { runnerId: "runner_1", relayUrl: "https://control.example",
         runnerToken: "runtime_secret", repositories: [repository], agents: {},
         controlRegistration: { kind: "hosted_control_v1", state: "paired",
           operationId: "pair_1", registration: { schemaVersion: 1,
@@ -4063,6 +3807,7 @@ describe("Control V1 projection pump", () => {
             createdAt: now.toISOString() } } } as never,
       databasePath: ":memory:", executors: { reviewer: executor }, now: () => now,
       controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         requestActionPermissionControlV1: vi.fn(async (request) => ({
           status: 200 as const, replayed: false as const, outcome: "resolved" as const,
@@ -4110,7 +3855,7 @@ describe("Control V1 projection pump", () => {
       credentialId: "credential_1", registrationGeneration: 1, credentialGeneration: 1,
       capabilities: [] as string[], targets: [], observedAt: now.toISOString() };
     const loop = createHostedControlLoop({
-      config: { runnerId: "runner_1", dispatcherUrl: "https://control.example",
+      config: { runnerId: "runner_1", relayUrl: "https://control.example",
         runnerToken: "runtime_secret", repositories: [], agents: {},
         controlRegistration: { kind: "hosted_control_v1", state: "paired",
           operationId: "pair_1", registration: { schemaVersion: 1,
@@ -4119,7 +3864,9 @@ describe("Control V1 projection pump", () => {
             credentialGeneration: 1, credentialPurpose: "runtime",
             createdAt: now.toISOString() } } } as never,
       databasePath: ":memory:", executors: {}, now: () => now,
-      controlClient: { getRunnerControlContextV1: vi.fn(async () => context),
+      controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
+        getRunnerControlContextV1: vi.fn(async () => context),
         settleProposalCandidateControlV1: settle } as never,
       governanceStore: { repo, close: vi.fn() },
     });
@@ -4157,11 +3904,11 @@ describe("Control V1 projection pump", () => {
         bindingDigest: `sha256:${"f".repeat(64)}`, provider: "github",
         owner: "acme", repo: "widget", defaultExecutor: "reviewer",
         defaultBranch: "main" }] };
-    const repository = { provider: "github", owner: "acme", repo: "widget",
+    const repository = { projectTargetId: "target_publication", provider: "github", owner: "acme", repo: "widget",
       checkoutPath: process.cwd(), defaultExecutor: "reviewer", baseBranch: "main",
       pushRemote: "origin", keepWorktree: "on_failure" as const };
     const loop = createHostedControlLoop({
-      config: { runnerId: "runner_publication", dispatcherUrl: "https://control.example",
+      config: { runnerId: "runner_publication", relayUrl: "https://control.example",
         runnerToken: "runtime_secret", repositories: [repository], agents: {},
         controlRegistration: { kind: "hosted_control_v1", state: "paired",
           operationId: "pair_publication", registration: { schemaVersion: 1,
@@ -4170,7 +3917,9 @@ describe("Control V1 projection pump", () => {
             registrationGeneration: 1, credentialGeneration: 2,
             credentialPurpose: "runtime", createdAt: now.toISOString() } } } as never,
       databasePath: ":memory:", executors: {}, now: () => now,
-      controlClient: { getRunnerControlContextV1: vi.fn(async () => context),
+      controlClient: {
+        claimNextPublicationOperationControlV1: vi.fn(async () => null),
+        getRunnerControlContextV1: vi.fn(async () => context),
         settleProposalCandidateControlV1: settle,
         attestPublicationBranchOwnershipControlV1: attest } as never,
       governanceStore: { repo, close: vi.fn() },

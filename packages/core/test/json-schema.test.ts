@@ -98,17 +98,6 @@ describe("OpenTagJsonSchemas", () => {
     expect(OpenTagJsonSchemas.RunnerDirectoryEntry).toHaveProperty("definitions.RunnerDirectoryEntry");
     expect(OpenTagJsonSchemas.RoutingDecision).toHaveProperty("definitions.RoutingDecision");
     expect(OpenTagJsonSchemas.AcceptedProgressMetrics).toHaveProperty("definitions.AcceptedProgressMetrics");
-    expect(OpenTagJsonSchemas.FactoryRecipeSnapshotInput).toHaveProperty("definitions.FactoryRecipeSnapshotInput");
-    expect(OpenTagJsonSchemas.FactoryRecipeSnapshot).toHaveProperty("definitions.FactoryRecipeSnapshot");
-    expect(OpenTagJsonSchemas.WorkstreamContinuationPolicy).toHaveProperty("definitions.WorkstreamContinuationPolicy");
-    expect(OpenTagJsonSchemas.WorkstreamContinuationDecisionInput).toHaveProperty("definitions.WorkstreamContinuationDecisionInput");
-    expect(OpenTagJsonSchemas.WorkstreamContinuationDecision).toHaveProperty("definitions.WorkstreamContinuationDecision");
-    expect(OpenTagJsonSchemas.WorkstreamInput).toHaveProperty("definitions.WorkstreamInput");
-    expect(OpenTagJsonSchemas.Workstream).toHaveProperty("definitions.Workstream");
-    expect(OpenTagJsonSchemas.WorkstreamAdmissionBatchInput).toHaveProperty("definitions.WorkstreamAdmissionBatchInput");
-    expect(OpenTagJsonSchemas.WorkstreamAdmissionBatchReceipt).toHaveProperty("definitions.WorkstreamAdmissionBatchReceipt");
-    expect(OpenTagJsonSchemas.WorkstreamMetrics).toHaveProperty("definitions.WorkstreamMetrics");
-    expect(OpenTagJsonSchemas.WorkstreamEvaluation).toHaveProperty("definitions.WorkstreamEvaluation");
   });
 
   it("emits draft-07 documents with resolvable local references", () => {

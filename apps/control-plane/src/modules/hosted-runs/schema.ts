@@ -153,7 +153,7 @@ export const hostedAttempts = pgTable(
       sql`${table.state} IN ('claimed', 'running', 'needs_approval', 'succeeded', 'failed', 'rejected', 'cancelled', 'interrupted', 'timed_out', 'expired')`,
     ),
     check("cp_hosted_attempt_material_start_state_check",
-      sql`${table.materialStartState} IN ('open','proven_not_started','started_or_ambiguous')`),
+      sql`${table.materialStartState} IN ('open','started_or_ambiguous')`),
     check("cp_hosted_attempt_workspace_attestation_content_free_check", sql`(
       ${table.workspaceAttestation} IS NULL OR (
         jsonb_typeof(${table.workspaceAttestation}) = 'object'
@@ -194,7 +194,6 @@ export const hostedClaims = pgTable(
     organizationId: text("organization_id").notNull(),
     operationId: text("operation_id").notNull(),
     requestDigest: text("request_digest").notNull(),
-    claimVersion: integer("claim_version").notNull().default(1),
     runId: text("run_id").notNull(),
     claim: jsonb("claim").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
@@ -205,7 +204,6 @@ export const hostedClaims = pgTable(
       columns: [table.organizationId, table.runId],
       foreignColumns: [hostedRuns.organizationId, hostedRuns.runId],
     }),
-    check("cp_hosted_claim_version_check", sql`${table.claimVersion} IN (1, 2)`),
   ],
 );
 
@@ -438,33 +436,6 @@ export const materialActionCurrent = pgTable(
       "cp_material_action_current_outcome_check",
       sql`${table.outcome} IN ('succeeded', 'failed', 'outcome_unknown')`,
     ),
-  ],
-);
-
-export const materialActionNonStartProofs = pgTable(
-  "cp_material_action_non_start_proof",
-  {
-    organizationId: text("organization_id").notNull(),
-    runId: text("run_id").notNull(),
-    attemptId: text("attempt_id").notNull(),
-    attemptNumber: integer("attempt_number").notNull(),
-    fencingTokenDigest: text("fencing_token_digest").notNull(),
-    proofId: text("proof_id").notNull(),
-    proofDigest: text("proof_digest").notNull(),
-    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
-  },
-  (table) => [
-    primaryKey({ name: "cp_material_action_non_start_proof_pkey",
-      columns: [table.organizationId, table.runId, table.attemptId] }),
-    unique("cp_material_action_non_start_proof_organization_id_proof_id_key")
-      .on(table.organizationId, table.proofId),
-    foreignKey({
-      columns: [table.organizationId, table.runId, table.attemptNumber],
-      foreignColumns: [hostedAttempts.organizationId, hostedAttempts.runId,
-        hostedAttempts.attemptNumber],
-    }),
-    check("cp_material_action_non_start_proof_attempt_number_check",
-      sql`${table.attemptNumber} > 0`),
   ],
 );
 

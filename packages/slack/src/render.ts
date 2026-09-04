@@ -220,7 +220,7 @@ function markdownToSlackActionDetail(text: string): string {
 
 export function renderSlackAcknowledgement(runId: string): string {
   void runId;
-  return "Working on it.";
+  return "Request received. I’ll update this thread when the paired Runner starts.";
 }
 
 function slackRunStatusTitle(state: OpenTagRunStatusPresentation["state"]): string {
@@ -654,7 +654,7 @@ function createSlackActionReceiptBlockSet(input: {
   }
 
   if (input.auditRunId) {
-    blocks.push(slackContext(markdownToSlackMrkdwn(`Audit: \`opentag status --run ${input.auditRunId}\``)));
+    blocks.push(slackContext(markdownToSlackMrkdwn(`Audit run: \`${input.auditRunId}\``)));
   }
 
   return blocks;
@@ -696,7 +696,7 @@ function createSlackCompactActionReceiptBlockSet(input: {
 export function renderSlackActionReceiptPresentation(presentation: OpenTagActionReceiptPresentation): string {
   const lines = renderActionReceiptMarkdownLines({ title: presentation.title, actions: presentation.actions });
   if (presentation.auditRunId) {
-    lines.push("", markdownToSlackMrkdwn(`Audit: \`opentag status --run ${presentation.auditRunId}\``));
+    lines.push("", markdownToSlackMrkdwn(`Audit run: \`${presentation.auditRunId}\``));
   }
   return lines.join("\n");
 }
@@ -748,7 +748,7 @@ export function renderSlackFinalSummaryPresentation(presentation: OpenTagFinalSu
     lines.push("", ...suggestedActions);
   }
   if (presentation.auditRunId) {
-    lines.push("", markdownToSlackMrkdwn(`Audit: \`opentag status --run ${presentation.auditRunId}\``));
+    lines.push("", markdownToSlackMrkdwn(`Audit run: \`${presentation.auditRunId}\``));
   }
 
   return lines.join("\n");
@@ -828,7 +828,7 @@ export function createSlackFinalSummaryBlocks(presentation: OpenTagFinalSummaryP
       elements: [
         {
           type: "mrkdwn",
-          text: markdownToSlackMrkdwn(`Audit: \`opentag status --run ${presentation.auditRunId}\``)
+          text: markdownToSlackMrkdwn(`Audit run: \`${presentation.auditRunId}\``)
         }
       ]
     });

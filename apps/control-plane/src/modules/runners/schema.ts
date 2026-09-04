@@ -30,6 +30,7 @@ export const runners = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.organizationId, table.runnerId] }),
+    unique("cp_runner_organization_id_key").on(table.organizationId),
     unique("cp_runner_organization_id_current_credential_id_key").on(
       table.organizationId,
       table.currentCredentialId,
@@ -141,7 +142,6 @@ export const projectTargets = pgTable(
     repo: text("repo").notNull(),
     defaultExecutor: text("default_executor").notNull(),
     defaultBranch: text("default_branch"),
-    version: integer("version").notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
   (table) => [
@@ -150,6 +150,5 @@ export const projectTargets = pgTable(
       columns: [table.organizationId, table.runnerId],
       foreignColumns: [runners.organizationId, runners.runnerId],
     }),
-    check("cp_project_target_version_check", sql`${table.version} > 0`),
   ],
 );

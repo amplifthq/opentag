@@ -33,6 +33,28 @@ a { color: inherit; }
 .metric { min-height: 150px; display: flex; flex-direction: column; justify-content: space-between; padding: 22px; border: 1px solid #d8dfd5; border-radius: 16px; background: #fff; box-shadow: 0 16px 50px rgba(34, 52, 39, .06); }
 .metric span { color: #68776c; font-size: 13px; }
 .metric strong { color: #1c4228; font-size: 44px; }
+.presence-summary { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; padding: 15px 17px; border: 1px solid #d3dcd2; border-radius: 13px; background: #fff; }
+.presence-summary p { margin: 0; color: #4d5d52; line-height: 1.5; }
+.presence-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.presence-card { padding: 22px; border: 1px solid #d8dfd5; border-radius: 16px; background: #fff; box-shadow: 0 16px 50px rgba(34, 52, 39, .06); }
+.presence-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.presence-name { margin: 0 0 7px; color: #1c4228; font-size: 18px; font-weight: 750; }
+.presence-reason { min-height: 44px; margin: 18px 0; color: #536259; line-height: 1.55; }
+.presence-card dl { display: grid; gap: 0; margin: 0; }
+.presence-card dl div { display: grid; grid-template-columns: 110px 1fr; gap: 12px; padding: 10px 0; border-top: 1px solid #edf0eb; }
+.presence-card dt { color: #748078; font-size: 12px; }
+.presence-card dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #2e4034; font-size: 13px; font-weight: 650; }
+.presence-badge { display: inline-flex; align-items: center; min-height: 28px; padding: 5px 9px; border: 1px solid transparent; border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: .04em; white-space: nowrap; }
+.presence-available { border-color: #a8cfb1; color: #1f6932; background: #eff9f1; }
+.presence-working { border-color: #9cbfe8; color: #215a94; background: #f0f6fd; }
+.presence-queued { border-color: #d9c386; color: #725817; background: #fff9e9; }
+.presence-needs_attention { border-color: #e0a59c; color: #8a3327; background: #fff2f0; }
+.presence-offline { border-color: #c6cbc7; color: #59615b; background: #f4f5f4; }
+.presence-setup_required { border-color: #d9bc91; color: #76501d; background: #fff7eb; }
+.presence-empty { padding: 28px; border: 1px dashed #b9c7ba; border-radius: 16px; background: rgba(255, 255, 255, .72); }
+.presence-empty h2 { margin-top: 0; }
+.presence-empty p { max-width: 680px; color: #5c6b61; line-height: 1.6; }
+.system-metrics-title { margin-top: 48px !important; color: #657269; font-size: 14px !important; letter-spacing: .08em; text-transform: uppercase; }
 .notice { padding: 18px 20px; border: 1px solid #ced9cf; border-radius: 12px; color: #516258; background: #fafcf8; }
 .notice-error { border-color: #e2b9b2; color: #85372c; background: #fff7f5; }
 .table-wrap { overflow-x: auto; border: 1px solid #d8dfd5; border-radius: 15px; background: #fff; }
@@ -56,8 +78,6 @@ input:focus { border-color: #4f815d; box-shadow: 0 0 0 3px rgba(79, 129, 93, .14
 .text-link { color: #346d44; font-size: 13px; font-weight: 650; }
 .text-button { padding: 0; border: 0; color: #8b3b30; background: transparent; font-weight: 700; cursor: pointer; }
 .inline-form { display: grid; grid-template-columns: minmax(220px, 420px) max-content; align-items: end; margin: 0 0 22px; }
-.binding-form { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); align-items: end; margin: 0 0 22px; padding: 20px; border: 1px solid #d8dfd5; border-radius: 15px; background: #fff; }
-.form-span { grid-column: 1 / -1; overflow-wrap: anywhere; }
 .page h2 { margin: 34px 0 14px; font-size: 17px; }
 .details { display: grid; max-width: 720px; border: 1px solid #d8dfd5; border-radius: 15px; background: #fff; }
 .details div { display: grid; grid-template-columns: 160px 1fr; padding: 17px 20px; border-bottom: 1px solid #edf0eb; }
@@ -75,5 +95,6 @@ input:focus { border-color: #4f815d; box-shadow: 0 0 0 3px rgba(79, 129, 93, .14
   .operator-card { margin-top: 0; }
   .workspace { padding: 34px 18px; }
   .auth-card { padding: 28px; }
-  .binding-form, .inline-form { grid-template-columns: 1fr; }
+  .inline-form { grid-template-columns: 1fr; }
+  .presence-card dl div { grid-template-columns: 1fr; gap: 4px; }
 }

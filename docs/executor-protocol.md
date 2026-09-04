@@ -13,5 +13,5 @@ Use these documents instead:
 
 - [ACP agent integration](./acp-agent-integration.md) for an implementer guide;
 - [Integration taxonomy](./integration-taxonomy.md) for Agent and Channel roles;
-- [ACP-first runtime design](./acp-first-agent-runtime-design.md) for the full
-  architecture and security boundaries.
+- [Control Plane runtime architecture](./control-plane-runtime-architecture.md)
+  for execution authority and security boundaries.

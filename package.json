@@ -16,21 +16,18 @@
     "release:check": "node scripts/release/check-cli-package.mjs",
     "release:publish": "node scripts/release/publish-local.mjs",
     "opentag-dev": "node scripts/dev/install-opentag-dev.mjs",
-    "smoke:governance": "node scripts/test/governance-matrix.mjs",
     "e2e:control-plane": "node scripts/test/control-plane-browser-e2e.mjs",
-    "smoke:factory-conformance": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/factory-conformance.ts",
-    "smoke:acp-conformance": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/builtin-acp-conformance.ts",
+    "smoke:acp-conformance": "OPENTAG_RUN_BUILTIN_ACP_CONFORMANCE=1 vitest run packages/runner/test/builtin-acp-live-smoke.test.ts",
     "smoke:live": "node scripts/test/live-e2e-smoke.mjs",
-    "smoke:openclaw-acp-conformance": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/openclaw-acp-conformance.ts",
+    "smoke:openclaw-acp-conformance": "OPENTAG_RUN_OPENCLAW_ACP_CONFORMANCE=1 vitest run packages/runner/test/openclaw-acp-live-smoke.test.ts",
     "smoke:privacy": "node scripts/test/privacy-redaction-scan.mjs",
     "smoke:control-plane-compose:typecheck": "tsc -p scripts/test/tsconfig.control-plane-compose-smoke.json",
-    "smoke:protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/protocol-runtime-smoke.ts",
-    "smoke:slack-protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/slack-protocol-runtime-smoke.ts",
-    "verify:delivery-fixtures": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/verify-delivery-fixture-corpus.ts ../../packages/delivery-contract/fixtures/relay.delivery-observation.v2"
+    "verify:delivery-fixtures": "vitest run packages/delivery-contract/test/corpus-verifier.test.ts packages/delivery-contract/test/canonical-fixtures.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.4.3",
     "vitest": "^4.1.10"
