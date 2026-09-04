@@ -291,14 +291,6 @@ export const controlPlaneProjectionOutbox = sqliteTable("control_plane_projectio
 }));
 
 const PAIRED_RUNNER_SCHEMA_VERSION = 1;
-const PAIRED_RUNNER_SCHEMA_MIGRATIONS = [
-  "2026-08-08-control-plane-projection-outbox-v1",
-  "2026-08-10-hosted-attempt-import-v1",
-  "2026-08-10-hosted-claim-authority-shell-v1",
-  "2026-08-10-hosted-execution-start-v1",
-  "2026-08-10-hosted-lifecycle-operation-v1",
-  "2026-08-10-hosted-run-import-v1",
-] as const;
 
 const PAIRED_RUNNER_SCHEMA_SQL = `
 CREATE TABLE attempts (
@@ -466,11 +458,6 @@ CREATE TABLE opentag_paired_runner_schema (
         initialized_at TEXT NOT NULL,
         CHECK ((state = 'initializing' AND fingerprint IS NULL)
           OR (state = 'ready' AND fingerprint IS NOT NULL))
-      );
-
-CREATE TABLE opentag_schema_migrations (
-        id TEXT PRIMARY KEY,
-        applied_at TEXT NOT NULL
       );
 
 CREATE TABLE run_events (
@@ -911,15 +898,6 @@ function validatePairedRunnerSchema(sqlite: Database.Database): void {
   ) {
     throw new Error("paired_runner_schema_incompatible");
   }
-  const migrationIds = (sqlite.prepare(
-    "SELECT id FROM opentag_schema_migrations ORDER BY id",
-  ).all() as Array<{ id: string }>).map(({ id }) => id);
-  if (
-    JSON.stringify(migrationIds)
-      !== JSON.stringify([...PAIRED_RUNNER_SCHEMA_MIGRATIONS].sort())
-  ) {
-    throw new Error("paired_runner_schema_incompatible");
-  }
 }
 
 /**
@@ -947,12 +925,6 @@ export function migratePairedRunnerSchema(sqlite: Database.Database): void {
   sqlite.transaction(() => {
     sqlite.exec(PAIRED_RUNNER_SCHEMA_SQL);
     const initializedAt = new Date().toISOString();
-    const insertMigration = sqlite.prepare(
-      "INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)",
-    );
-    for (const migrationId of PAIRED_RUNNER_SCHEMA_MIGRATIONS) {
-      insertMigration.run(migrationId, initializedAt);
-    }
     sqlite.prepare(`
       INSERT INTO opentag_paired_runner_schema(
         singleton, version, state, fingerprint, initialized_at

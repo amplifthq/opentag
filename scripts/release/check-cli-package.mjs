@@ -236,7 +236,7 @@ function checkInstalledSqliteRuntime(installDir) {
       const expected = [
         "attempts", "control_plane_projection_outbox", "hosted_attempt_imports",
         "hosted_claim_operations", "hosted_lifecycle_operations", "hosted_run_imports",
-        "opentag_paired_runner_schema", "opentag_schema_migrations", "run_events",
+        "opentag_paired_runner_schema", "run_events",
         "runs", "source_deliveries", "work_threads"
       ];
       if (JSON.stringify(tables) !== JSON.stringify(expected)) {
