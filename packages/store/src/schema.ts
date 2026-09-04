@@ -639,6 +639,34 @@ CREATE UNIQUE INDEX work_threads_scope_canonical_key_idx
 
 CREATE TRIGGER control_plane_projection_outbox_delete_guard
       BEFORE DELETE ON control_plane_projection_outbox
+      WHEN (
+        OLD.receipt_kind = 'runner_readiness'
+        AND OLD.state = 'acknowledged'
+        AND EXISTS (
+          SELECT 1
+          FROM control_plane_projection_outbox newer
+          WHERE newer.destination_id = OLD.destination_id
+            AND newer.organization_id = OLD.organization_id
+            AND newer.runner_id = OLD.runner_id
+            AND newer.receipt_kind = OLD.receipt_kind
+            AND newer.state = 'acknowledged'
+            AND (
+              json_extract(newer.envelope_json, '$.payload.observedAt')
+                > json_extract(OLD.envelope_json, '$.payload.observedAt')
+              OR (
+                json_extract(newer.envelope_json, '$.payload.observedAt')
+                  = json_extract(OLD.envelope_json, '$.payload.observedAt')
+                AND newer.created_at > OLD.created_at
+              )
+              OR (
+                json_extract(newer.envelope_json, '$.payload.observedAt')
+                  = json_extract(OLD.envelope_json, '$.payload.observedAt')
+                AND newer.created_at = OLD.created_at
+                AND newer.receipt_id > OLD.receipt_id
+              )
+            )
+        )
+      ) IS NOT TRUE
       BEGIN
         SELECT RAISE(ABORT, 'control_plane_projection_outbox_delete_forbidden');
       END;

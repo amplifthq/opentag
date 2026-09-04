@@ -242,6 +242,15 @@ function checkInstalledSqliteRuntime(installDir) {
       if (JSON.stringify(tables) !== JSON.stringify(expected)) {
         throw new Error("Packed SQLite runtime created an unexpected paired schema: " + JSON.stringify(tables));
       }
+      const readinessRetentionGuard = sqlite.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'control_plane_projection_outbox_delete_guard'"
+      ).get();
+      if (
+        !readinessRetentionGuard?.sql?.includes("OLD.state = 'acknowledged'")
+        || !readinessRetentionGuard.sql.includes("newer.state = 'acknowledged'")
+      ) {
+        throw new Error("Packed SQLite runtime is missing the bounded readiness-retention guard.");
+      }
     } finally {
       sqlite.close();
     }

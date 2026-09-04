@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { AgentAccessProfileSnapshotSchema, AttemptSchema, ActionHintSchema, canonicalJsonStringify, computeControlPayloadDigestV1, computeHostedLifecycleRequestDigestV1, computeHostedLifecycleRequestIdV1, computeHostedLifecycleOperationIdV1, computeHostedLifecycleReceiptIdV1, computeHostedClaimFencingTokenDigestV1, ContextPacketSchema, conversationKeyFromEvent, defaultRunEventMetadata, OpenTagEventSchema, OpenTagRunResultSchema, PolicySnapshotProvenanceSchema, containsCredentialLikeData, isCredentialFieldName, sanitizeCredentialLikeValue, projectTargetRefFromEvent, protocolRunFieldsFromEvent, RunnerReadinessReceiptEnvelopeV1Schema, HostedClaimRequestV1Schema, HostedClaimV1Schema, HostedHeartbeatRequestV1Schema, HostedProgressRequestV1Schema, HostedRejectStartRequestV1Schema, HostedRunningRequestV1Schema, HostedCompleteRequestV1Schema, HostedLifecycleRequestV1Schema, HostedLifecycleReceiptEnvelopeV1Schema, WorkThreadSchema, verifyHostedAdmissionEnvelopeDigestV1, verifyHostedClaimFencingTokenDigestV1, verifyHostedLifecycleReceiptV1, type HostedClaimRequestV1, type HostedClaimV1, type HostedCompleteRequestV1, type HostedHeartbeatRequestV1, type HostedProgressRequestV1, type HostedRejectStartRequestV1, type HostedRunningRequestV1, type HostedLifecycleActionV1, type HostedLifecycleRequestV1, type HostedLifecycleReceiptEnvelopeV1, type OpenTagEvent, type OpenTagRun, type OpenTagRunResult, type RunEventImportance, type RunEventVisibility, type RunnerReadinessReceiptEnvelopeV1, type WorkThread } from "@opentag/core";
 
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, notExists, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, ne, notExists, or, sql } from "drizzle-orm";
 
 import { alias } from "drizzle-orm/sqlite-core";
 
@@ -1484,7 +1484,35 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 if (updated.changes !== 1)
                     return { outcome: "stale_lease" as const };
                 const acknowledged = tx.select().from(controlPlaneProjectionOutbox).where(and(eq(controlPlaneProjectionOutbox.destinationId, destinationId), eq(controlPlaneProjectionOutbox.organizationId, organizationId), eq(controlPlaneProjectionOutbox.receiptId, input.receiptId))).limit(1).get();
-                return { outcome: "acknowledged" as const, entry: projectionOutboxEntryFromRow(acknowledged!) };
+                if (!acknowledged)
+                    throw new Error("control_plane_projection_outbox_acknowledgement_lost");
+                const entry = projectionOutboxEntryFromRow(acknowledged);
+                const acknowledgedScope = and(
+                    eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+                    eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+                    eq(controlPlaneProjectionOutbox.runnerId, acknowledged.runnerId),
+                    eq(controlPlaneProjectionOutbox.receiptKind, "runner_readiness"),
+                    eq(controlPlaneProjectionOutbox.state, "acknowledged")
+                );
+                const current = tx.select({
+                    receiptId: controlPlaneProjectionOutbox.receiptId
+                }).from(controlPlaneProjectionOutbox).where(acknowledgedScope).orderBy(
+                    desc(sql<string> `json_extract(${controlPlaneProjectionOutbox.envelopeJson}, '$.payload.observedAt')`),
+                    desc(controlPlaneProjectionOutbox.createdAt),
+                    desc(controlPlaneProjectionOutbox.receiptId)
+                ).limit(1).get();
+                if (!current)
+                    throw new Error("control_plane_projection_outbox_retention_current_missing");
+                tx.delete(controlPlaneProjectionOutbox).where(and(
+                    acknowledgedScope,
+                    ne(controlPlaneProjectionOutbox.receiptId, current.receiptId)
+                )).run();
+                const retained = tx.select({
+                    receiptId: controlPlaneProjectionOutbox.receiptId
+                }).from(controlPlaneProjectionOutbox).where(acknowledgedScope).all();
+                if (retained.length !== 1 || retained[0]?.receiptId !== current.receiptId)
+                    throw new Error("control_plane_projection_outbox_retention_failed");
+                return { outcome: "acknowledged" as const, entry };
             }, { behavior: "immediate" });
         },
         async retryControlPlaneProjection(input: {
