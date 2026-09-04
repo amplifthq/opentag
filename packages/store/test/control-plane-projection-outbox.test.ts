@@ -150,7 +150,6 @@ describe("runner readiness outbox", () => {
             "hosted_lifecycle_operations",
             "hosted_run_imports",
             "opentag_paired_runner_schema",
-            "run_events",
             "runs",
             "source_deliveries",
             "work_threads",

@@ -200,22 +200,6 @@ export const hostedLifecycleOperations = sqliteTable("hosted_lifecycle_operation
     attemptIdx: index("hosted_lifecycle_operations_attempt_idx").on(table.runId, table.attemptId, table.state)
 }));
 
-export const runEvents = sqliteTable("run_events", {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    runId: text("run_id").notNull(),
-    type: text("type").notNull(),
-    visibility: text("visibility").notNull().default("audit"),
-    importance: text("importance").notNull().default("normal"),
-    message: text("message"),
-    payloadJson: text("payload_json").notNull(),
-    progressIdempotencyDigest: text("progress_idempotency_digest"),
-    createdAt: text("created_at").notNull()
-}, (table) => ({
-    runIdx: index("run_events_run_idx").on(table.runId),
-    routingLatestIdx: index("run_events_routing_latest_idx").on(table.runId, table.type, table.id),
-    progressIdempotencyIdx: uniqueIndex("run_events_progress_idempotency_idx").on(table.runId, table.progressIdempotencyDigest)
-}));
-
 export const sourceDeliveries = sqliteTable("source_deliveries", {
     source: text("source").notNull(),
     deliveryId: text("delivery_id").notNull(),
@@ -460,18 +444,6 @@ CREATE TABLE opentag_paired_runner_schema (
           OR (state = 'ready' AND fingerprint IS NOT NULL))
       );
 
-CREATE TABLE run_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id TEXT NOT NULL,
-        type TEXT NOT NULL,
-        visibility TEXT NOT NULL DEFAULT 'audit',
-        importance TEXT NOT NULL DEFAULT 'normal',
-        message TEXT,
-        payload_json TEXT NOT NULL,
-        progress_idempotency_digest TEXT,
-        created_at TEXT NOT NULL
-      );
-
 CREATE TABLE runs (
         id TEXT PRIMARY KEY,
         event_id TEXT NOT NULL UNIQUE,
@@ -605,13 +577,6 @@ CREATE UNIQUE INDEX hosted_run_imports_source_idx
 
 CREATE INDEX hosted_run_imports_work_thread_idx
         ON hosted_run_imports(work_thread_id);
-
-CREATE UNIQUE INDEX run_events_progress_idempotency_idx
-        ON run_events(run_id, progress_idempotency_digest);
-
-CREATE INDEX run_events_routing_latest_idx ON run_events(run_id, type, id);
-
-CREATE INDEX run_events_run_idx ON run_events(run_id);
 
 CREATE INDEX runs_claim_queue_idx ON runs(status, created_at, id);
 

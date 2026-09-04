@@ -1027,7 +1027,6 @@ describe("hosted assigned Run import", () => {
                     .run(value.claim.runId),
                 probe: async (repo: ReturnType<typeof createPairedRunnerRepository>, value: Awaited<ReturnType<typeof fixture>>) => expect(repo.recordHostedProgressLocally({ ...heartbeatAuthority, runId: value.claim.runId,
                     attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
-                    message: "content-free", idempotencyKey: "progress-authority-loss",
                     request: await progressRequest(value.claim) }))
                     .rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT"),
             },
@@ -1467,7 +1466,6 @@ describe("hosted assigned Run import", () => {
             attemptId: value.claim.attempt.id,
             fencingToken: value.claim.attempt.fencingToken,
             executorId: value.claim.executorId,
-            reason: "source redemption failed",
             request: rejectRequest
         };
         sqlite.exec(`CREATE TRIGGER reject_preimport_lifecycle_insert
@@ -1598,7 +1596,6 @@ describe("hosted assigned Run import", () => {
             attemptId: value.claim.attempt.id,
             fencingToken: value.claim.attempt.fencingToken,
             executorId: value.claim.executorId,
-            reason: "executor start failed",
             request: rejectRequest
         });
         const [leasedReject] = await repo.claimDueHostedLifecycleOperations({
@@ -2235,18 +2232,28 @@ describe("hosted heartbeat lease authority", () => {
             fencingToken: value.claim.attempt.fencingToken,
         })).resolves.toEqual({ leaseExpiresAt: acceptedLease });
         const request = await progressRequest(value.claim, progressAt.toISOString());
-        await second.recordHostedProgressLocally({
+        const progressInput = {
             ...heartbeatAuthority,
             runId: value.claim.runId,
             attemptId: value.claim.attempt.id,
             fencingToken: value.claim.attempt.fencingToken,
-            message: "bounded progress",
-            at: progressAt.toISOString(),
-            idempotencyKey: "bounded-progress-after-restart",
             request,
+        };
+        await expect(second.recordHostedProgressLocally(progressInput)).resolves.toMatchObject({
+            outcome: "recorded",
+            operation: { action: "progress", state: "pending", sequence: 130 },
         });
-        const operation = await claimLifecycleOperation(second, request.operationId, progressAt);
-        await expect(second.acknowledgeHostedLifecycleOperation({
+        secondSqlite.close();
+
+        const thirdSqlite = new Database(path);
+        migratePairedRunnerSchema(thirdSqlite);
+        const third = createPairedRunnerRepository(drizzle(thirdSqlite));
+        await expect(third.recordHostedProgressLocally(progressInput)).resolves.toMatchObject({
+            outcome: "duplicate",
+            operation: { operationId: request.operationId, state: "pending", sequence: 130 },
+        });
+        const operation = await claimLifecycleOperation(third, request.operationId, progressAt);
+        await expect(third.acknowledgeHostedLifecycleOperation({
             destinationId: "cloud-1",
             organizationId: value.claim.organizationId,
             operationId: request.operationId,
@@ -2254,7 +2261,7 @@ describe("hosted heartbeat lease authority", () => {
             receipt: await progressReceipt({ claim: value.claim, request }),
             now: progressAt,
         })).resolves.toBe("acknowledged");
-        expect(secondSqlite.prepare(`
+        expect(thirdSqlite.prepare(`
       SELECT action, state, sequence
       FROM hosted_lifecycle_operations
       ORDER BY sequence
@@ -2262,25 +2269,26 @@ describe("hosted heartbeat lease authority", () => {
             { action: "running", state: "acknowledged", sequence: 1 },
             { action: "progress", state: "acknowledged", sequence: 130 },
         ]);
+        await expect(third.recordHostedProgressLocally(progressInput)).resolves.toMatchObject({
+            outcome: "duplicate",
+            operation: { operationId: request.operationId, state: "acknowledged", sequence: 130 },
+        });
         const heartbeatAfterProgressAt = new Date(initialNow.getTime() + 130_000);
         const latestHeartbeat = await acknowledgeHeartbeat({
-            repo: second,
+            repo: third,
             claim: value.claim,
             expectedLeaseExpiresAt: acceptedLease,
             acceptedLeaseExpiresAt: new Date(Date.parse(acceptedLease) + 60_000).toISOString(),
             now: heartbeatAfterProgressAt,
         });
-        await expect(second.recordHostedProgressLocally({
+        await expect(third.recordHostedProgressLocally({
             ...heartbeatAuthority,
             runId: value.claim.runId,
             attemptId: value.claim.attempt.id,
             fencingToken: value.claim.attempt.fencingToken,
-            message: "replayed pruned progress",
-            at: request.occurredAt,
-            idempotencyKey: "different-key-cannot-revive-pruned-progress",
             request,
         })).rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_OPERATION_CONFLICT" });
-        expect(secondSqlite.prepare(`
+        expect(thirdSqlite.prepare(`
       SELECT action, state, sequence
       FROM hosted_lifecycle_operations
       ORDER BY sequence
@@ -2288,14 +2296,10 @@ describe("hosted heartbeat lease authority", () => {
             { action: "running", state: "acknowledged", sequence: 1 },
             { action: "heartbeat", state: "acknowledged", sequence: 131 },
         ]);
-        expect(secondSqlite.prepare(`
-      SELECT COUNT(*) AS count FROM run_events
-      WHERE type = 'run.progress'
-    `).get()).toEqual({ count: 1 });
-        expect(() => secondSqlite.prepare(`
+        expect(() => thirdSqlite.prepare(`
       DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
     `).run(latestHeartbeat.request.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
-        secondSqlite.close();
+        thirdSqlite.close();
     });
     it("rolls successor acknowledgement and retention back together, then replays after restart", async () => {
         vi.useFakeTimers();
@@ -2431,9 +2435,6 @@ describe("hosted heartbeat lease authority", () => {
             runId: value.claim.runId,
             attemptId: value.claim.attempt.id,
             fencingToken: value.claim.attempt.fencingToken,
-            message: "attention progress",
-            at: progressAt.toISOString(),
-            idempotencyKey: "attention-progress",
             request,
         });
         const progress = await claimLifecycleOperation(repo, request.operationId, progressAt);

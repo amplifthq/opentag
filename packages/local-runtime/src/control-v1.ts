@@ -1410,9 +1410,7 @@ async function createHostedExecutionClient(input: {
         runId,
         executor,
         ...lease,
-        ...(options?.executorCapability ? { executorCapability: options.executorCapability } : {}),
         ...(options?.runTimeoutMs ? { runTimeoutMs: options.runTimeoutMs } : {}),
-        ...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
         request,
       };
       const local = await repo.markHostedRunRunningLocally(localInput);
@@ -1436,7 +1434,7 @@ async function createHostedExecutionClient(input: {
       if (!acquired) throw new Error("hosted_execution_start_not_acquired");
       executionStarted = true;
     },
-    async rejectAttemptStart(runId, executorId, reason, lease) {
+    async rejectAttemptStart(runId, executorId, _reason, lease) {
       assertNotCancelled();
       const request = HostedRejectStartRequestV1Schema.parse(
         await buildLifecycleRequest({
@@ -1458,7 +1456,6 @@ async function createHostedExecutionClient(input: {
         runnerId: authority.runnerId,
         runId,
         executorId,
-        reason,
         ...lease,
         request,
       });
@@ -1551,12 +1548,6 @@ async function createHostedExecutionClient(input: {
         runnerId: authority.runnerId,
         runId,
         ...lease,
-        type: "progress",
-        at: progress.at,
-        visibility: "human",
-        importance: "normal",
-        message: progress.message,
-        idempotencyKey: request.progressId,
         request,
       });
       assertNotCancelled();
@@ -1586,7 +1577,6 @@ async function createHostedExecutionClient(input: {
           runnerId: authority.runnerId,
           runId,
           executorId: authority.executorId,
-          reason: result.summary,
           ...lease,
           request,
         });
@@ -2451,9 +2441,6 @@ export function createHostedControlLoop(input: {
               attemptId: claim.attempt.id,
               fencingToken: claim.attempt.fencingToken,
               executorId: claim.executorId,
-              reason: error instanceof Error
-                ? error.message
-                : "hosted_admission_failed",
               request,
             });
             if (closed) return false;
