@@ -373,7 +373,7 @@ try {
     "-c",
     `SELECT
       (SELECT count(*) FROM cp_runner WHERE runner_id = 'runner_e2e_${runId}'),
-      (SELECT count(*) FROM cp_project_target WHERE project_target_id = 'target_e2e_${runId}'),
+      (SELECT count(*) FROM cp_project_target WHERE project_target_id = 'slack_target_${runId}'),
       (SELECT count(*) FROM cp_slack_installation
        WHERE installation_id = 'slack_installation_${runId}'),
       (SELECT count(*) FROM control_plane_migrations),
