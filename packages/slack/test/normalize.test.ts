@@ -75,7 +75,6 @@ describe("Slack normalization", () => {
       eventId: "Ev123",
       eventTime: 1710000000,
       appId: "A123",
-      agentId: "gemini",
       botUserId: "U_APP",
       signatureVerified: true,
       binding: {
@@ -90,8 +89,7 @@ describe("Slack normalization", () => {
     expect(event?.source).toBe("slack");
     expect(event?.command.intent).toBe("fix");
     expect(event?.target).toEqual({
-      mention: "<@U_APP>",
-      agentId: "gemini"
+      mention: "<@U_APP>"
     });
     expect(event?.metadata).toMatchObject({ teamId: "T123", channelId: "C123", owner: "acme", repo: "demo" });
     expect(event?.metadata).toMatchObject({ repoProvider: "github" });
@@ -163,7 +161,6 @@ describe("Slack normalization", () => {
       ts: "1710000000.000100",
       eventId: "Ev789",
       eventTime: 1710000000,
-      agentId: "gemini",
       botUserId: "U_APP",
       binding: {
         teamId: "T123",
@@ -173,7 +170,7 @@ describe("Slack normalization", () => {
       }
     });
 
-    expect(event?.target).toMatchObject({ agentId: "gemini", executorHint: "codex" });
+    expect(event?.target).toMatchObject({ executorHint: "codex" });
     expect(event?.command.parsed?.requestedScopes).toEqual(["repo:write"]);
     expect(event?.permissions.map((permission) => permission.scope)).toEqual(
       expect.arrayContaining(["chat:postMessage", "reactions:write", "runner:local", "repo:read", "repo:write", "pr:create"])

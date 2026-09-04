@@ -287,8 +287,7 @@ describe("OpenTagEventSchema", () => {
         handle: "alice"
       },
       target: {
-        mention: "@opentag",
-        agentId: "opentag"
+        mention: "@opentag"
       },
       command: {
         rawText: "fix this",
@@ -340,8 +339,7 @@ describe("OpenTagEventSchema", () => {
           providerUserId: "U42"
         },
         target: {
-          mention: "@opentag",
-          agentId: "opentag"
+          mention: "@opentag"
         },
         command: {
           rawText: "fix this",
@@ -381,7 +379,6 @@ describe("OpenTagEventSchema", () => {
           actor: { provider: "slack", providerUserId: "U42" },
           target: {
             mention: "@opentag",
-            agentId: "opentag",
             executorHint
           },
           command: { rawText: "run this", intent: "run", args: {} },
@@ -404,7 +401,6 @@ describe("OpenTagEventSchema", () => {
         actor: { provider: "slack", providerUserId: "U42" },
         target: {
           mention: "@opentag",
-          agentId: "opentag",
           executorHint: "oh-my-pi"
         },
         command: { rawText: "run this", intent: "run", args: {} },

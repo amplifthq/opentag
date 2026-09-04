@@ -79,9 +79,8 @@ export const ActorIdentitySchema = z.object({
   writeAccess: z.boolean().optional()
 });
 
-export const AgentTargetSchema = z.object({
+export const MentionTargetSchema = z.object({
   mention: z.string().min(1),
-  agentId: z.string().min(1),
   executorHint: ExecutorHintSchema.optional(),
   workspaceHint: z.string().min(1).optional()
 });
@@ -1908,7 +1907,7 @@ export const OpenTagEventSchema = z.object({
   sourceEventId: z.string().min(1),
   receivedAt: z.string().datetime(),
   actor: ActorIdentitySchema.extend({ provider: z.literal("slack") }),
-  target: AgentTargetSchema,
+  target: MentionTargetSchema,
   command: OpenTagCommandSchema,
   context: z.array(ContextPointerSchema),
   workItem: WorkItemReferenceSchema.optional(),
@@ -2021,7 +2020,7 @@ export const OpenTagRunSchema = z.object({
 });
 
 export type ActorIdentity = z.infer<typeof ActorIdentitySchema>;
-export type AgentTarget = z.infer<typeof AgentTargetSchema>;
+export type MentionTarget = z.infer<typeof MentionTargetSchema>;
 export type OpenTagCommand = z.infer<typeof OpenTagCommandSchema>;
 export type ParsedOpenTagCommand = z.infer<typeof ParsedOpenTagCommandSchema>;
 export type CommandParseDiagnostic = z.infer<typeof CommandParseDiagnosticSchema>;

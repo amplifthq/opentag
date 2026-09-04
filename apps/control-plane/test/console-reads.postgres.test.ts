@@ -7,20 +7,19 @@ import {
 } from "./postgres-fixture.js";
 
 const consolePrincipal = {
-  operatorId: "operator_presence",
-  organizationId: "org_presence",
+  operatorId: "operator_teammates",
+  organizationId: "org_teammates",
   role: "viewer" as const,
   email: "viewer@example.test",
   displayName: "Viewer",
 };
 
-function presenceRow(overrides: Record<string, unknown> = {}) {
+function teammateRow(overrides: Record<string, unknown> = {}) {
   return {
-    installation_id: "install_1",
     binding_id: "binding_1",
+    display_name: "Release teammate",
     team_id: "T1",
     channel_id: "C1",
-    app_id: "A1",
     bot_user_id: "U_BOT",
     configured_project_target_id: "target_1",
     project_target_id: "target_1",
@@ -30,8 +29,6 @@ function presenceRow(overrides: Record<string, unknown> = {}) {
     default_executor: "codex",
     configured_runner_id: "runner_1",
     runner_id: "runner_1",
-    runner_display_name: "Build Mac",
-    readiness_observed_at: new Date("2026-09-04T05:00:00.000Z"),
     readiness_expires_at: new Date("2026-09-04T06:00:00.000Z"),
     active_run_id: null,
     active_run_state: null,
@@ -43,118 +40,107 @@ function presenceRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe("derived Agent Presence read model", () => {
-  it("returns an explicit setup reason when no active Slack binding exists", async () => {
+describe("derived Teammate read model", () => {
+  it("returns an empty list when no active Slack binding exists", async () => {
     const query = vi.fn(async () => ({ rows: [] }));
     const reads = createConsoleReadModel({ pool: { query } as never });
 
-    await expect(reads.presence(consolePrincipal)).resolves.toEqual({
-      state: "setup_required",
-      reason: "No active Slack binding is configured.",
-      agents: [],
-    });
+    await expect(reads.listTeammates(consolePrincipal)).resolves.toEqual([]);
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining("hosted_admission->>'bindingId' = slack.binding_id"),
-      ["org_presence"],
+      ["org_teammates"],
     );
     const sql = String(query.mock.calls[0]?.[0]);
     expect(sql).toContain("FROM cp_slack_binding slack");
+    expect(sql).toContain("slack.display_name");
     expect(sql).toContain("slack.state='active'");
-    expect(sql).toContain("hosted_admission->'projectTarget'->>'projectTargetId'");
     expect(sql).toContain("hosted_admission->'projectTarget'->>'digest'");
-    expect(sql).toContain("runner_id = target.runner_id");
     expect(sql).toContain("producer'->>'credentialId'");
+    expect(sql).toContain("bindingGeneration");
   });
 
-  it("reports available only when the complete binding and fresh readiness exist", async () => {
+  it("uses stable binding identity and display name for a ready teammate", async () => {
     const reads = createConsoleReadModel({
-      pool: { query: async () => ({ rows: [presenceRow()] }) } as never,
+      pool: { query: async () => ({ rows: [teammateRow()] }) } as never,
     });
-    await expect(reads.presence(consolePrincipal)).resolves.toMatchObject({
-      state: "available",
-      agents: [{
-        state: "available",
-        reason: "Slack, Project Target, Runner, and fresh readiness are available.",
-        projectTarget: { provider: "github", owner: "acme", repo: "demo" },
-        runner: { runnerId: "runner_1" },
-        activeRun: null,
-      }],
-    });
+    await expect(reads.listTeammates(consolePrincipal)).resolves.toEqual([{
+      teammateId: "binding_1",
+      displayName: "Release teammate",
+      workState: "ready",
+      reason: "This teammate is ready for work.",
+      home: {
+        kind: "slack_channel",
+        teamId: "T1",
+        channelId: "C1",
+        botUserId: "U_BOT",
+      },
+      execution: {
+        runnerId: "runner_1",
+        projectTarget: {
+          projectTargetId: "target_1",
+          provider: "github",
+          owner: "acme",
+          repo: "demo",
+          executorId: "codex",
+        },
+      },
+      activeWork: null,
+    }]);
   });
 
   it.each([
     {
       name: "queued work",
-      row: presenceRow({
-        active_run_id: "run_queued",
-        active_run_state: "queued",
-        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"),
-        active_run_count: 1,
-      }),
-      state: "queued",
+      row: teammateRow({ active_run_id: "run_queued", active_run_state: "queued",
+        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"), active_run_count: 1 }),
+      workState: "queued",
     },
     {
       name: "fresh running work",
-      row: presenceRow({
-        active_run_id: "run_working",
-        active_run_state: "running",
-        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"),
-        active_run_count: 1,
-      }),
-      state: "working",
+      row: teammateRow({ active_run_id: "run_working", active_run_state: "running",
+        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"), active_run_count: 1 }),
+      workState: "working",
     },
     {
-      name: "expired readiness during a running Run",
-      row: presenceRow({
-        readiness_observed_at: null,
-        readiness_expires_at: null,
-        active_run_id: "run_stale",
+      name: "expired readiness",
+      row: teammateRow({ readiness_expires_at: null, active_run_id: "run_stale",
         active_run_state: "running",
-        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"),
-        active_run_count: 1,
-      }),
-      state: "offline",
+        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"), active_run_count: 1 }),
+      workState: "runner_offline",
     },
     {
-      name: "running work without a current valid Attempt",
-      row: presenceRow({
-        active_run_id: "run_invalid_attempt",
-        active_run_state: "running",
+      name: "invalid current Attempt",
+      row: teammateRow({ active_run_id: "run_invalid_attempt", active_run_state: "running",
         active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"),
-        active_run_count: 1,
-        active_attempt_valid: false,
-      }),
-      state: "needs_attention",
+        active_run_count: 1, active_attempt_valid: false }),
+      workState: "needs_attention",
     },
     {
       name: "human decision",
-      row: presenceRow({
-        active_run_id: "run_approval",
-        active_run_state: "needs_approval",
-        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"),
-        active_run_count: 1,
-      }),
-      state: "needs_attention",
+      row: teammateRow({ active_run_id: "run_approval", active_run_state: "needs_approval",
+        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"), active_run_count: 1 }),
+      workState: "needs_attention",
     },
     {
       name: "ambiguous outcome",
-      row: presenceRow({
-        active_run_id: "run_unknown",
-        active_run_state: "running",
+      row: teammateRow({ active_run_id: "run_unknown", active_run_state: "running",
         active_run_outcome_state: "outcome_unknown",
-        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"),
-        active_run_count: 1,
-      }),
-      state: "needs_attention",
+        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"), active_run_count: 1 }),
+      workState: "needs_attention",
     },
-  ])("derives $name without persisting a second state", async ({ row, state }) => {
+    {
+      name: "multiple active Runs",
+      row: teammateRow({ active_run_id: "run_latest", active_run_state: "queued",
+        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"), active_run_count: 2 }),
+      workState: "needs_attention",
+    },
+  ])("derives $name without persisting teammate status", async ({ row, workState }) => {
     const reads = createConsoleReadModel({
       pool: { query: async () => ({ rows: [row] }) } as never,
     });
-    await expect(reads.presence(consolePrincipal)).resolves.toMatchObject({
-      state,
-      agents: [{ state }],
-    });
+    await expect(reads.listTeammates(consolePrincipal)).resolves.toMatchObject([
+      { workState },
+    ]);
   });
 });
 
@@ -180,7 +166,6 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
         requestId: "request_console_read",
         operationId: "operation_console_read",
         runnerId: "runner_visible",
-        displayName: "Visible runner",
         capabilities: ["relay.readiness.v1"],
       },
     });
@@ -230,18 +215,13 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
     expect(runners).toEqual([
       expect.objectContaining({
         runnerId: "runner_visible",
-        displayName: "Visible runner",
       }),
     ]);
     expect(JSON.stringify(runners)).not.toContain("runner_concealed");
-    await expect(reads.presence(principal)).resolves.toEqual({
-      state: "setup_required",
-      reason: "No active Slack binding is configured.",
-      agents: [],
-    });
+    await expect(reads.listTeammates(principal)).resolves.toEqual([]);
   });
 
-  it("derives presence from the exact active Slack binding and fresh Runner facts", async () => {
+  it("derives teammate work state from the exact binding and fresh Runner facts", async () => {
     await fixture.pool.query(
       `INSERT INTO cp_project_target(
          organization_id, project_target_id, runner_id, binding_digest,
@@ -258,12 +238,12 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
          binding_digest,state,credential_generation,credential_generation_digest,
          route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,
          operator_user_ids,approver_user_id,admin_user_ids,signing_secret_ref,
-         bot_token_ref,project_target_id,publication_mode,created_at,updated_at)
+         bot_token_ref,project_target_id,publication_mode,display_name,created_at,updated_at)
        VALUES('org_console_read','binding_presence','install_presence',$1,'active',1,$2,
          'route_presence','T_PRESENCE','A_PRESENCE','C_PRESENCE','U_BOT',
          ARRAY['U_MEMBER'],ARRAY['U_MEMBER'],'U_MEMBER',ARRAY['U_MEMBER'],
          'secret://slack/signing','secret://slack/bot','target_presence',
-         'proposal_only',clock_timestamp(),clock_timestamp())`,
+         'proposal_only','Release teammate',clock_timestamp(),clock_timestamp())`,
       [`sha256:${"b".repeat(64)}`,`sha256:${"c".repeat(64)}`],
     );
     await fixture.pool.query(
@@ -286,6 +266,7 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
              'targets', jsonb_build_array(jsonb_build_object(
                'projectTargetId', 'target_presence',
                'bindingDigest', $2::text,
+               'bindingGeneration', 1,
                'state', 'ready'
              )),
              'executors', jsonb_build_array(jsonb_build_object(
@@ -306,32 +287,25 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
       displayName: "Viewer",
     };
 
-    await expect(reads.presence(principal)).resolves.toMatchObject({
-      state: "available",
-      agents: [{
-        presenceId: "install_presence",
-        state: "available",
-        slack: {
-          bindingId: "binding_presence",
+    const readyTeammates = await reads.listTeammates(principal);
+    expect(readyTeammates).toMatchObject([{
+        teammateId: "binding_presence",
+        displayName: "Release teammate",
+        workState: "ready",
+        home: {
           teamId: "T_PRESENCE",
           channelId: "C_PRESENCE",
           botUserId: "U_BOT",
         },
-        projectTarget: {
+        execution: { runnerId: "runner_visible", projectTarget: {
           projectTargetId: "target_presence",
           provider: "github",
           owner: "acme",
           repo: "demo",
-          defaultExecutor: "codex",
-        },
-        runner: {
-          runnerId: "runner_visible",
-          readinessObservedAt: expect.any(String),
-          readinessExpiresAt: expect.any(String),
-        },
-        activeRun: null,
-      }],
-    });
+          executorId: "codex",
+        } },
+        activeWork: null,
+    }]);
 
     await fixture.pool.query(
       `UPDATE cp_runner_readiness
@@ -341,13 +315,27 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
        WHERE organization_id = 'org_console_read'
          AND receipt_id = 'readiness_presence'`,
     );
-    await expect(reads.presence(principal)).resolves.toMatchObject({
-      state: "offline",
-      agents: [{
-        state: "offline",
-        runner: { readinessObservedAt: null, readinessExpiresAt: null },
-      }],
-    });
+    const offlineTeammates = await reads.listTeammates(principal);
+    expect(offlineTeammates).toMatchObject([{
+      teammateId: "binding_presence",
+      displayName: "Release teammate",
+      workState: "runner_offline",
+    }]);
+    expect(offlineTeammates[0]?.home).toEqual(readyTeammates[0]?.home);
+    await fixture.pool.query(
+      `UPDATE cp_slack_binding
+       SET credential_generation = 2,
+           credential_generation_digest = $1,
+           updated_at = clock_timestamp()
+       WHERE organization_id = 'org_console_read'
+         AND binding_id = 'binding_presence'`,
+      [`sha256:${"8".repeat(64)}`],
+    );
+    await expect(reads.listTeammates(principal)).resolves.toMatchObject([{
+      teammateId: "binding_presence",
+      displayName: "Release teammate",
+      workState: "runner_offline",
+    }]);
     await fixture.pool.query(
       `UPDATE cp_runner_readiness
        SET receipt = jsonb_set(
@@ -401,19 +389,15 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
       ],
     );
     await insertRun("run_other_binding", "binding_other", "other");
-    await expect(reads.presence(principal)).resolves.toMatchObject({
-      state: "available",
-      agents: [{ activeRun: null }],
-    });
+    await expect(reads.listTeammates(principal)).resolves.toMatchObject([
+      { workState: "ready", activeWork: null },
+    ]);
 
     await insertRun("run_presence", "binding_presence", "presence");
-    await expect(reads.presence(principal)).resolves.toMatchObject({
-      state: "needs_attention",
-      agents: [{
-        state: "needs_attention",
-        activeRun: { runId: "run_presence", state: "running" },
-      }],
-    });
+    await expect(reads.listTeammates(principal)).resolves.toMatchObject([{
+      workState: "needs_attention",
+      activeWork: { runId: "run_presence", state: "running" },
+    }]);
     await fixture.pool.query(
       `INSERT INTO cp_hosted_attempt(
          organization_id, run_id, attempt_number, attempt_id, runner_id,
@@ -429,10 +413,9 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
        )`,
       [`sha256:${"7".repeat(64)}`],
     );
-    await expect(reads.presence(principal)).resolves.toMatchObject({
-      state: "needs_attention",
-      agents: [{ state: "needs_attention" }],
-    });
+    await expect(reads.listTeammates(principal)).resolves.toMatchObject([
+      { workState: "needs_attention" },
+    ]);
     await fixture.pool.query(
       `UPDATE cp_hosted_attempt
        SET lease_expires_at = clock_timestamp() + interval '1 hour',
@@ -440,33 +423,28 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
        WHERE organization_id = 'org_console_read' AND run_id = 'run_presence'
          AND attempt_number = 1`,
     );
-    await expect(reads.presence(principal)).resolves.toMatchObject({
-      state: "needs_attention",
-      agents: [{ state: "needs_attention" }],
-    });
+    await expect(reads.listTeammates(principal)).resolves.toMatchObject([
+      { workState: "needs_attention" },
+    ]);
     await fixture.pool.query(
       `UPDATE cp_hosted_attempt
        SET credential_id = 'credential_console', state = 'claimed'
        WHERE organization_id = 'org_console_read' AND run_id = 'run_presence'
          AND attempt_number = 1`,
     );
-    await expect(reads.presence(principal)).resolves.toMatchObject({
-      state: "needs_attention",
-      agents: [{ state: "needs_attention" }],
-    });
+    await expect(reads.listTeammates(principal)).resolves.toMatchObject([
+      { workState: "needs_attention" },
+    ]);
     await fixture.pool.query(
       `UPDATE cp_hosted_attempt
        SET state = 'running'
        WHERE organization_id = 'org_console_read' AND run_id = 'run_presence'
          AND attempt_number = 1`,
     );
-    await expect(reads.presence(principal)).resolves.toMatchObject({
-      state: "working",
-      agents: [{
-        state: "working",
-        activeRun: { runId: "run_presence", state: "running" },
-      }],
-    });
+    await expect(reads.listTeammates(principal)).resolves.toMatchObject([{
+      workState: "working",
+      activeWork: { runId: "run_presence", state: "running" },
+    }]);
 
     await fixture.pool.query(
       `INSERT INTO cp_project_target(
@@ -499,6 +477,7 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
              'targets', jsonb_build_array(jsonb_build_object(
                'projectTargetId', 'target_rebound',
                'bindingDigest', $2::text,
+               'bindingGeneration', 1,
                'state', 'ready'
              )),
              'executors', jsonb_build_array(jsonb_build_object(
@@ -516,10 +495,9 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
        WHERE organization_id = 'org_console_read'
          AND installation_id = 'install_presence'`,
     );
-    await expect(reads.presence(principal)).resolves.toMatchObject({
-      state: "available",
-      agents: [{ activeRun: null }],
-    });
+    await expect(reads.listTeammates(principal)).resolves.toMatchObject([
+      { teammateId: "binding_presence", workState: "ready", activeWork: null },
+    ]);
     await fixture.pool.query(
       `UPDATE cp_slack_binding
        SET project_target_id = 'target_presence'
@@ -533,22 +511,16 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
            terminal_kind = 'failed', terminal_receipt = '{}'::jsonb
        WHERE organization_id = 'org_console_read' AND run_id = 'run_presence'`,
     );
-    await expect(reads.presence(principal)).resolves.toMatchObject({
-      state: "needs_attention",
-      agents: [{
-        state: "needs_attention",
-        reason: "Run run_presence has an outcome that requires reconciliation.",
-      }],
-    });
+    await expect(reads.listTeammates(principal)).resolves.toMatchObject([{
+      teammateId: "binding_presence",
+      workState: "needs_attention",
+      reason: "Run run_presence has an outcome that requires reconciliation.",
+    }]);
 
-    await expect(reads.presence({
+    await expect(reads.listTeammates({
       ...principal,
       organizationId: "org_other_read",
-    })).resolves.toEqual({
-      state: "setup_required",
-      reason: "No active Slack binding is configured.",
-      agents: [],
-    });
+    })).resolves.toEqual([]);
   });
 
   it("lists only tenant-owned Project Targets", async () => {

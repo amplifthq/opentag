@@ -17,7 +17,7 @@ function claimed(id: string): ClaimedRun {
     sourceEventId: `Ev${id}`,
     receivedAt: "2026-08-10T00:00:00.000Z",
     actor: { provider: "slack", providerUserId: "U123", handle: "alice", organizationId: "T123" },
-    target: { mention: "@opentag", agentId: "opentag", executorHint: "reviewer" },
+    target: { mention: "@opentag", executorHint: "reviewer" },
     command: { rawText: "inspect this", intent: "run", args: {} },
     context: [],
     permissions: [],

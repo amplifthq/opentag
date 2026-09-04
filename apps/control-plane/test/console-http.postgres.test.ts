@@ -131,19 +131,19 @@ describe.skipIf(!TEST_DATABASE_URL)("same-origin console HTTP identity", () => {
       runners: [{ runnerId: "runner_console_http" }],
     });
 
-    const presence = await application.fetch(
+    const teammates = await application.fetch(
+      new Request("http://control.test/api/console/teammates", {
+        headers: { cookie: cookie?.split(";")[0] ?? "" },
+      }),
+    );
+    expect(teammates.status).toBe(200);
+    expect(await teammates.json()).toEqual([]);
+    const retiredPresence = await application.fetch(
       new Request("http://control.test/api/console/presence", {
         headers: { cookie: cookie?.split(";")[0] ?? "" },
       }),
     );
-    expect(presence.status).toBe(200);
-    expect(await presence.json()).toEqual({
-      presence: {
-        state: "setup_required",
-        reason: "No active Slack binding is configured.",
-        agents: [],
-      },
-    });
+    expect(retiredPresence.status).toBe(404);
 
     const targets = await application.fetch(
       new Request("http://control.test/api/console/project-targets", {

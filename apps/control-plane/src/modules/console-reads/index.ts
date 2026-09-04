@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import type { TeammateView, TeammateWorkState } from "@opentag/core";
 import type { ConsolePrincipal } from "../identity/index.js";
 
 function boundedLimit(value: number | undefined): number {
@@ -19,59 +20,11 @@ function redactFencingToken(value: unknown): unknown {
   );
 }
 
-export type AgentPresenceState =
-  | "setup_required"
-  | "offline"
-  | "available"
-  | "queued"
-  | "working"
-  | "needs_attention";
-
-export type AgentPresenceView = {
-  presenceId: string;
-  state: AgentPresenceState;
-  reason: string;
-  slack: {
-    installationId: string;
-    bindingId: string;
-    teamId: string;
-    channelId: string;
-    appId: string;
-    botUserId: string;
-  };
-  projectTarget: {
-    projectTargetId: string;
-    provider: string;
-    owner: string;
-    repo: string;
-    defaultExecutor: string;
-  } | null;
-  runner: {
-    runnerId: string;
-    displayName: string | null;
-    readinessObservedAt: string | null;
-    readinessExpiresAt: string | null;
-  } | null;
-  activeRun: {
-    runId: string;
-    state: string;
-    outcomeState: string | null;
-    updatedAt: string;
-  } | null;
-};
-
-export type AgentPresenceSummary = {
-  state: AgentPresenceState;
-  reason: string;
-  agents: AgentPresenceView[];
-};
-
-type AgentPresenceRow = {
-  installation_id: string;
+type TeammateRow = {
   binding_id: string;
+  display_name: string;
   team_id: string;
   channel_id: string;
-  app_id: string;
   bot_user_id: string;
   configured_project_target_id: string | null;
   project_target_id: string | null;
@@ -81,8 +34,6 @@ type AgentPresenceRow = {
   default_executor: string | null;
   configured_runner_id: string | null;
   runner_id: string | null;
-  runner_display_name: string | null;
-  readiness_observed_at: Date | null;
   readiness_expires_at: Date | null;
   active_run_id: string | null;
   active_run_state: string | null;
@@ -92,8 +43,8 @@ type AgentPresenceRow = {
   active_attempt_valid: boolean;
 };
 
-function presenceFromRow(row: AgentPresenceRow): AgentPresenceView {
-  const activeRun = row.active_run_id && row.active_run_state && row.active_run_updated_at
+function teammateFromRow(row: TeammateRow): TeammateView {
+  const activeWork = row.active_run_id && row.active_run_state && row.active_run_updated_at
     ? {
         runId: row.active_run_id,
         state: row.active_run_state,
@@ -102,142 +53,98 @@ function presenceFromRow(row: AgentPresenceRow): AgentPresenceView {
       }
     : null;
   const projectTarget = row.project_target_id
-    && row.target_provider && row.target_owner && row.target_repo
+    && row.target_provider === "github" && row.target_owner && row.target_repo
     && row.default_executor
     ? {
         projectTargetId: row.project_target_id,
-        provider: row.target_provider,
+        provider: "github" as const,
         owner: row.target_owner,
         repo: row.target_repo,
-        defaultExecutor: row.default_executor,
-      }
-    : null;
-  const runner = row.runner_id
-    ? {
-        runnerId: row.runner_id,
-        displayName: row.runner_display_name,
-        readinessObservedAt: row.readiness_observed_at?.toISOString() ?? null,
-        readinessExpiresAt: row.readiness_expires_at?.toISOString() ?? null,
+        executorId: row.default_executor,
       }
     : null;
 
-  let state: AgentPresenceState;
+  let workState: TeammateWorkState;
   let reason: string;
   if (!row.configured_project_target_id) {
-    state = "setup_required";
-    reason = "This Slack binding has no Project Target.";
+    workState = "setup_required";
+    reason = "This teammate has no GitHub Project Target.";
   } else if (!projectTarget) {
-    state = "setup_required";
-    reason = "The configured Project Target was not found.";
-  } else if (!row.configured_runner_id || !runner) {
-    state = "setup_required";
-    reason = "The Project Target has no registered Runner.";
+    workState = "setup_required";
+    reason = "The teammate's configured Project Target was not found.";
+  } else if (!row.configured_runner_id || !row.runner_id) {
+    workState = "setup_required";
+    reason = "The teammate's Project Target has no registered Runner.";
   } else if (row.active_run_count > 1) {
-    state = "needs_attention";
-    reason = "More than one active Run is bound to this Slack presence.";
-  } else if (
-    activeRun?.outcomeState === "outcome_unknown"
-    || activeRun?.state === "needs_approval"
-  ) {
-    state = "needs_attention";
-    reason = activeRun.outcomeState === "outcome_unknown"
-      ? `Run ${activeRun.runId} has an outcome that requires reconciliation.`
-      : `Run ${activeRun.runId} is waiting for a human decision.`;
-  } else if (activeRun?.state === "queued") {
-    state = "queued";
-    reason = row.readiness_expires_at
-      ? `Run ${activeRun.runId} is queued for the paired Runner.`
-      : `Run ${activeRun.runId} is queued while the paired Runner is offline.`;
-  } else if (
-    (activeRun?.state === "assigned" || activeRun?.state === "running")
-    && !row.active_attempt_valid
-  ) {
-    state = "needs_attention";
-    reason = `Run ${activeRun.runId} has no current valid Attempt lease for the paired Runner.`;
+    workState = "needs_attention";
+    reason = "More than one active Run is bound to this teammate.";
+  } else if (activeWork?.outcomeState === "outcome_unknown"
+    || activeWork?.state === "needs_approval") {
+    workState = "needs_attention";
+    reason = activeWork.outcomeState === "outcome_unknown"
+      ? `Run ${activeWork.runId} has an outcome that requires reconciliation.`
+      : `Run ${activeWork.runId} is waiting for a human decision.`;
   } else if (!row.readiness_expires_at) {
-    state = "offline";
-    reason = activeRun
-      ? `Runner readiness expired while Run ${activeRun.runId} remains ${activeRun.state}; OpenTag does not claim it is working.`
-      : "The paired Runner has no fresh readiness receipt.";
-  } else if (activeRun?.state === "assigned" || activeRun?.state === "running") {
-    state = "working";
-    reason = `Run ${activeRun.runId} is ${activeRun.state} on the ready paired Runner.`;
-  } else if (activeRun) {
-    state = "needs_attention";
-    reason = `Run ${activeRun.runId} has an unexpected active state: ${activeRun.state}.`;
+    workState = "runner_offline";
+    reason = activeWork
+      ? `Runner readiness expired while Run ${activeWork.runId} remains ${activeWork.state}.`
+      : "The teammate's Runner has no fresh readiness receipt.";
+  } else if (activeWork?.state === "queued") {
+    workState = "queued";
+    reason = `Run ${activeWork.runId} is queued for this teammate.`;
+  } else if ((activeWork?.state === "assigned" || activeWork?.state === "running")
+    && !row.active_attempt_valid) {
+    workState = "needs_attention";
+    reason = `Run ${activeWork.runId} has no current valid Attempt lease.`;
+  } else if (activeWork?.state === "assigned" || activeWork?.state === "running") {
+    workState = "working";
+    reason = `Run ${activeWork.runId} is ${activeWork.state} on the paired Runner.`;
+  } else if (activeWork) {
+    workState = "needs_attention";
+    reason = `Run ${activeWork.runId} has an unexpected active state: ${activeWork.state}.`;
   } else {
-    state = "available";
-    reason = "Slack, Project Target, Runner, and fresh readiness are available.";
+    workState = "ready";
+    reason = "This teammate is ready for work.";
   }
 
   return {
-    presenceId: row.installation_id,
-    state,
+    teammateId: row.binding_id,
+    displayName: row.display_name,
+    workState,
     reason,
-    slack: {
-      installationId: row.installation_id,
-      bindingId: row.binding_id,
+    home: {
+      kind: "slack_channel",
       teamId: row.team_id,
       channelId: row.channel_id,
-      appId: row.app_id,
       botUserId: row.bot_user_id,
     },
-    projectTarget,
-    runner,
-    activeRun,
-  };
-}
-
-const presencePriority: Record<AgentPresenceState, number> = {
-  setup_required: 6,
-  needs_attention: 5,
-  offline: 4,
-  working: 3,
-  queued: 2,
-  available: 1,
-};
-
-function summarizePresence(agents: AgentPresenceView[]): AgentPresenceSummary {
-  if (agents.length === 0) {
-    return {
-      state: "setup_required",
-      reason: "No active Slack binding is configured.",
-      agents: [],
-    };
-  }
-  const primary = [...agents].sort((left, right) =>
-    presencePriority[right.state] - presencePriority[left.state]
-    || left.presenceId.localeCompare(right.presenceId))[0]!;
-  return {
-    state: primary.state,
-    reason: agents.length === 1
-      ? primary.reason
-      : `${agents.length} Slack teammate presences; highest-priority state is ${primary.state}.`,
-    agents,
+    execution: {
+      runnerId: row.runner_id,
+      projectTarget,
+    },
+    activeWork,
   };
 }
 
 export function createConsoleReadModel(input: { pool: Pool }) {
   return {
-    async presence(principal: ConsolePrincipal): Promise<AgentPresenceSummary> {
-      const result = await input.pool.query<AgentPresenceRow>(
+    async listTeammates(principal: ConsolePrincipal): Promise<TeammateView[]> {
+      const result = await input.pool.query<TeammateRow>(
         `WITH active_slack AS (
-           SELECT slack.organization_id, slack.installation_id,
-                  slack.binding_id, slack.project_target_id,
-                  slack.team_id, slack.channel_id, slack.app_id,
+           SELECT slack.organization_id, slack.binding_id, slack.display_name,
+                  slack.project_target_id, slack.team_id, slack.channel_id,
                   slack.bot_user_id
            FROM cp_slack_binding slack
            WHERE slack.organization_id = $1
              AND slack.state='active'
          )
-         SELECT slack.installation_id, slack.binding_id, slack.team_id,
-                slack.channel_id, slack.app_id, slack.bot_user_id,
+         SELECT slack.binding_id, slack.display_name, slack.team_id,
+                slack.channel_id, slack.bot_user_id,
                 slack.project_target_id AS configured_project_target_id,
                 target.project_target_id, target.provider AS target_provider,
                 target.owner AS target_owner, target.repo AS target_repo,
                 target.default_executor, target.runner_id AS configured_runner_id,
-                runner.runner_id, runner.display_name AS runner_display_name,
-                readiness.observed_at AS readiness_observed_at,
+                runner.runner_id,
                 readiness.expires_at AS readiness_expires_at,
                 active_run.run_id AS active_run_id,
                 active_run.state AS active_run_state,
@@ -283,6 +190,8 @@ export function createConsoleReadModel(input: { pool: Pool }) {
                ) target_readiness
                WHERE target_readiness->>'projectTargetId' = target.project_target_id
                  AND target_readiness->>'bindingDigest' = target.binding_digest
+                 AND target_readiness->>'bindingGeneration'
+                   = target.binding_generation::text
                  AND target_readiness->>'state' = 'ready'
              )
              AND EXISTS (
@@ -327,10 +236,10 @@ export function createConsoleReadModel(input: { pool: Pool }) {
            ORDER BY run.created_at DESC, run.run_id DESC
            LIMIT 1
          ) active_run ON true
-         ORDER BY slack.team_id, slack.channel_id, slack.installation_id`,
+         ORDER BY slack.team_id, slack.channel_id, slack.binding_id`,
         [principal.organizationId],
       );
-      return summarizePresence(result.rows.map(presenceFromRow));
+      return result.rows.map(teammateFromRow);
     },
 
     async overview(principal: ConsolePrincipal) {
@@ -410,15 +319,13 @@ export function createConsoleReadModel(input: { pool: Pool }) {
     ) {
       const result = await input.pool.query<{
         runner_id: string;
-        display_name: string | null;
         registration_generation: number;
         credential_generation: number;
         capabilities: string[];
         readiness: unknown | null;
         updated_at: Date;
       }>(
-        `SELECT runner.runner_id, runner.display_name,
-                runner.registration_generation,
+        `SELECT runner.runner_id, runner.registration_generation,
                 runner.credential_generation, runner.capabilities,
                 readiness.receipt AS readiness, runner.updated_at
          FROM cp_runner runner
@@ -457,7 +364,6 @@ export function createConsoleReadModel(input: { pool: Pool }) {
       );
       return result.rows.map((row) => ({
         runnerId: row.runner_id,
-        displayName: row.display_name,
         registrationGeneration: row.registration_generation,
         credentialGeneration: row.credential_generation,
         capabilities: row.capabilities,

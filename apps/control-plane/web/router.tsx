@@ -10,16 +10,16 @@ import {
 } from "@tanstack/react-router";
 import { useState, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
+import type { TeammateWorkState } from "@opentag/core";
 import { z } from "zod";
 import {
   ConsoleApiError,
-  type ConsoleAgentPresence,
+  type ConsoleTeammate,
   type ConsoleApi,
   type ConsoleApiKey,
   type ConsoleAuditEvent,
   type ConsoleMaterialAction,
   type ConsoleOverview,
-  type ConsolePresenceState,
   type ConsolePermission,
   type ConsoleProjectTarget,
   type ConsoleRun,
@@ -77,7 +77,7 @@ function ConsoleShell() {
       <aside className="sidebar">
         <Link to="/" className="brand" aria-label="OpenTag Control Plane home">
           <span className="brand-mark">OT</span>
-          <span><strong>OpenTag</strong><small>Agent presence</small></span>
+          <span><strong>OpenTag</strong><small>AI teammates</small></span>
         </Link>
         <nav aria-label="Control Plane">
           {navigation.map(([to, label]) => (
@@ -224,39 +224,40 @@ function Metric({ label, value }: { label: string; value: number }) {
   return <article className="metric"><span>{label}</span><strong>{value}</strong></article>;
 }
 
-const presenceLabels: Record<ConsolePresenceState, string> = {
+const teammateStateLabels: Record<TeammateWorkState, string> = {
   setup_required: "Needs setup",
-  offline: "Offline",
-  available: "Available",
+  runner_offline: "Runner offline",
+  ready: "Ready",
   queued: "Queued",
   working: "Working",
   needs_attention: "Needs attention",
 };
 
-function PresenceBadge({ state }: { state: ConsolePresenceState }) {
-  return <span className={`presence-badge presence-${state}`}>{presenceLabels[state]}</span>;
+function TeammateState({ state }: { state: TeammateWorkState }) {
+  return <span className={`teammate-status teammate-${state}`}>{teammateStateLabels[state]}</span>;
 }
 
-function PresenceCard({ agent }: { agent: ConsoleAgentPresence }) {
-  const target = agent.projectTarget
-    ? `${agent.projectTarget.provider}:${agent.projectTarget.owner}/${agent.projectTarget.repo}`
+function TeammateCard({ teammate }: { teammate: ConsoleTeammate }) {
+  const target = teammate.execution.projectTarget
+    ? `${teammate.execution.projectTarget.provider}:${teammate.execution.projectTarget.owner}/${teammate.execution.projectTarget.repo}`
     : "Not configured";
-  const runner = agent.runner?.displayName ?? agent.runner?.runnerId ?? "Not configured";
-  return <article className="presence-card">
+  return <article className="teammate-card">
     <header>
       <div>
-        <p className="presence-name">Slack teammate</p>
-        <code>{agent.slack.botUserId}</code>
+        <h2 className="teammate-name">{teammate.displayName}</h2>
+        <code>{teammate.teammateId}</code>
       </div>
-      <PresenceBadge state={agent.state} />
+      <TeammateState state={teammate.workState} />
     </header>
-    <p className="presence-reason">{agent.reason}</p>
+    <p className="teammate-reason">{teammate.reason}</p>
     <dl>
-      <div><dt>Slack home</dt><dd>{agent.slack.teamId} / {agent.slack.channelId}</dd></div>
+      <div><dt>Slack home</dt><dd>{teammate.home.teamId} / {teammate.home.channelId}</dd></div>
+      <div><dt>Slack bot</dt><dd>{teammate.home.botUserId}</dd></div>
       <div><dt>Project Target</dt><dd>{target}</dd></div>
-      <div><dt>Runner</dt><dd>{runner}</dd></div>
-      <div><dt>Active Run</dt><dd>{agent.activeRun
-        ? <><code>{agent.activeRun.runId}</code> · {agent.activeRun.state}</>
+      <div><dt>Executor</dt><dd>{teammate.execution.projectTarget?.executorId ?? "Not configured"}</dd></div>
+      <div><dt>Runner</dt><dd>{teammate.execution.runnerId ?? "Not configured"}</dd></div>
+      <div><dt>Active work</dt><dd>{teammate.activeWork
+        ? <><code>{teammate.activeWork.runId}</code> · {teammate.activeWork.state}</>
         : "None"}</dd></div>
     </dl>
   </article>;
@@ -264,28 +265,24 @@ function PresenceCard({ agent }: { agent: ConsoleAgentPresence }) {
 
 function OverviewPage() {
   const { api, principal } = overviewRoute.useRouteContext();
-  const presence = useQuery({
-    queryKey: tenantQueryKey(principal.organizationId, "presence"),
-    queryFn: api.presence,
+  const teammates = useQuery({
+    queryKey: tenantQueryKey(principal.organizationId, "teammates"),
+    queryFn: api.teammates,
   });
   const metrics = useQuery({
     queryKey: tenantQueryKey(principal.organizationId, "overview"),
     queryFn: api.overview,
   });
-  return <Page title="Your AI teammates" intro="Persistent Slack presence backed by the Project Target, Runner, and governed work that actually exist.">
-    {presence.isPending ? <LoadingState /> : presence.error ? <ErrorState error={presence.error} /> : <>
-      <section className="presence-summary" aria-live="polite">
-        <PresenceBadge state={presence.data.state} />
-        <p>{presence.data.reason}</p>
-      </section>
-      {presence.data.agents.length === 0
-        ? <div className="presence-empty">
+  return <Page title="Your AI teammates" intro="Long-lived teammates with a Slack home and governed local execution.">
+    {teammates.isPending ? <LoadingState /> : teammates.error ? <ErrorState error={teammates.error} /> : <>
+      {teammates.data.length === 0
+        ? <div className="teammate-empty">
             <h2>No Slack teammate is configured yet.</h2>
             <p>Create an active Slack installation and binding, then connect it to a GitHub Project Target and paired Runner.</p>
             <Link to="/targets" className="button">Review Project Targets</Link>
           </div>
-        : <div className="presence-grid">{presence.data.agents.map((agent) =>
-            <PresenceCard key={agent.presenceId} agent={agent} />)}
+        : <div className="teammate-grid">{teammates.data.map((teammate) =>
+            <TeammateCard key={teammate.teammateId} teammate={teammate} />)}
           </div>}
     </>}
     <h2 className="system-metrics-title">System metrics</h2>
@@ -314,7 +311,7 @@ function RunnersPage() {
   return <Page title="Runners" intro="Paired local runtimes and their latest readiness evidence.">
     {query.isPending ? <LoadingState /> : query.error ? <ErrorState error={query.error} /> : (
       <DataTable headings={["Runner", "Generation", "Capabilities", "Readiness", "Updated"]} rows={query.data.map((runner: ConsoleRunner) => [
-        <strong>{runner.displayName ?? runner.runnerId}</strong>,
+        <strong>{runner.runnerId}</strong>,
         `${runner.registrationGeneration} / credential ${runner.credentialGeneration}`,
         runner.capabilities.join(", "),
         runner.readiness ? "fresh report" : "not ready",

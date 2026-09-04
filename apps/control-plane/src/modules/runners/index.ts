@@ -267,14 +267,12 @@ export function createRunnerDirectory(input: {
 
         await client.query(
           `INSERT INTO cp_runner(
-             organization_id, runner_id, display_name,
-             registration_generation, credential_generation,
+             organization_id, runner_id, registration_generation, credential_generation,
              current_credential_id, capabilities, created_at, updated_at
-           ) VALUES($1, $2, $3, 1, 1, $4, $5::jsonb, $6, $6)`,
+           ) VALUES($1, $2, 1, 1, $3, $4::jsonb, $5, $5)`,
           [
             command.organizationId,
             request.runnerId,
-            request.displayName ?? null,
             credentialId,
             JSON.stringify(request.capabilities),
             createdAt,

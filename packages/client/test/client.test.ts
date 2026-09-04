@@ -27,7 +27,6 @@ function runnerRegistrationRequest() {
     requestId: "request_registration_1",
     operationId: "operation_registration_1",
     runnerId: "runner_private_1",
-    displayName: "Private runner",
     capabilities: ["relay.registration.v1"] as const
   };
 }

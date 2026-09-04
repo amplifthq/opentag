@@ -973,14 +973,12 @@ export function createControlPlaneApplication(
       });
     });
 
-    app.get("/api/console/presence", async (context) => {
+    app.get("/api/console/teammates", async (context) => {
       const principal = await consolePrincipal(
         getCookie(context, "opentag_session"),
       );
       if (!principal) return context.json({ error: "invalid_session" }, 401);
-      return context.json({
-        presence: await consoleDependencies.reads.presence(principal),
-      });
+      return context.json(await consoleDependencies.reads.listTeammates(principal));
     });
 
     app.get("/api/console/runners", async (context) => {

@@ -1,3 +1,5 @@
+import type { TeammateView } from "@opentag/core";
+
 export class ConsoleApiError extends Error {
   constructor(
     readonly code: string,
@@ -24,56 +26,10 @@ export type ConsoleOverview = {
   pendingJobCount: number;
 };
 
-export type ConsolePresenceState =
-  | "setup_required"
-  | "offline"
-  | "available"
-  | "queued"
-  | "working"
-  | "needs_attention";
-
-export type ConsoleAgentPresence = {
-  presenceId: string;
-  state: ConsolePresenceState;
-  reason: string;
-  slack: {
-    installationId: string;
-    bindingId: string;
-    teamId: string;
-    channelId: string;
-    appId: string;
-    botUserId: string;
-  };
-  projectTarget: {
-    projectTargetId: string;
-    provider: string;
-    owner: string;
-    repo: string;
-    defaultExecutor: string;
-  } | null;
-  runner: {
-    runnerId: string;
-    displayName: string | null;
-    readinessObservedAt: string | null;
-    readinessExpiresAt: string | null;
-  } | null;
-  activeRun: {
-    runId: string;
-    state: string;
-    outcomeState: string | null;
-    updatedAt: string;
-  } | null;
-};
-
-export type ConsolePresence = {
-  state: ConsolePresenceState;
-  reason: string;
-  agents: ConsoleAgentPresence[];
-};
+export type ConsoleTeammate = TeammateView;
 
 export type ConsoleRunner = {
   runnerId: string;
-  displayName: string | null;
   registrationGeneration: number;
   credentialGeneration: number;
   capabilities: string[];
@@ -187,9 +143,7 @@ export function createConsoleApi(fetchImplementation: FetchImplementation = fetc
     overview: async () =>
       (await request<{ overview: ConsoleOverview }>("/api/console/overview"))
         .overview,
-    presence: async () =>
-      (await request<{ presence: ConsolePresence }>("/api/console/presence"))
-        .presence,
+    teammates: () => request<TeammateView[]>("/api/console/teammates"),
     runners: async () =>
       (await request<{ runners: ConsoleRunner[] }>("/api/console/runners"))
         .runners,

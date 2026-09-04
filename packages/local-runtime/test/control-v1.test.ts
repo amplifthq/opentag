@@ -324,7 +324,7 @@ describe("Control V1 projection pump", () => {
     const event = {
       id: "Ev789", source: "slack", sourceEventId: "Ev789", receivedAt: now.toISOString(),
       actor: { provider: "slack", providerUserId: "U1001", handle: "alice", organizationId: "T123" },
-      target: { mention: "@opentag", agentId: "opentag" },
+      target: { mention: "@opentag" },
       command: { rawText: "fix this", intent: "fix", args: {} }, context: [],
       permissions: [{ scope: "repo:write", reason: "fix the repository" }],
       callback: { provider: "slack", uri: "https://slack.com/api/chat.postMessage",
@@ -772,6 +772,7 @@ describe("Control V1 projection pump", () => {
       targets: [{
         projectTargetId: "target_1",
         bindingDigest: `sha256:${"a".repeat(64)}`,
+        bindingGeneration: 1,
         provider: "github",
         owner: "acme",
         repo: "widget",
@@ -1181,6 +1182,7 @@ describe("Control V1 projection pump", () => {
       targets: [{
         projectTargetId: "target_1",
         bindingDigest: `sha256:${"a".repeat(64)}`,
+        bindingGeneration: 1,
         provider: "github",
         owner: "acme",
         repo: "widget",
@@ -1278,6 +1280,7 @@ describe("Control V1 projection pump", () => {
       targets: [{
         projectTargetId: "target_1",
         bindingDigest: `sha256:${"a".repeat(64)}`,
+        bindingGeneration: 1,
         provider: "github",
         owner: "acme",
         repo: "widget",
@@ -1806,6 +1809,7 @@ describe("Control V1 projection pump", () => {
       targets: [{
         projectTargetId: "target_1",
         bindingDigest: `sha256:${"a".repeat(64)}`,
+        bindingGeneration: 1,
         provider: "github",
         owner: "acme",
         repo: "widget",
@@ -2052,6 +2056,7 @@ describe("Control V1 projection pump", () => {
       targets: [{
         projectTargetId: "target_1",
         bindingDigest: `sha256:${"a".repeat(64)}`,
+        bindingGeneration: 1,
         provider: "github",
         owner: "acme",
         repo: "widget",
@@ -2239,6 +2244,7 @@ describe("Control V1 projection pump", () => {
       targets: [{
         projectTargetId: "target_1",
         bindingDigest: `sha256:${"a".repeat(64)}`,
+        bindingGeneration: 1,
         provider: "github",
         owner: "acme",
         repo: "widget",
@@ -2533,6 +2539,7 @@ describe("Control V1 projection pump", () => {
         targets: [{
           projectTargetId: "target_1",
           bindingDigest: `sha256:${"a".repeat(64)}`,
+          bindingGeneration: 1,
           provider: "github",
           owner: "acme",
           repo: "app",
@@ -2590,6 +2597,7 @@ describe("Control V1 projection pump", () => {
         targets: [{
           projectTargetId: "target_1",
           bindingDigest: `sha256:${"a".repeat(64)}`,
+          bindingGeneration: 1,
           provider: "github",
           owner: "acme",
           repo: "app",
@@ -2613,6 +2621,7 @@ describe("Control V1 projection pump", () => {
     expect(unmatched.payload.targets).toEqual([{
       projectTargetId: "target_1",
       bindingDigest: `sha256:${"a".repeat(64)}`,
+      bindingGeneration: 1,
       state: "unknown",
       reasonCode: "target_binding_stale",
     }]);
@@ -2655,6 +2664,7 @@ describe("Control V1 projection pump", () => {
     const target = {
       projectTargetId: "target_1",
       bindingDigest: `sha256:${"a".repeat(64)}`,
+      bindingGeneration: 1,
       defaultExecutor: "echo",
       defaultBranch: "main",
     };
@@ -2939,6 +2949,7 @@ describe("Control V1 projection pump", () => {
       targets: [{
         projectTargetId: "target_1",
         bindingDigest: `sha256:${"a".repeat(64)}`,
+        bindingGeneration: 1,
         provider: "github",
         owner: "acme",
         repo: "app",
@@ -3175,6 +3186,7 @@ describe("Control V1 projection pump", () => {
       targets: [{
         projectTargetId: "target_1",
         bindingDigest: `sha256:${"a".repeat(64)}`,
+        bindingGeneration: 1,
         provider: "github",
         owner: "acme",
         repo: "widget",
@@ -3421,6 +3433,7 @@ describe("Control V1 projection pump", () => {
       targets: [{
         projectTargetId: "target_1",
         bindingDigest: `sha256:${"a".repeat(64)}`,
+        bindingGeneration: 1,
         provider: "github",
         owner: "acme",
         repo: "widget",
@@ -3706,7 +3719,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1", "relay.lifecycle.v1", "relay.material-receipt.v1",
         "relay.permission.v1", "relay.readiness.v1"] as const,
       targets: [{ projectTargetId: "target_1",
-        bindingDigest: `sha256:${"3".repeat(64)}`, provider: "github",
+        bindingDigest: `sha256:${"3".repeat(64)}`, bindingGeneration: 1, provider: "github",
         owner: "acme", repo: "widget", defaultExecutor: "reviewer",
         defaultBranch: "main" }],
       observedAt: now.toISOString(),

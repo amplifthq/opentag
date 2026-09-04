@@ -190,7 +190,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
       executors: [{ executorId: "executor_acp", adapterVersion: "1.0.0",
         capabilityDigest: digest("executor"), state: "ready" as const }],
       targets: [{ projectTargetId: "target_slack_runtime",
-        bindingDigest: targetBindingDigest, state: "ready" as const }],
+        bindingDigest: targetBindingDigest, bindingGeneration: targetBindingGeneration,
+        state: "ready" as const }],
       observedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 10 * 60_000).toISOString() };
     const readinessSeed = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
       receiptId: "readiness_receipt_hosted", organizationId: "org_slack_runtime",
@@ -708,6 +709,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         targets: [{
           projectTargetId: target.projectTargetId,
           bindingDigest: targetBindingDigest,
+          bindingGeneration: 1,
           state: "ready" as const,
         }],
         observedAt: now.toISOString(),
@@ -809,7 +811,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
             sourceEventId: "Ev_STALE_READINESS",
             receivedAt: now.toISOString(),
             actor: { provider: "slack", providerUserId: "U_MEMBER" },
-            target: { mention: "@opentag", agentId: "opentag" },
+            target: { mention: "@opentag" },
             command: { rawText: "fix", intent: "fix", args: {} },
             context: [],
             permissions: [],

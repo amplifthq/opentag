@@ -92,7 +92,7 @@ async function fixture(input: {
         sourceEventId: providerEventId,
         receivedAt: observedAt,
         actor: { provider: "slack", providerUserId: "U1001", handle: "alice", organizationId: "T123" },
-        target: { mention: "@opentag", agentId: "opentag" },
+        target: { mention: "@opentag" },
         command: { rawText: body, intent: "fix", args: {} },
         context: [],
         workItem: {

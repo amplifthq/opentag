@@ -1434,12 +1434,6 @@ export const RunnerRegistrationRequestV1Schema = z
   .object({
     ...ControlMutationRequestV1Shape,
     runnerId: NonEmptyIdSchema,
-    displayName: z
-      .string()
-      .min(1)
-      .max(120)
-      .refine((value) => value === value.trim(), "Display name must not contain leading or trailing whitespace.")
-      .optional(),
     capabilities: RelayCapabilitiesSchema,
   })
   .strict()
@@ -1873,6 +1867,7 @@ export const RunnerReadinessPayloadV1Schema = z
         .object({
           projectTargetId: NonEmptyIdSchema,
           bindingDigest: ReceiptDigestSchema,
+          bindingGeneration: z.number().int().positive(),
           state: ReadinessStateV1Schema,
           ...ReadinessReasonShape,
         })

@@ -709,6 +709,7 @@ export async function buildRunnerReadinessReceipt(input: {
       return {
         projectTargetId: target.projectTargetId,
         bindingDigest: target.bindingDigest,
+        bindingGeneration: target.bindingGeneration,
         state: "unknown" as const,
         reasonCode: "target_binding_stale" as const,
       };
@@ -733,11 +734,13 @@ export async function buildRunnerReadinessReceipt(input: {
       ? {
           projectTargetId: target.projectTargetId,
           bindingDigest: target.bindingDigest,
+          bindingGeneration: target.bindingGeneration,
           state: "ready" as const,
         }
       : {
           projectTargetId: target.projectTargetId,
           bindingDigest: target.bindingDigest,
+          bindingGeneration: target.bindingGeneration,
           state: "blocked" as const,
           reasonCode: "target_unavailable" as const,
         };

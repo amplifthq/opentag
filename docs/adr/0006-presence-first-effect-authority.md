@@ -375,6 +375,10 @@ and persona role are absent from the first database and API rather than being
 nullable columns. Slack already owns the rendered app avatar, while existing
 `role` fields describe human authorization or technical integration roles. A
 future product behavior must justify independently mutable profile metadata.
+Runner registration has no separate display name, and normalized inbound
+messages do not carry a caller-selected Agent or Teammate ID. Runner IDs remain
+diagnostic execution identities; the trusted channel binding supplies the
+Teammate identity.
 
 Being backed by an active Slack binding means the Teammate remains present in
 the channel even while its Runner is offline. The time-bounded derived field is

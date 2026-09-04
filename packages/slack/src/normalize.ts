@@ -24,7 +24,6 @@ export type SlackAppMentionInput = {
   eventId: string;
   eventTime: number;
   appId?: string;
-  agentId?: string;
   botUserId?: string;
   signatureVerified?: boolean;
   binding: SlackChannelBinding;
@@ -247,7 +246,6 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
 
   const command = commandFromRawText(rawText);
   const replyThreadTs = input.threadTs ?? input.ts;
-  const agentId = input.agentId ?? "opentag";
   const repositoryMetadata = repositoryMetadataFromBinding(input.binding);
   const threadKey = encodeSlackThreadKey({
     teamId: input.teamId,
@@ -268,7 +266,6 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
     },
     target: {
       mention: input.botUserId ? `<@${input.botUserId}>` : "<@app>",
-      agentId,
       ...(command.parsed?.executorHint ? { executorHint: command.parsed.executorHint } : {})
     },
     command,

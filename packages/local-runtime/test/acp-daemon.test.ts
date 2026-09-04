@@ -23,7 +23,7 @@ function event(input: { id: string; permissions?: OpenTagEvent["permissions"] })
     sourceEventId: `source_${input.id}`,
     receivedAt: "2026-07-12T00:00:00.000Z",
     actor: { provider: "slack", providerUserId: "U123", handle: "alice", organizationId: "T123" },
-    target: { mention: "@opentag", agentId: "opentag", executorHint: "reviewer" },
+    target: { mention: "@opentag", executorHint: "reviewer" },
     command: { rawText: "summarize the discussion", intent: "run", args: {} },
     context: [],
     permissions: input.permissions ?? [],

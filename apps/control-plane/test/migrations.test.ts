@@ -100,6 +100,11 @@ describe("checked-in PostgreSQL migrations", () => {
     expect(slack?.sql).toContain("DROP TABLE cp_source_app_installation");
     expect(slack?.sql).not.toContain("CREATE VIEW");
   });
+  it("removes the unused Runner display identity", async () => {
+    const migrations = await loadSqlMigrations(join(process.cwd(), "apps/control-plane/migrations"));
+    const runnerIdentity = migrations.find(({ name }) => name === "0025_runner_identity.sql");
+    expect(runnerIdentity?.sql).toContain("ALTER TABLE cp_runner DROP COLUMN display_name");
+  });
   it("serializes migration application and records the reviewed checksum", async () => {
     const harness = migrationHarness();
     const first = migration("0000_control_plane.sql", "CREATE TABLE example(id text)");

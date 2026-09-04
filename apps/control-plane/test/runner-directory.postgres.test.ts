@@ -24,7 +24,6 @@ function registrationRequest(
     requestId: "request_register_runner_1",
     operationId,
     runnerId: "runner_1",
-    displayName: "Build runner",
     capabilities: [
       "relay.claim-fence.v1",
       "relay.hosted-admission.v1",
@@ -414,6 +413,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Runner Directory PostgreSQL module", () => 
         {
           projectTargetId: "target_1",
           bindingDigest: targetBindingDigest,
+          bindingGeneration: 1,
           state: "ready" as const,
         },
       ],
