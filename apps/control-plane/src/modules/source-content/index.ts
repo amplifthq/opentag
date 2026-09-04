@@ -264,68 +264,6 @@ export function createRelayContentCustody(input: {
       });
     },
 
-    async addDependency(command: { organizationId: string; contentId: string;
-      sourceVersionRef: string; dependencyId: string; terminal: boolean }) {
-      await withPostgresTransaction(input.pool, async (client) => {
-        const content = await client.query(
-          `SELECT 1 FROM cp_source_content WHERE organization_id = $1
-             AND content_id = $2 AND source_version_ref = $3 FOR UPDATE`,
-          [command.organizationId, command.contentId, command.sourceVersionRef],
-        );
-        if (!content.rows[0]) throw new Error("source_content_unavailable");
-        await client.query(
-          `INSERT INTO cp_source_content_dependency(organization_id, content_id,
-            source_version_ref, dependency_id, terminal, created_at)
-           VALUES($1,$2,$3,$4,$5,$6)
-           ON CONFLICT (organization_id, content_id, dependency_id)
-           DO UPDATE SET terminal = cp_source_content_dependency.terminal OR EXCLUDED.terminal`,
-          [command.organizationId, command.contentId, command.sourceVersionRef,
-            command.dependencyId, command.terminal, input.clock.now()],
-        );
-        const state = await client.query<{ all_terminal: boolean }>(
-          `SELECT bool_and(terminal) AS all_terminal
-           FROM cp_source_content_dependency WHERE organization_id = $1 AND content_id = $2`,
-          [command.organizationId, command.contentId],
-        );
-        await client.query(
-          `UPDATE cp_source_content SET terminal_at = CASE WHEN $3
-             THEN COALESCE(terminal_at, $4) ELSE NULL END
-           WHERE organization_id = $1 AND content_id = $2`,
-          [command.organizationId, command.contentId,
-            state.rows[0]?.all_terminal === true, input.clock.now()],
-        );
-      });
-    },
-
-    async markDependencyTerminal(command: { organizationId: string; contentId: string;
-      dependencyId: string }) {
-      await withPostgresTransaction(input.pool, async (client) => {
-        const content = await client.query(
-          `SELECT 1 FROM cp_source_content WHERE organization_id = $1
-             AND content_id = $2 FOR UPDATE`,
-          [command.organizationId, command.contentId],
-        );
-        if (!content.rows[0]) throw new Error("source_content_unavailable");
-        const dependency = await client.query(
-          `UPDATE cp_source_content_dependency SET terminal = true
-           WHERE organization_id = $1 AND content_id = $2 AND dependency_id = $3
-           RETURNING dependency_id`,
-          [command.organizationId, command.contentId, command.dependencyId],
-        );
-        if (!dependency.rows[0]) throw new Error("source_content_dependency_unavailable");
-        const remaining = await client.query(
-          `SELECT 1 FROM cp_source_content_dependency WHERE organization_id = $1
-             AND content_id = $2 AND terminal = false LIMIT 1`,
-          [command.organizationId, command.contentId],
-        );
-        if (!remaining.rows[0]) await client.query(
-          `UPDATE cp_source_content SET terminal_at = COALESCE(terminal_at, $3)
-           WHERE organization_id = $1 AND content_id = $2`,
-          [command.organizationId, command.contentId, input.clock.now()],
-        );
-      });
-    },
-
     async withdraw(inputCommand: VerifiedSourceWithdrawalCommand) {
       const command = parseVerifiedSourceWithdrawalCommand(inputCommand);
       const requestDigest = digest(["opentag.relay.source-withdrawal/v1",
@@ -419,28 +357,6 @@ export function createRelayContentCustody(input: {
           );
         }
         return receipt;
-      });
-    },
-
-    async markTerminal(command: { organizationId: string; contentId: string }) {
-      await withPostgresTransaction(input.pool, async (client) => {
-        const result = await client.query(
-          `SELECT 1 FROM cp_source_content WHERE organization_id = $1
-             AND content_id = $2 FOR UPDATE`,
-          [command.organizationId, command.contentId],
-        );
-        if (!result.rows[0]) throw new Error("source_content_unavailable");
-        const nonterminal = await client.query(
-          `SELECT 1 FROM cp_source_content_dependency WHERE organization_id = $1
-             AND content_id = $2 AND terminal = false LIMIT 1`,
-          [command.organizationId, command.contentId],
-        );
-        if (nonterminal.rows[0]) throw new Error("source_content_nonterminal");
-        await client.query(
-          `UPDATE cp_source_content SET terminal_at = COALESCE(terminal_at, $3)
-           WHERE organization_id = $1 AND content_id = $2`,
-          [command.organizationId, command.contentId, input.clock.now()],
-        );
       });
     },
 

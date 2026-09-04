@@ -156,7 +156,10 @@ describe.skipIf(!TEST_DATABASE_URL)("relay source content envelope custody", () 
         sourceAppId: "slack", sourceDeliveryId: "delivery_revoked",
         verifiedAt: "2026-08-28T00:00:00.000Z",
         evidenceDigest: `sha256:${"b".repeat(64)}` } });
-    await original.markTerminal({ organizationId: "org_a", contentId: "purged" });
+    await fixture.pool.query(
+      "UPDATE cp_source_content SET terminal_at=$3 WHERE organization_id=$1 AND content_id=$2",
+      ["org_a", "purged", mutableNow],
+    );
     mutableNow = new Date("2026-09-04T00:00:01.000Z");
     await original.purge();
 

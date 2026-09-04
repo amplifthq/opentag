@@ -63,8 +63,6 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
       sourceDeliveryId: "d", sourceMessageId: "m", sourceVersionRef: "s:v1",
       purpose: "source_context", contentId: "content_1", payload: { text: "erase me" },
       expiresAt: new Date("2026-09-01T00:00:00Z") });
-    await custody.addDependency({ organizationId: "org_a", contentId: "content_1",
-      sourceVersionRef: "s:v1", dependencyId: "intent_1", terminal: false });
     await expect(custody.withdraw({ commandId: "withdraw_1", organizationId: "org_a",
       sourceVersionRef: "s:v1" } as never)).rejects.toThrow("source_withdrawal_verification_invalid");
     const storedReceipt = await custody.withdraw(verifiedWithdrawal("withdraw_1"));

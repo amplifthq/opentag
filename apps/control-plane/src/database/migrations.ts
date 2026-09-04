@@ -500,8 +500,8 @@ export async function checkSourceContentSchemaReadiness(
     const result = await pool.query<{ present: boolean }>(
       `SELECT bool_and(to_regclass(name) IS NOT NULL) AS present
        FROM unnest($1::text[]) AS required(name)`,
-      [["cp_source_content", "cp_source_content_dependency",
-        "cp_source_content_read_grant", "cp_source_replay_tombstone"]],
+      [["cp_source_content", "cp_source_content_read_grant",
+        "cp_source_replay_tombstone"]],
     );
     return result.rows[0]?.present
       ? { ready: true }

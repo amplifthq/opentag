@@ -264,7 +264,6 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "cp_source_app_installation",
       "cp_source_binding",
       "cp_source_content",
-      "cp_source_content_dependency",
       "cp_source_content_invalidation_receipt",
       "cp_source_content_read_grant",
       "cp_source_replay_tombstone",

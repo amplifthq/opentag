@@ -97,8 +97,6 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
       sourceDeliveryId: "d", sourceMessageId: "m", sourceVersionRef: "s:live:v1",
       purpose: "source_context", contentId: "content_live", payload: { text: "still required" },
       expiresAt: new Date("2026-08-28T00:01:00Z") });
-    await custody.addDependency({ organizationId: "org_a", contentId: "content_live",
-      sourceVersionRef: "s:live:v1", dependencyId: "run_live", terminal: false });
     now = new Date("2026-08-28T00:02:00Z");
     await expect(custody.issueReadGrant({ organizationId: "org_a", runId: "run_live",
       attemptId: "attempt_live", fenceDigest: "fence_live", contentIds: ["content_live"],
@@ -166,6 +164,10 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
       await expect(hosted.cancelRun({ organizationId: "org_grant",
         runId: claim.claim.runId, reason: "test_cleanup" }))
         .resolves.toEqual({ kind: "cancelled" });
+      expect((await fixture.pool.query<{ terminal_at: Date | null }>(
+        "SELECT terminal_at FROM cp_source_content WHERE organization_id=$1 AND content_id=$2",
+        ["org_grant", "content_grant"],
+      )).rows[0]?.terminal_at).toBeInstanceOf(Date);
     }
 
     const missing = await hostedAdmissionFixture({ runId: "run_grant_missing",

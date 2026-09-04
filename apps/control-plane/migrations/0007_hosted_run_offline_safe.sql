@@ -198,10 +198,7 @@ FOR EACH ROW EXECUTE FUNCTION cp_hosted_run_frozen_admission_guard();
 UPDATE cp_source_content content SET terminal_at=COALESCE(content.terminal_at,clock_timestamp())
 FROM cp_hosted_run run
 WHERE run.organization_id=content.organization_id AND run.terminal_kind IS NOT NULL
-  AND content.content_id=ANY(run.source_content_ids)
-  AND NOT EXISTS(SELECT 1 FROM cp_source_content_dependency dependency
-    WHERE dependency.organization_id=content.organization_id
-      AND dependency.content_id=content.content_id AND NOT dependency.terminal);
+  AND content.content_id=ANY(run.source_content_ids);
 
 CREATE FUNCTION cp_hosted_run_source_content_terminal_after() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -210,10 +207,7 @@ BEGIN
     UPDATE cp_source_content content
     SET terminal_at=COALESCE(content.terminal_at,clock_timestamp())
     WHERE content.organization_id=NEW.organization_id
-      AND content.content_id=ANY(NEW.source_content_ids)
-      AND NOT EXISTS(SELECT 1 FROM cp_source_content_dependency dependency
-        WHERE dependency.organization_id=content.organization_id
-          AND dependency.content_id=content.content_id AND NOT dependency.terminal);
+      AND content.content_id=ANY(NEW.source_content_ids);
   END IF;
   RETURN NEW;
 END;

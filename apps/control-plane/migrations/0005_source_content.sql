@@ -36,21 +36,6 @@ CREATE INDEX cp_source_content_source_version_idx
 CREATE INDEX cp_source_content_purge_idx
   ON cp_source_content(terminal_at, expires_at);
 
-CREATE TABLE cp_source_content_dependency (
-  organization_id text NOT NULL,
-  content_id text NOT NULL,
-  source_version_ref text NOT NULL,
-  dependency_id text NOT NULL,
-  terminal boolean NOT NULL DEFAULT false,
-  created_at timestamptz NOT NULL,
-  PRIMARY KEY (organization_id, content_id, dependency_id),
-  FOREIGN KEY (organization_id, content_id)
-    REFERENCES cp_source_content(organization_id, content_id) ON DELETE CASCADE
-);
-
-CREATE INDEX cp_source_content_dependency_version_idx
-  ON cp_source_content_dependency(organization_id, source_version_ref, terminal);
-
 CREATE TABLE cp_source_content_read_grant (
   grant_id text PRIMARY KEY,
   organization_id text NOT NULL REFERENCES cp_organization(organization_id),
