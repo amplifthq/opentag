@@ -231,8 +231,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         kind: "settled", resolution: { kind: "waiting_for_runner" },
       });
       const resolution = await slackFixture.pool.query<{ run_id: string }>(
-        `SELECT resolution->>'runId' AS run_id FROM cp_source_resolution
-         WHERE organization_id='org_slack_runtime'`);
+        `SELECT resolution->>'runId' AS run_id FROM cp_ingress_reservation
+         WHERE organization_id='org_slack_runtime' AND state='resolved'`);
       const runId = resolution.rows[0]?.run_id;
       expect(runId).toMatch(/^run_[a-f0-9]{31}$/u);
       const durable = await slackFixture.pool.query<{
@@ -914,8 +914,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
           code: "source_context_invalid" },
       });
       const durable = await fixture.pool.query(
-        `SELECT (SELECT count(*)::int FROM cp_source_resolution
-                   WHERE organization_id = $1) AS resolutions,
+        `SELECT (SELECT count(*)::int FROM cp_ingress_reservation
+                   WHERE organization_id = $1 AND resolution IS NOT NULL) AS resolutions,
                 (SELECT state FROM cp_job WHERE job_id = $2) AS job_state`,
         ["org_runtime_source", `source-ingress:${reservationId}`],
       );

@@ -451,18 +451,22 @@ export function createControlPlaneRuntime(input: {
         idempotencyKey: command.idempotencyKey, runId,
         admissionDigest: admission.envelopeDigest, policyDigest: policy.receiptDigest,
       });
-      await postgres.pool.query(
-        `INSERT INTO cp_source_resolution_admission(idempotency_key, organization_id,
-           request_digest, run_id, state, resolution, created_at)
-         VALUES($1,$2,$3,$4,'pending',NULL,$5) ON CONFLICT (idempotency_key) DO NOTHING`,
-        [command.idempotencyKey, admission.organizationId,
-          requestDigest, runId, clock.now()],
-      );
+      if (command.idempotencyKey !== `source-ingress:${command.reservation.reservationId}`) {
+        return { kind: "invalid_request", code: "source_resolution_idempotency_conflict" } as const;
+      }
       const durable = await postgres.pool.query<{ request_digest: string;
-        run_id: string; state: "pending" | "decided"; resolution: {
-          kind: "accepted" | "waiting_for_runner"; runId: string } | null }>(
-        `SELECT request_digest, run_id, state, resolution FROM cp_source_resolution_admission
-         WHERE idempotency_key = $1`, [command.idempotencyKey],
+        run_id: string }>(
+        `UPDATE cp_ingress_reservation
+         SET resolution_request_digest = COALESCE(resolution_request_digest, $3),
+             resolution_run_id = COALESCE(resolution_run_id, $4)
+         WHERE organization_id = $1 AND reservation_id = $2 AND state = 'pending'
+           AND (
+             (resolution_request_digest IS NULL AND resolution_run_id IS NULL)
+             OR (resolution_request_digest = $3 AND resolution_run_id = $4)
+           )
+         RETURNING resolution_request_digest AS request_digest,
+                   resolution_run_id AS run_id`,
+        [admission.organizationId, command.reservation.reservationId, requestDigest, runId],
       );
       const stored = durable.rows[0];
       if (!stored || stored.request_digest !== requestDigest || stored.run_id !== runId) {
@@ -532,11 +536,6 @@ export function createControlPlaneRuntime(input: {
       const resolution = admitted.view.status === "waiting_for_runner"
         ? { kind: "waiting_for_runner", runId: admitted.runId } as const
         : { kind: "accepted", runId: admitted.runId } as const;
-      await postgres.pool.query(
-        `UPDATE cp_source_resolution_admission SET state = 'decided', resolution = $2::jsonb
-         WHERE idempotency_key = $1 AND request_digest = $3 AND run_id = $4`,
-        [command.idempotencyKey, JSON.stringify(resolution), requestDigest, runId],
-      );
       return resolution;
     },
   } satisfies SourceResolutionPort;

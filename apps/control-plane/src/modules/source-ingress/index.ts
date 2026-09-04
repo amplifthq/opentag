@@ -59,8 +59,6 @@ export type IngressReservation = Readonly<{
 export type SourceResolution =
   | { kind: "accepted"; runId: string }
   | { kind: "waiting_for_runner"; runId: string }
-  | { kind: "follow_up_queued"; followUpId: string }
-  | { kind: "binding_change_pending"; code: string }
   | { kind: "setup_required"; code: string }
   | { kind: "not_authorized"; code: string }
   | { kind: "invalid_request"; code: string }
@@ -73,8 +71,7 @@ export type SourceResolution =
 const SourceResolutionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("accepted"), runId: opaqueIdentifier }).strict(),
   z.object({ kind: z.literal("waiting_for_runner"), runId: opaqueIdentifier }).strict(),
-  z.object({ kind: z.literal("follow_up_queued"), followUpId: opaqueIdentifier }).strict(),
-  ...(["binding_change_pending", "setup_required", "not_authorized", "invalid_request",
+  ...(["setup_required", "not_authorized", "invalid_request",
     "queue_full", "storage_quota_exceeded", "source_content_deleted",
     "temporarily_unavailable"] as const).map((kind) => z.object({
       kind: z.literal(kind), code: closedCode,
@@ -96,6 +93,10 @@ type ReservationRow = {
   content_aad_digest: string;
   content_key_version: string;
   content_payload_digest: string;
+  resolution_request_digest: string | null;
+  resolution_run_id: string | null;
+  resolution: SourceResolution | null;
+  resolved_at: Date | null;
   state: "pending" | "resolved";
   created_at: Date;
 };
@@ -266,8 +267,9 @@ export function createSourceIngressService(input: {
 
     async readResolution(reservation: IngressReservation) {
       const result = await input.pool.query<{ resolution: SourceResolution }>(
-        `SELECT resolution FROM cp_source_resolution
-         WHERE organization_id = $1 AND reservation_id = $2`,
+        `SELECT resolution FROM cp_ingress_reservation
+         WHERE organization_id = $1 AND reservation_id = $2
+           AND state = 'resolved'`,
         [reservation.organizationId, reservation.reservationId],
       );
       return result.rows[0]?.resolution ?? null;
@@ -324,24 +326,13 @@ export function createSourceIngressService(input: {
         );
         const row = exhausted.rows[0];
         if (!row) return null;
-        const existing = await client.query<{ resolution: SourceResolution }>(
-          `SELECT resolution FROM cp_source_resolution
-           WHERE organization_id = $1 AND reservation_id = $2 FOR UPDATE`,
-          [row.organization_id, row.reservation_id],
-        );
-        const resolution = existing.rows[0]?.resolution ?? poisonedResolution;
-        if (!existing.rows[0]) {
-          await client.query(
-            `INSERT INTO cp_source_resolution(resolution_id, organization_id, reservation_id,
-               resolution, operator_attention, created_at) VALUES($1,$2,$3,$4,true,$5)`,
-            [stableId("resolution", [row.organization_id, row.reservation_id]),
-              row.organization_id, row.reservation_id, resolution, input.clock.now()],
-          );
-        }
+        const resolution = row.resolution ?? poisonedResolution;
         await client.query(
-          `UPDATE cp_ingress_reservation SET state = 'resolved', updated_at = $2
+          `UPDATE cp_ingress_reservation
+           SET state = 'resolved', resolution = $2,
+               resolved_at = COALESCE(resolved_at, $3), updated_at = $3
            WHERE reservation_id = $1`,
-          [row.reservation_id, input.clock.now()],
+          [row.reservation_id, resolution, input.clock.now()],
         );
         await client.query(
           `UPDATE cp_job SET state = 'succeeded', lease_owner = NULL,
@@ -357,8 +348,7 @@ export function createSourceIngressService(input: {
     },
 
     async recordResolution(command: { reservation: IngressReservation;
-      resolution: SourceResolution; jobId: string; leaseToken: string;
-      operatorAttention?: boolean }) {
+      resolution: SourceResolution; jobId: string; leaseToken: string }) {
       const resolution = SourceResolutionSchema.parse(command.resolution) as SourceResolution;
       return withPostgresTransaction(input.pool, async (client) => {
         const lease = await client.query(
@@ -372,23 +362,18 @@ export function createSourceIngressService(input: {
             input.clock.now(), command.reservation.reservationId],
         );
         if (!lease.rows[0]) throw new Error("source_ingress_stale_lease");
-        const existing = await client.query<{ resolution: SourceResolution }>(
-          `SELECT resolution FROM cp_source_resolution
+        const existing = await client.query<{ resolution: SourceResolution | null }>(
+          `SELECT resolution FROM cp_ingress_reservation
            WHERE organization_id = $1 AND reservation_id = $2 FOR UPDATE`,
           [command.reservation.organizationId, command.reservation.reservationId],
         );
-        if (existing.rows[0]) return existing.rows[0].resolution;
-        const resolutionId = stableId("resolution", [command.reservation.organizationId,
-          command.reservation.reservationId]);
+        if (!existing.rows[0]) throw new Error("source_ingress_reservation_missing");
+        if (existing.rows[0].resolution) return existing.rows[0].resolution;
         await client.query(
-          `INSERT INTO cp_source_resolution(resolution_id, organization_id, reservation_id,
-             resolution, operator_attention, created_at) VALUES($1,$2,$3,$4,$5,$6)`,
-          [resolutionId, command.reservation.organizationId, command.reservation.reservationId,
-            resolution, command.operatorAttention ?? false, input.clock.now()],
-        );
-        await client.query(
-          "UPDATE cp_ingress_reservation SET state = 'resolved', updated_at = $2 WHERE reservation_id = $1",
-          [command.reservation.reservationId, input.clock.now()],
+          `UPDATE cp_ingress_reservation
+           SET state = 'resolved', resolution = $2, resolved_at = $3, updated_at = $3
+           WHERE reservation_id = $1 AND state = 'pending'`,
+          [command.reservation.reservationId, resolution, input.clock.now()],
         );
         return resolution;
       });

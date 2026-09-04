@@ -115,7 +115,7 @@ export function createSourceIngressWorker(input: {
         if (reservation && job.attemptCount >= job.maxAttempts) {
           const resolution = await input.ingress.recordResolution({
             reservation, resolution: poisonResolution(error), jobId: job.jobId,
-            leaseToken: job.leaseToken, operatorAttention: true,
+            leaseToken: job.leaseToken,
           });
           const settlement = await input.queue.succeed({
             jobId: job.jobId, leaseToken: job.leaseToken, outcome: resolution,

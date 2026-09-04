@@ -155,18 +155,6 @@ ALTER TABLE cp_permission_request DROP CONSTRAINT cp_permission_request_state_ch
 ALTER TABLE cp_permission_request ADD CONSTRAINT cp_permission_request_state_check
   CHECK (state IN ('waiting','authorized','denied','revoked'));
 
-CREATE TABLE cp_source_resolution_admission (
-  idempotency_key text PRIMARY KEY,
-  organization_id text NOT NULL REFERENCES cp_organization(organization_id),
-  request_digest text NOT NULL,
-  run_id text NOT NULL,
-  state text NOT NULL CHECK (state IN ('pending','decided')),
-  resolution jsonb,
-  created_at timestamptz NOT NULL,
-  CHECK ((state = 'pending' AND resolution IS NULL) OR
-    (state = 'decided' AND resolution->>'kind' IN ('accepted','waiting_for_runner')))
-);
-
 CREATE FUNCTION cp_hosted_run_frozen_admission_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN

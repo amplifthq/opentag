@@ -195,10 +195,10 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
     await expect(worker.processNext()).resolves.toEqual(expect.objectContaining({ kind: "settled" }));
 
     const resolution = await fixture.pool.query(
-      `SELECT resolution, operator_attention FROM cp_source_resolution`,
+      `SELECT resolution FROM cp_ingress_reservation`,
     );
     expect(resolution.rows).toEqual([{
-      resolution: { kind: "accepted", runId: "run_1" }, operator_attention: false,
+      resolution: { kind: "accepted", runId: "run_1" },
     }]);
     const job = await fixture.pool.query("SELECT state, payload FROM cp_job");
     expect(job.rows[0]?.state).toBe("succeeded");
@@ -250,17 +250,16 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
         code: "source_ingress_processing_poisoned" },
     }));
     const closed = await fixture.pool.query(
-      `SELECT reservation.state, resolution.resolution,
-              resolution.operator_attention, job.state AS job_state,
+      `SELECT reservation.state, reservation.resolution,
+              job.state AS job_state,
               job.settlement_outcome AS outcome
        FROM cp_ingress_reservation reservation
-       JOIN cp_source_resolution resolution USING (organization_id, reservation_id)
        JOIN cp_job job ON job.organization_id = reservation.organization_id`,
     );
     expect(closed.rows).toEqual([{
       state: "resolved", resolution: { kind: "temporarily_unavailable",
         code: "source_ingress_processing_poisoned" },
-      operator_attention: true, job_state: "succeeded",
+      job_state: "succeeded",
       outcome: { kind: "temporarily_unavailable",
         code: "source_ingress_processing_poisoned" },
     }]);
@@ -294,17 +293,16 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
     releaseAuthority();
     await expect(staleResult).resolves.toEqual(expect.objectContaining({ kind: "stale_lease" }));
     const rows = await fixture.pool.query(
-      `SELECT reservation.state, resolution.resolution,
-              resolution.operator_attention, count(job.settled_at)::int AS settlements
+      `SELECT reservation.state, reservation.resolution,
+              count(job.settled_at)::int AS settlements
        FROM cp_ingress_reservation reservation
-       JOIN cp_source_resolution resolution USING (organization_id, reservation_id)
        JOIN cp_job job ON job.organization_id = reservation.organization_id
-       GROUP BY reservation.state, resolution.resolution, resolution.operator_attention`,
+       GROUP BY reservation.state, reservation.resolution`,
     );
     expect(rows.rows).toEqual([{
       state: "resolved", resolution: { kind: "temporarily_unavailable",
         code: "source_ingress_processing_poisoned" },
-      operator_attention: true, settlements: 1,
+      settlements: 1,
     }]);
   });
 
@@ -322,7 +320,9 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
     await expect(stale.processNext()).resolves.toEqual(expect.objectContaining({
       kind: "stale_lease",
     }));
-    expect((await fixture.pool.query("SELECT * FROM cp_source_resolution")).rows).toEqual([]);
+    expect((await fixture.pool.query(
+      "SELECT resolution FROM cp_ingress_reservation",
+    )).rows).toEqual([{ resolution: null }]);
 
     const recovered = createSourceIngressWorker({ ingress, queue: jobs,
       workerId: "recovered", retryDelayMs: 10_000, clock,
@@ -330,7 +330,9 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
     await expect(recovered.processNext()).resolves.toEqual(expect.objectContaining({
       kind: "settled",
     }));
-    const resolution = await fixture.pool.query("SELECT resolution FROM cp_source_resolution");
+    const resolution = await fixture.pool.query(
+      "SELECT resolution FROM cp_ingress_reservation",
+    );
     expect(resolution.rows).toEqual([{ resolution: { kind: "accepted", runId: "run_current" } }]);
   });
 
@@ -391,16 +393,15 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
       resolver: { resolve: async () => { throw new Error("plaintext from provider must not persist"); } } });
     await expect(worker.processNext()).resolves.toEqual(expect.objectContaining({ kind: "settled" }));
     const state = await fixture.pool.query(
-      `SELECT reservation.state, resolution.resolution, resolution.operator_attention,
+      `SELECT reservation.state, reservation.resolution,
               job.state AS job_state
        FROM cp_ingress_reservation reservation
-       JOIN cp_source_resolution resolution USING (organization_id, reservation_id)
        JOIN cp_job job ON job.organization_id = reservation.organization_id`,
     );
     expect(state.rows).toEqual([{
       state: "resolved", resolution: { kind: "temporarily_unavailable",
         code: "source_ingress_processing_poisoned" },
-      operator_attention: true, job_state: "succeeded",
+      job_state: "succeeded",
     }]);
     expect(JSON.stringify(state.rows)).not.toContain("plaintext from provider");
   });
@@ -415,24 +416,21 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
         code: "private provider message must never persist" }) } });
     await worker.processNext();
     const resolution = await fixture.pool.query(
-      "SELECT resolution, operator_attention FROM cp_source_resolution",
+      "SELECT resolution FROM cp_ingress_reservation",
     );
     expect(resolution.rows).toEqual([{
       resolution: { kind: "temporarily_unavailable",
         code: "source_ingress_processing_poisoned" },
-      operator_attention: true,
     }]);
     expect(JSON.stringify(resolution.rows)).not.toContain("private provider message");
   });
 
-  it("rejects plaintext-like run and follow-up identifiers from resolutions and settlements", async () => {
+  it("rejects plaintext-like run identifiers from resolutions and settlements", async () => {
     const cases = [
       { deliveryId: "opaque_accepted", resolution: {
         kind: "accepted" as const, runId: "private accepted text must not persist" } },
       { deliveryId: "opaque_waiting", resolution: {
         kind: "waiting_for_runner" as const, runId: "private waiting text must not persist" } },
-      { deliveryId: "opaque_followup", resolution: {
-        kind: "follow_up_queued" as const, followUpId: "private follow up text must not persist" } },
     ];
     for (const item of cases) {
       const { ingress, jobs } = components();
@@ -449,18 +447,18 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
       await worker.processNext();
     }
     const persisted = await fixture.pool.query(
-      `SELECT resolution.resolution, job.settlement_outcome AS outcome
-       FROM cp_source_resolution resolution
-       JOIN cp_job job ON job.organization_id = resolution.organization_id
-         AND job.payload->>'reservationId' = resolution.reservation_id
-       ORDER BY resolution.reservation_id`,
+      `SELECT reservation.resolution, job.settlement_outcome AS outcome
+       FROM cp_ingress_reservation reservation
+       JOIN cp_job job ON job.organization_id = reservation.organization_id
+         AND job.payload->>'reservationId' = reservation.reservation_id
+       ORDER BY reservation.reservation_id`,
     );
-    expect(persisted.rows).toHaveLength(3);
+    expect(persisted.rows).toHaveLength(2);
     expect(persisted.rows.every((row) => row.resolution.kind === "temporarily_unavailable"
       && row.resolution.code === "source_ingress_processing_poisoned"
       && row.outcome.kind === "temporarily_unavailable")).toBe(true);
     const serialized = JSON.stringify(persisted.rows);
-    for (const phrase of ["private accepted text", "private waiting text", "private follow up text"]) {
+    for (const phrase of ["private accepted text", "private waiting text"]) {
       expect(serialized).not.toContain(phrase);
     }
   });

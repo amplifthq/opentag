@@ -267,8 +267,6 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "cp_source_content_invalidation_receipt",
       "cp_source_content_read_grant",
       "cp_source_replay_tombstone",
-      "cp_source_resolution",
-      "cp_source_resolution_admission",
     ]);
     expect(tableNames).not.toContain("cp_material_action_non_start_proof");
 

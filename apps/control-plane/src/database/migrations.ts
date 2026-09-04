@@ -517,9 +517,9 @@ export async function checkSourceIngressSchemaReadiness(
   try {
     const result = await pool.query<{ present: boolean }>(
       `SELECT bool_and(to_regclass(name) IS NOT NULL) AS present
-       FROM unnest($1::text[]) AS required(name)`,
+      FROM unnest($1::text[]) AS required(name)`,
       [["cp_source_app_installation", "cp_source_binding",
-        "cp_ingress_reservation", "cp_source_resolution"]],
+        "cp_ingress_reservation"]],
     );
     return result.rows[0]?.present
       ? { ready: true }
