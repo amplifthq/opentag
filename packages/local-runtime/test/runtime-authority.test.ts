@@ -1,207 +1,247 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { OpenTagEvent, OpenTagRunResult } from "@opentag/core";
+import type { ExecutorAdapter, ExecutorRunInput } from "@opentag/runner";
 import { describe, expect, it, vi } from "vitest";
-import type { OpenTagDaemonConfig } from "../src/index.js";
 import {
-  createDaemonClient,
-  createDaemonRuntimeInput,
-  pullRequestOptionsFromConfig,
-  serveDaemon,
-} from "../src/index.js";
+  executeClaimedRun,
+  type ClaimedRun,
+  type ClaimedRunExecutionClient,
+} from "../src/daemon.js";
 
-const pairedConfig: OpenTagDaemonConfig = {
-  runnerId: "runner_hosted",
-  dispatcherUrl: "https://control.example",
-  repositories: [],
-  agents: {},
-  scratchRoot: "/tmp/opentag-scratch",
-  keepScratch: "on_failure",
-  approvalMode: "auto",
-  runnerToken: "runtime_token",
-  trustedRelay: {
-    schemaVersion: 1,
-    origin: "https://control.example",
-    authorizedAt: "2026-08-08T00:00:00.000Z",
-    authorizationMethod: "explicit_cli",
-  },
-  controlRegistration: {
-    kind: "hosted_control_v1",
-    state: "paired",
-    operationId: "operation_pair_1",
-    registration: {
-      schemaVersion: 1,
-      protocolVersion: "1.0",
-      organizationId: "org_1",
-      runnerId: "runner_hosted",
-      registrationGeneration: 1,
-      credentialGeneration: 1,
-      credentialId: "credential_runtime_1",
-      credentialPurpose: "runtime",
-      createdAt: "2026-08-08T00:00:00.000Z",
+function claimed(id: string): ClaimedRun {
+  const event: OpenTagEvent = {
+    id: `evt_${id}`,
+    source: "slack",
+    sourceEventId: `Ev${id}`,
+    receivedAt: "2026-08-10T00:00:00.000Z",
+    actor: { provider: "slack", providerUserId: "U123", handle: "alice", organizationId: "T123" },
+    target: { mention: "@opentag", agentId: "opentag", executorHint: "reviewer" },
+    command: { rawText: "inspect this", intent: "run", args: {} },
+    context: [],
+    permissions: [],
+    callback: { provider: "slack", uri: "https://slack.com/api/chat.postMessage" },
+    metadata: { teamId: "T123", channelId: "C123" },
+  };
+  return {
+    run: {
+      id: `run_${id}`,
+      eventId: event.id,
+      status: "assigned",
+      assignedRunnerId: "runner_local",
+      createdAt: "2026-08-10T00:00:00.000Z",
+      updatedAt: "2026-08-10T00:00:00.000Z",
     },
-  },
-  pollIntervalMs: 1,
-  heartbeatIntervalMs: 15_000,
-};
+    event,
+    attemptId: `attempt_${id}`,
+    attemptNumber: 1,
+    fencingToken: `fence_${id}`,
+  };
+}
 
-describe("local-runtime public authority boundary", () => {
-  it("accepts the non-persisted E2E GitHub origin only for the sentinel Hosted Control runtime", async () => {
-    const config = {
-      ...pairedConfig,
-      githubToken: "opentag_e2e_no_provider_credential_v1",
+function lifecycle() {
+  const complete = vi.fn(async () => {});
+  const requestActionPermission = vi.fn<ClaimedRunExecutionClient["requestActionPermission"]>();
+  const resolveActionPermission = vi.fn<ClaimedRunExecutionClient["resolveActionPermission"]>();
+  const recordMaterialActionReceipt = vi.fn<ClaimedRunExecutionClient["recordMaterialActionReceipt"]>();
+  const client: ClaimedRunExecutionClient = {
+    markRunning: vi.fn(async () => {}),
+    heartbeat: vi.fn(async () => {}),
+    progress: vi.fn(async () => {}),
+    complete,
+    requestActionPermission,
+    resolveActionPermission,
+    recordMaterialActionReceipt,
+  };
+  return { client, complete, requestActionPermission, resolveActionPermission, recordMaterialActionReceipt };
+}
+
+function scratchRoot(label: string): string {
+  return join(mkdtempSync(join(tmpdir(), `opentag-authority-${label}-`)), "scratch");
+}
+
+describe("claimed Run execution authority", () => {
+  it("cancels before executor start when the supplied authority is no longer current", async () => {
+    const authoritativeClaim = claimed("stale_before_start");
+    const run = vi.fn(async () => ({ conclusion: "success" as const, summary: "must not run" }));
+    const cancel = vi.fn(async () => {});
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Reviewer",
+      async canRun() { return { ready: true }; },
+      run,
+      cancel,
     };
-    expect(pullRequestOptionsFromConfig(config)).toBeUndefined();
-    const runtime = createDaemonRuntimeInput(config, {
-      databasePath: ":memory:",
-      githubApiOrigin: "http://127.0.0.1:43123",
-    });
-    expect(runtime.mode).toBe("control-v1-sidecar");
-    if (runtime.mode === "control-v1-sidecar") {
-      await runtime.controlLoop.close();
-    }
-  });
+    const state = lifecycle();
 
-  it("rejects E2E GitHub origins outside Hosted Control without exposing values", () => {
-    const { controlRegistration: _registration, ...legacyConfig } = pairedConfig;
-    const apiOrigin = "http://127.0.0.1:43123";
-    expect(() => createDaemonRuntimeInput(legacyConfig, { githubApiOrigin: apiOrigin }))
-      .toThrow(/requires paired Hosted Control V1/u);
-    expect(() => createDaemonRuntimeInput({
-      ...pairedConfig,
-      githubToken: "opentag_e2e_no_provider_credential_v1",
-    }, {
-      databasePath: ":memory:",
-      githubApiOrigin: "",
-    })).toThrow("github_source_api_origin_invalid");
-
-    const token = "real_provider_secret";
-    try {
-      createDaemonRuntimeInput({ ...pairedConfig, githubToken: token }, {
-        databasePath: ":memory:",
-        githubApiOrigin: apiOrigin,
-      });
-      throw new Error("expected E2E origin rejection");
-    } catch (error) {
-      const loggable = error instanceof Error ? `${error.name}:${error.message}` : String(error);
-      expect(loggable).toContain("github_source_api_origin_invalid");
-      expect(loggable).not.toContain(token);
-      expect(loggable).not.toContain(apiOrigin);
-    }
-  });
-
-  it("rejects a legacy claim-capable client for paired Control V1 config", () => {
-    expect(() => createDaemonClient(pairedConfig)).toThrow(
-      /does not expose a legacy claim-capable daemon client/iu
-    );
-  });
-
-  it("rejects a legacy runtime carrying a HostedControlLoop even through any", async () => {
-    await expect(serveDaemon({
-      mode: "legacy",
-      runnerId: "runner_legacy",
+    await executeClaimedRun({
+      runnerId: "runner_local",
+      claimed: authoritativeClaim,
       repositories: [],
-      executors: {},
-      client: { claim: vi.fn() },
-      controlLoop: {
-        async beforeIteration() { return true; },
-        async afterIteration() {},
-        abort() {},
-        async close() {},
+      executors: { reviewer: executor },
+      scratchRoot: scratchRoot("stale"),
+      heartbeatIntervalMs: 0,
+      hostedExecutionAuthority: {
+        leaseExpiresAt: "2099-08-10T00:00:00.000Z",
+        assertCurrent: async () => false,
       },
-    } as any)).rejects.toThrow(/forbids a HostedControlLoop/iu);
-  });
-
-  it("rejects a Control V1 sidecar missing its HostedControlLoop even through any", async () => {
-    await expect(serveDaemon({
-      mode: "control-v1-sidecar",
-    } as any)).rejects.toThrow(/requires a HostedControlLoop/iu);
-  });
-
-  it("rejects the removed boolean authority boundary without claiming", async () => {
-    const claim = vi.fn(async () => null);
-    await expect(serveDaemon({
-      mode: "legacy",
-      controlV1SidecarOnly: true,
-      runnerId: "runner_legacy",
-      repositories: [],
-      executors: {},
-      client: { claim },
-    } as any)).rejects.toThrow(/not a valid authority boundary/iu);
-    expect(claim).not.toHaveBeenCalled();
-  });
-
-  it("runs a valid Control V1 sidecar without exposing or invoking claim", async () => {
-    const abort = new AbortController();
-    const claim = vi.fn();
-    const events: string[] = [];
-    await serveDaemon({
-      mode: "control-v1-sidecar",
-      pollIntervalMs: 1,
-      signal: abort.signal,
-      controlLoop: {
-        async beforeIteration() {
-          events.push("before");
-          abort.abort();
-          return true;
-        },
-        async afterIteration() { events.push("after"); },
-        abort() { events.push("abort"); },
-        async close() { events.push("close"); },
-      },
+      client: state.client,
     });
-    expect(claim).not.toHaveBeenCalled();
-    expect(events).toEqual(["before", "abort", "after", "close"]);
+
+    expect(run).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledWith("run_stale_before_start", "attempt_stale_before_start");
+    expect(state.complete).not.toHaveBeenCalled();
+    expect("claim" in state.client).toBe(false);
   });
 
-  it("immediately continues the Control V1 sidecar after useful work", async () => {
-    const abort = new AbortController();
-    let iterations = 0;
-    const safetyAbort = setTimeout(() => abort.abort(), 100);
+  it("cancels at the immutable local lease deadline without completing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-10T00:00:00.000Z"));
+    const authoritativeClaim = claimed("deadline");
+    const cancel = vi.fn(async () => {});
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Reviewer",
+      async canRun() { return { ready: true }; },
+      async run() {
+        started();
+        return new Promise<OpenTagRunResult>(() => {});
+      },
+      cancel,
+    };
+    const state = lifecycle();
     try {
-      await serveDaemon({
-        mode: "control-v1-sidecar",
-        pollIntervalMs: 60_000,
-        signal: abort.signal,
-        controlLoop: {
-          async beforeIteration() {
-            iterations += 1;
-            if (iterations === 2) abort.abort();
-            return true;
-          },
-          async afterIteration() {},
-          abort() {},
-          async close() {},
+      const execution = executeClaimedRun({
+        runnerId: "runner_local",
+        claimed: authoritativeClaim,
+        repositories: [],
+        executors: { reviewer: executor },
+        scratchRoot: scratchRoot("deadline"),
+        heartbeatIntervalMs: 0,
+        hostedExecutionAuthority: {
+          leaseExpiresAt: "2026-08-10T00:00:01.000Z",
+          assertCurrent: async () => true,
+          now: () => new Date(),
         },
+        client: state.client,
       });
+      await didStart;
+      await vi.advanceTimersByTimeAsync(999);
+      expect(cancel).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await execution;
     } finally {
-      clearTimeout(safetyAbort);
+      vi.useRealTimers();
     }
 
-    expect(iterations).toBe(2);
+    expect(cancel).toHaveBeenCalledWith("run_deadline", "attempt_deadline");
+    expect(state.complete).not.toHaveBeenCalled();
   });
 
-  it("keeps the valid legacy claim loop unchanged", async () => {
-    const abort = new AbortController();
-    const claim = vi.fn(async () => {
-      abort.abort();
-      return null;
-    });
-    await serveDaemon({
-      mode: "legacy",
-      runnerId: "runner_legacy",
-      repositories: [],
-      executors: {},
-      pollIntervalMs: 1,
-      signal: abort.signal,
-      client: {
-        claim,
-        async markRunning() {},
-        async heartbeat() {},
-        async progress() {},
-        async complete() {},
-        async requestActionPermission() { throw new Error("should not run"); },
-        async resolveActionPermission() { throw new Error("should not run"); },
-        async recordMaterialActionReceipt() { throw new Error("should not run"); },
+  it("extends the local deadline only from an accepted heartbeat lease", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-10T00:00:00.000Z"));
+    const authoritativeClaim = claimed("renewed");
+    const cancel = vi.fn(async () => {});
+    let acceptedLease = "2026-08-10T00:00:01.000Z";
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Reviewer",
+      async canRun() { return { ready: true }; },
+      async run() {
+        started();
+        return new Promise<OpenTagRunResult>(() => {});
       },
+      cancel,
+    };
+    const state = lifecycle();
+    state.client.heartbeat = vi.fn(async () => {
+      acceptedLease = "2026-08-10T00:00:02.000Z";
     });
-    expect(claim).toHaveBeenCalledTimes(1);
+    try {
+      const execution = executeClaimedRun({
+        runnerId: "runner_local",
+        claimed: authoritativeClaim,
+        repositories: [],
+        executors: { reviewer: executor },
+        scratchRoot: scratchRoot("renewed"),
+        heartbeatIntervalMs: 100,
+        hostedExecutionAuthority: {
+          leaseExpiresAt: acceptedLease,
+          assertCurrent: async () => true,
+          readAcceptedLeaseExpiresAt: async () => acceptedLease,
+          now: () => new Date(),
+        },
+        client: state.client,
+      });
+      await didStart;
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(cancel).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await execution;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(state.client.heartbeat).toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(state.complete).not.toHaveBeenCalled();
+  });
+
+  it("latches authority revocation across permission and material callbacks", async () => {
+    const authoritativeClaim = claimed("revoked");
+    const current = vi.fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+    const cancel = vi.fn(async () => {});
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Reviewer",
+      async canRun() { return { ready: true }; },
+      async run(input: ExecutorRunInput) {
+        await expect(input.permissionResolver?.({
+          toolCallId: "tool_revoked",
+          title: "Publish",
+          provider: "acp",
+          permissionScopes: ["report:publish"],
+        })).resolves.toMatchObject({ decision: "deny" });
+        await expect(input.materialActionReporter?.({
+          actionId: "action_revoked",
+          toolCallId: "tool_revoked",
+          provider: "acp",
+          receiptRef: "acp:revoked",
+          outcome: "unknown",
+        })).rejects.toThrow("hosted_execution_authority_expired");
+        return { conclusion: "success", summary: "must not settle" };
+      },
+      cancel,
+    };
+    const state = lifecycle();
+
+    await executeClaimedRun({
+      runnerId: "runner_local",
+      claimed: authoritativeClaim,
+      repositories: [],
+      executors: { reviewer: executor },
+      scratchRoot: scratchRoot("revoked"),
+      heartbeatIntervalMs: 0,
+      hostedExecutionAuthority: {
+        leaseExpiresAt: "2099-08-10T00:00:00.000Z",
+        assertCurrent: current,
+      },
+      client: state.client,
+    });
+
+    expect(state.requestActionPermission).not.toHaveBeenCalled();
+    expect(state.resolveActionPermission).not.toHaveBeenCalled();
+    expect(state.recordMaterialActionReceipt).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledWith("run_revoked", "attempt_revoked");
+    expect(state.complete).not.toHaveBeenCalled();
   });
 });

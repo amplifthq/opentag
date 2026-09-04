@@ -1,193 +1,106 @@
-# GitHub 配置教程
+# GitHub Project Target
 
-当 `opentag setup` 询问 GitHub 配置时，用这份教程对照填写。
+## 支持 profile
 
-OpenTag CLI 当前使用 **Repository Webhook** 接入 GitHub。这是最小正确的 MVP 路线：GitHub 把 issue 和 pull request 评论通过公网 tunnel 发到你本机的 OpenTag，OpenTag 再把这个 source thread 变成一个可治理的 agent 工作回路：有边界的 context、本地执行、audit ledger、产物、action receipt，以及简洁的 GitHub 回调。
-
-当 coding agent 修改文件时，这个 local-direct GitHub ingress 会把结果和
-建议动作回写到 source thread，但不会自动 push branch 或创建 pull request。
-
-Draft pull-request publication 是独立的精确操作，必须具备 verified Candidate、
-当前人工审批和 coordinator-issued capability；已退役的自动 PR 选项会被忽略。
-
-GitHub App 安装模式是长期产品路线，但还不是当前 CLI 的默认 setup 路线。
-
-## 官方文档
-
-- [Creating repository webhooks](https://docs.github.com/en/webhooks/using-webhooks/creating-webhooks)
-- [Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads)
-- [Validating webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
-- [Managing fine-grained personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
-- [Create a fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
-
-## OpenTag 会帮你做什么
-
-OpenTag setup 会处理本地能安全自动化的部分：
-
-- 尽量从当前项目的 `origin` remote 推断 GitHub 仓库。
-- 自动生成强随机 webhook secret。
-- 写入本地 dispatcher、GitHub webhook listener、runner 和仓库绑定配置。
-- 记录用于 source-thread 回复和显式授权发布的 GitHub 凭据。
-- 路由 `@opentag /status`、`@opentag /doctor`、`@opentag /stop [run_id]` 等 source-thread 控制命令，并且不会创建新的 run。
-- `opentag start` 会启动本地 GitHub webhook listener。
-
-## 你还需要做什么
-
-GitHub 访问不到你电脑上的 `localhost`。你仍然需要：
-
-- 一个公网 tunnel，把 GitHub 请求转发到本机 OpenTag。
-- 一个 GitHub repository webhook，Payload URL 指向这个公网 tunnel。
-- 一个能让 OpenTag 回写评论的 GitHub token。如果它还有 Pull requests 写权限，同一个凭据也可用于显式授权的 pull-request publication。
-- 使用 paired-relay publication 时，本机 git remote 凭据需要能够推送授权操作选定的精确 owned branch。
-
-## 1. 运行 setup
-
-运行：
-
-```bash
-opentag setup
-```
-
-选择：
+GitHub 是 OpenTag 唯一的 Project Target 以及 publication/readback provider，
+不是 Source App。Slack 提供 source conversation；自托管 Control Plane 治理 Run；
+配对 Runner 针对配置好的 GitHub repository 执行已批准的工作。
 
 ```text
-GitHub
+Slack source thread
+        |
+        v
+Control Plane -> Run -> Attempt -> 配对 Runner
+                                      |
+                           GitHub target / draft PR publication
+                                      |
+                             exact-head readback evidence
 ```
 
-OpenTag 会问：
+GitHub readback 是 completion gate 的 evidence，不拥有 Run state、Attempt lease、
+approval、cancellation 或 terminal outcome。
+
+## Target 配置
+
+在配对 Runner 的 repository binding 中配置一个明确 target：
 
 ```text
-GitHub 仓库（owner/repo）
-本地 GitHub webhook 端口
-GitHub token（用于回写评论和创建 PR）
+provider: github
+owner: acme
+repo: demo
+base branch: main
+publication: governed draft pull request
 ```
 
-Webhook secret 由 OpenTag 自动生成，你不用自己想。
+Target identity 必须精确。Run 不得向当前 target 和已批准 proposal 之外的 repository、
+branch 或 pull request publication。GitHub credential 保存在 Runner 的受保护存储中；
+不得写入 Slack message、source event、ACP prompt 或持久化 presentation payload。
 
-CLI 默认本地 webhook 端口是 `3050`。如果这台电脑上已经有别的服务占用了这个端口，可以换一个：
+## 受治理的 draft pull-request publication
 
-```bash
-opentag setup --platform github --github-port 3051 --force
-```
+标准流程：
 
-## 2. 创建 GitHub Token
+1. ACP Agent 在 Runner-owned workspace 中准备变更。
+2. OpenTag 将 changed files、branch、verification summary 和 target 记录为 proposal。
+3. Source thread 呈现包含 impact、preconditions、capability state 和 approval requirement
+   的 action receipt。
+4. 人工批准当前且精确的 proposal。
+5. Control Plane 在 provider I/O 前检查 Run/Attempt fencing、target identity、proposal hash、
+   policy 和 idempotency。
+6. Runner 执行 GitHub publication 并记录 material-action receipt。
+7. OpenTag 对 exact head 和 provider evidence 做 readback，之后才可把 publication 视为完成。
 
-OpenTag 会用这个 token 回写 acknowledgement、progress 和 final result 评论。paired-relay installation 只有在精确 Candidate、当前审批和 coordinator-issued capability 授权后，才会使用它创建 pull request。
+Approval 不等于 publication。本地 branch 或生成的 patch 不等于 pull request。Pull request
+URL 也不等于 expected head 或 checks 仍然正确的证明。
 
-1. 打开 [GitHub token 创建页](https://github.com/settings/personal-access-tokens/new)。
-2. 如果 GitHub 询问 token 类型，选择 **Generate new token**。
-3. 填一个容易识别的名字，例如 `OpenTag local agent`。
-4. 在 **Repository access** 里选择 **Only select repositories**，只选择你在 `opentag setup` 里填写的仓库。
-5. 在 **Repository permissions** 里设置：
-   - **Issues**: Read and write
-   - **Pull requests**: Read and write
-6. 如果 owned branch 使用本机 git remote 凭据推送，这个 token 不需要 **Contents** 权限。
-7. 点击 **Generate token**。
-8. 立即复制 token。GitHub 只会显示一次。
-9. 把 token 粘贴到 `GitHub token（用于回写评论和创建 PR）` 这个输入项里。
+## Exact-head readback
 
-默认 setup 不需要 webhook 管理权限。除非未来你明确要让 OpenTag 自动创建 GitHub webhook，否则不要额外授予 webhook administration 权限。
+Readback 必须标识正在评估的精确 GitHub resource 和 revision：
 
-## 3. 创建公网 tunnel
+- repository `owner/repo`；
+- pull-request number 或其他稳定 resource identity；
+- head commit SHA；
+- base branch 或 target ref；
+- required-check conclusion 和 observation time；
+- 每条 observation 的 assurance level 和来源。
 
-先确认 OpenTag 正在运行：
+如果 approval 后 head 发生变化，原 proposal 已过期，不得静默 publication 或标记完成。
+如果 GitHub 接受请求但结果无法验证，必须保留 `outcome_unknown`，先 reconcile，再考虑重试。
 
-```bash
-opentag service status
-```
+## Action receipt 与失败状态
 
-如果你选择的是前台终端模式，或者当前平台暂不支持后台 service，就改用 `opentag start`，并保持这个终端打开。
+GitHub publication 是带稳定 idempotency key 的 material action。Receipt 至少要区分：
 
-然后用 tunnel 暴露 GitHub listener，例如：
+- proposal 已准备但尚未批准；
+- approval 已记录但尚未发生 provider I/O；
+- publication 成功，并在 exact expected head 上完成 readback；
+- 被 policy、capability 或 target mismatch 拒绝；
+- provider failure；
+- provider result 不明确：`outcome_unknown`。
 
-```bash
-ngrok http 3050
-```
+不得从本地进程退出、queued intent、过期缓存页面或未验证的 provider response 推断
+“merged”“published”或“checks passed”。
 
-OpenTag 本地监听地址是：
+## 本文不覆盖
 
-```text
-http://127.0.0.1:3050/github/webhooks
-```
+- GitHub 作为 Source App 或 conversation ingress；
+- 自动 push branch、merge、deployment 或 release；
+- 未经审核的 pull-request creation；
+- 一次 governed publication 使用多个 Project Target；
+- 将 provider credential 放入 Agent prompt；
+- 将 GitHub UI state 当作 OpenTag canonical lifecycle。
 
-GitHub webhook 的 Payload URL 要使用公网 tunnel 域名：
+## 官方链接
 
-```text
-https://<你的 tunnel 域名>/github/webhooks
-```
+- [GitHub REST API](https://docs.github.com/en/rest)
+- [Pull requests REST API](https://docs.github.com/en/rest/pulls/pulls)
+- [Checks API](https://docs.github.com/en/rest/checks/runs)
+- [Fine-grained personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+- [GitHub pull-request review](https://docs.github.com/en/pull-requests)
 
-## 4. 创建 Repository Webhook
+## 相关 OpenTag 文档
 
-GitHub 官方教程是 [Creating repository webhooks](https://docs.github.com/en/webhooks/using-webhooks/creating-webhooks)。
-
-1. 打开 GitHub 仓库。
-2. 进入 **Settings** -> **Webhooks**。
-3. 点击 **Add webhook**。
-4. **Payload URL** 填：
-
-```text
-https://<你的 tunnel 域名>/github/webhooks
-```
-
-5. **Content type** 选择 `application/json`。
-6. **Secret** 填 `opentag setup` 输出的 webhook secret。
-7. 订阅这些事件：
-   - **Issue comments**
-   - **Pull request review comments**
-8. 保存 webhook。
-
-保存后，GitHub 会在这个 webhook 页面展示最近的 delivery。后面如果 OpenTag 没反应，优先到这里看 GitHub 有没有把事件发出来。
-
-## 测试
-
-setup 完成、OpenTag 已运行、GitHub webhook 创建完成后，在 issue 或 pull request review thread 里评论：
-
-```text
-@opentag investigate this
-```
-
-预期结果：
-
-1. GitHub 把评论 webhook 发到你的 tunnel。
-2. OpenTag 创建一次 run。
-3. 本地 runner 执行 coding agent。
-4. OpenTag 把 acknowledgement、progress 和 final result 回写到同一个 GitHub thread。
-5. 如果 agent 修改了文件，final result 会保留 proposal 和 evidence；local-direct GitHub ingress 不会自动创建 pull request。
-6. 配置了 paired-relay publication 时，发布仍必须具备 verified Candidate、当前审批和 coordinator-issued capability。
-
-run 进行中时，你可以在同一个 source thread 里检查或停止 runtime：
-
-```text
-@opentag /status
-@opentag /doctor
-@opentag /stop [run_id]
-```
-
-这些控制命令只报告或取消 source-thread runtime 状态，不会再创建一次 run。
-
-## 谁可以触发 run
-
-默认情况下，OpenTag 根据仓库本身决定谁可以触发 run：
-
-- **私有仓库**：所有能评论的人都可以触发 run。
-- **公开仓库**：只有仓库权限解析为 `write`、`maintain` 或 `admin` 的评论者
-  可以触发写操作 run 或批准 `apply` 动作。路人评论者会收到一条"需要人工
-  决定"的回复，而不会触发执行。
-
-如果想在公开仓库对特定用户放行、又不想给他们 GitHub 写权限，可以在
-repository binding 上配置 `allowedActors`。配置了 `allowedActors` 后，
-写操作 run 以该列表为准，替代默认策略。
-
-## 如果没有跑通
-
-先检查这些：
-
-- 如果 OpenTag 提示 webhook 端口被占用，用 `--github-port <空闲端口>` 重新 setup，并让 tunnel 指向同一个端口。
-- tunnel 是否还在运行，并且指向 `opentag start` 显示的本地 GitHub webhook 端口，通常是 `3050`。
-- GitHub webhook 的 Payload URL 是否以 `/github/webhooks` 结尾。
-- webhook content type 是否是 `application/json`。
-- webhook secret 是否和 OpenTag 保存的完全一致。
-- webhook 是否订阅了 **Issue comments** 和 **Pull request review comments**。
-- GitHub token 是否有 Issues 和 Pull requests 写权限。
-- 使用 paired-relay publication 时，本机 git remote 是否能推送授权操作指定的精确 owned branch。
-- `opentag start` 是否还在运行。
+- [Slack Source App](slack.en.md)
+- [Source-thread action receipts](../source-thread-action-receipts.md)
+- [Control Plane runtime architecture](../control-plane-runtime-architecture.md)
+- [ACP agent integration](../acp-agent-integration.md)

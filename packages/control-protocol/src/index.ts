@@ -4,9 +4,6 @@ import { isCredentialSafeText } from "./credential-safety.js";
 import {
   CanonicalUtcMillisTimestampSchema,
   compareWellFormedUnicodeStrings,
-  COMPLETION_REASON_ALLOWED_GATE_STATES,
-  CompletionReasonCodeSchema,
-  reduceCompletionGateStates,
 } from "./completion.js";
 
 export {
@@ -50,12 +47,6 @@ export const RelayCapabilitySchema = z.enum([
   "relay.publication.v1",
   "relay.cancel-resume.v1",
   "relay.follow-up.v1",
-  "relay.work-thread-ref.v1",
-  "relay.completion-contract-ref.v1",
-  "relay.completion-assessment.v1",
-  "relay.completion-evidence.v1",
-  "relay.callback-observation.v1",
-  "relay.check-observation.v1",
 ]);
 
 const compareUnicodeCodePoints = compareWellFormedUnicodeStrings;
@@ -104,182 +95,15 @@ export const RunnerReadinessReasonCodeV1Schema = z.enum([
   "target_unavailable",
 ]);
 
-export const CallbackObservationReasonCodeV1Schema = z.enum([
-  "callback_local_error",
-  "callback_sink_unhandled",
-  "callback_target_invalid",
-  "provider_accepted",
-  "provider_error",
-  "provider_receipt_missing",
-  "provider_rejected",
-  "provider_timeout",
-]);
-
-export const CallbackProviderV1Schema = z.literal("github");
-export const CallbackNextActionV1Schema = z.enum([
-  "reconcile-provider",
-  "repair-local-callback",
-]);
-
-function isCredentialSafeStableReference(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    if (!isCredentialSafeText(value.slice(index))) return false;
-  }
-  return true;
-}
-
-function isCustodySafeStableReference(value: string): boolean {
-  return !/^[a-z][a-z0-9+.-]*:\/\//iu.test(value)
-    && !/^(?:\/|~\/|[A-Za-z]:[\\/])/u.test(value)
-    && !/(?:^|[/\\])\.\.(?:[/\\]|$)/u.test(value);
-}
-
-export const GovernedProjectionStableReferenceV1Schema = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(
-    /^[A-Za-z0-9][A-Za-z0-9._:@/#-]*$/u,
-    "Governed projection reference must contain only stable identifier characters.",
-  )
-  .refine(
-    isCustodySafeStableReference,
-    "Governed projection reference must not be a URL, absolute path, or traversal path.",
-  )
-  .refine(
-    isCredentialSafeStableReference,
-    "Governed projection reference must not contain credential-like data.",
-  );
-
-const GovernedProjectionRunIdV1Schema = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(
-    /^run(?:[-_:][A-Za-z0-9][A-Za-z0-9._:-]*|\/[A-Za-z0-9][A-Za-z0-9._:-]*)$/u,
-    "Governed projection Run ID must use a stable run reference.",
-  )
-  .refine(
-    isCredentialSafeStableReference,
-    "Governed projection Run ID must not contain credential-like data.",
-  );
-
-const CallbackSafeStableReferenceSchema = GovernedProjectionStableReferenceV1Schema;
-
-export const CallbackOpaqueStableIdV1Schema = GovernedProjectionStableReferenceV1Schema.regex(
-  /^[A-Za-z0-9][A-Za-z0-9._-]*$/u,
-  "Callback opaque ID must contain only stable identifier characters.",
-);
-
-export const CallbackLocalIntentIdV1Schema = CallbackSafeStableReferenceSchema.regex(
-  /^intent[-_][A-Za-z0-9][A-Za-z0-9._-]*$/u,
-  "Callback intent ID must use the intent- or intent_ stable reference prefix.",
-);
-
-export const CallbackLocalAttemptIdV1Schema = CallbackSafeStableReferenceSchema.regex(
-  /^callback[-_]attempt[-_][A-Za-z0-9][A-Za-z0-9._-]*$/u,
-  "Callback attempt ID must use the callback-attempt- or callback_attempt_ stable reference prefix.",
-);
-
-export const CallbackProviderReceiptIdV1Schema = CallbackSafeStableReferenceSchema.regex(
-  /^(?:provider[-_]receipt|issue|comment)[-_][A-Za-z0-9][A-Za-z0-9._-]*$/u,
-  "Callback provider receipt ID must use a provider-receipt, issue, or comment stable reference prefix.",
-);
-
-export const CallbackResourceIdentityV1Schema = z
-  .string()
-  .max(160)
-  .regex(
-    /^github:(?:issue|comment):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u,
-    "Callback resource identity must be a stable GitHub issue or comment identity.",
-  )
-  .refine(
-    isCredentialSafeStableReference,
-    "Callback resource identity must not contain credential-like data.",
-  );
-
 const GitHubTargetSegmentV1Schema = z
   .string()
   .min(1)
   .max(100)
   .regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u)
-  .refine((value) => value !== "." && value !== "..", "GitHub target segment cannot be a dot segment.");
-
-export const GitHubIssueCommentsTargetV1Schema = z
-  .object({
-    provider: z.literal("github"),
-    owner: GitHubTargetSegmentV1Schema,
-    repo: GitHubTargetSegmentV1Schema,
-    issueNumber: z.number().int().positive(),
-    canonicalUri: z.string().url(),
-    resourceIdentity: CallbackResourceIdentityV1Schema,
-    targetIdentityDigest: ReceiptDigestSchema,
-  })
-  .strict();
-
-export type GitHubIssueCommentsTargetV1 = z.infer<
-  typeof GitHubIssueCommentsTargetV1Schema
->;
-
-/**
- * Parses the one GitHub callback target shape admitted by Control V1.
- * The exact raw-string match intentionally rejects URL features whose
- * normalization could otherwise change target identity.
- */
-export async function parseGitHubIssueCommentsTargetV1(
-  value: string,
-  threadKey?: string,
-): Promise<GitHubIssueCommentsTargetV1> {
-  const match = /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/issues\/([1-9][0-9]*)\/comments$/u.exec(
-    value,
+  .refine(
+    (value) => value !== "." && value !== "..",
+    "GitHub target segment cannot be a dot segment.",
   );
-  if (!match) {
-    throw new Error("GitHub callback target must be an HTTPS API issue-comments URI.");
-  }
-
-  const owner = GitHubTargetSegmentV1Schema.parse(match[1]);
-  const repo = GitHubTargetSegmentV1Schema.parse(match[2]);
-  const issueNumber = Number(match[3]);
-  if (!Number.isSafeInteger(issueNumber)) {
-    throw new Error("GitHub callback issue number must be a positive safe integer.");
-  }
-
-  if (threadKey !== undefined) {
-    const threadMatch = /^([^/#]+)\/([^/#]+)#([1-9][0-9]*)$/u.exec(threadKey);
-    if (!threadMatch) {
-      throw new Error("GitHub callback thread key must use owner/repo#issue.");
-    }
-    const threadOwner = GitHubTargetSegmentV1Schema.parse(threadMatch[1]);
-    const threadRepo = GitHubTargetSegmentV1Schema.parse(threadMatch[2]);
-    const threadIssueNumber = Number(threadMatch[3]);
-    if (
-      threadOwner.toLowerCase() !== owner.toLowerCase() ||
-      threadRepo.toLowerCase() !== repo.toLowerCase() ||
-      threadIssueNumber !== issueNumber
-    ) {
-      throw new Error("GitHub callback target does not match its source thread key.");
-    }
-  }
-
-  const canonicalOwner = owner.toLowerCase();
-  const canonicalRepo = repo.toLowerCase();
-  const canonicalUri = `https://api.github.com/repos/${canonicalOwner}/${canonicalRepo}/issues/${issueNumber}/comments`;
-  const targetIdentityDigest = await sha256Utf8V1(canonicalJsonStringify({
-    provider: "github",
-    owner: canonicalOwner,
-    repo: canonicalRepo,
-    issueNumber,
-  }));
-  return GitHubIssueCommentsTargetV1Schema.parse({
-    provider: "github",
-    owner: canonicalOwner,
-    repo: canonicalRepo,
-    issueNumber,
-    canonicalUri,
-    resourceIdentity: `github:issue:${issueNumber}`,
-    targetIdentityDigest,
-  });
-}
 
 export const PermissionResolutionReasonCodeV1Schema = z.enum([
   "human_approval_required",
@@ -395,23 +219,6 @@ export const PublicationOperationCapabilityV1Schema = z.object({
       message: "Publication capability must be short-lived." });
   }
 });
-
-export const RunnerPublicationClaimV1Schema = z.object({
-  schemaVersion: ControlSchemaVersionSchema,
-  protocolVersion: ControlProtocolVersionSchema,
-  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
-  requestId: MaterialActionStableIdV1Schema,
-  organizationId: MaterialActionStableIdV1Schema,
-  runnerId: MaterialActionStableIdV1Schema,
-  runnerGeneration: z.number().int().positive(),
-  runId: MaterialActionStableIdV1Schema,
-  attemptId: MaterialActionStableIdV1Schema,
-  attemptNumber: z.number().int().positive(),
-  fencingToken: z.string().min(1).max(4096),
-  candidateId: MaterialActionStableIdV1Schema,
-  candidateDigest: ReceiptDigestSchema,
-  step: PublicationOperationStepV1Schema,
-}).strict();
 
 /** Credential-free Runner poll for the next coordinator-owned publication operation. */
 export const RunnerPublicationClaimNextV1Schema = z.object({
@@ -732,23 +539,6 @@ export const RunnerMaterialActionReconcileRequestV1Schema = z
     }
   });
 
-export const RunnerMaterialActionNonStartProofV1Schema = z.object({
-  schemaVersion: ControlSchemaVersionSchema,
-  protocolVersion: ControlProtocolVersionSchema,
-  requiredCapabilities: z.tuple([z.literal("relay.material-receipt.v1")]),
-  requestId: MaterialActionStableIdV1Schema,
-  operationId: MaterialActionStableIdV1Schema,
-  organizationId: MaterialActionStableIdV1Schema,
-  runnerId: MaterialActionStableIdV1Schema,
-  runId: MaterialActionStableIdV1Schema,
-  attempt: MaterialActionAttemptRefV1Schema.extend({
-    fencingToken: z.string().min(1).max(4096),
-  }).strict(),
-  proofId: MaterialActionStableIdV1Schema,
-  proofDigest: ReceiptDigestSchema,
-  recordedAt: ControlTimestampSchema,
-}).strict();
-
 export const MaterialActionBeginAuthorityV1Schema = z.object({
   kind: z.literal("permission_resolution"),
   permissionRequestId: PermissionStableIdV1Schema,
@@ -1063,6 +853,60 @@ export const RelayCapabilitiesResponseV1Schema = z
     }
   });
 
+const CanonicalGitHubProjectTargetSegmentV1Schema = GitHubTargetSegmentV1Schema
+  .refine(
+    (value) => value === value.toLowerCase(),
+    "GitHub Project Target owner and repository must be lowercase.",
+  );
+
+const GitHubProjectTargetDeclarationSegmentV1Schema = GitHubTargetSegmentV1Schema
+  .transform((value) => value.toLowerCase());
+
+export const GitHubProjectTargetDeclarationV1Schema = z
+  .object({
+    projectTargetId: NonEmptyIdSchema.max(200),
+    provider: z.literal("github"),
+    owner: GitHubProjectTargetDeclarationSegmentV1Schema,
+    repo: GitHubProjectTargetDeclarationSegmentV1Schema,
+    defaultExecutor: NonEmptyIdSchema.max(120),
+    defaultBranch: NonEmptyIdSchema.max(255).nullable(),
+  })
+  .strict();
+
+export const GitHubProjectTargetBindingDigestInputV1Schema = z
+  .object({
+    schemaVersion: ControlSchemaVersionSchema,
+    protocolVersion: ControlProtocolVersionSchema,
+    capability: z.literal("relay.repository-binding.v1"),
+    target: GitHubProjectTargetDeclarationV1Schema,
+  })
+  .strict();
+
+export function computeGitHubProjectTargetBindingDigestV1(
+  target: z.input<typeof GitHubProjectTargetDeclarationV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(
+    GitHubProjectTargetBindingDigestInputV1Schema.parse({
+      schemaVersion: CONTROL_SCHEMA_VERSION,
+      protocolVersion: CONTROL_PROTOCOL_VERSION,
+      capability: "relay.repository-binding.v1",
+      target,
+    }),
+  ));
+}
+
+const RunnerProjectTargetReadbackV1Schema = z
+  .object({
+    projectTargetId: NonEmptyIdSchema.max(200),
+    bindingDigest: ReceiptDigestSchema,
+    provider: z.literal("github"),
+    owner: CanonicalGitHubProjectTargetSegmentV1Schema,
+    repo: CanonicalGitHubProjectTargetSegmentV1Schema,
+    defaultExecutor: NonEmptyIdSchema.max(120),
+    defaultBranch: NonEmptyIdSchema.max(255).nullable(),
+  })
+  .strict();
+
 export const RunnerControlContextResponseV1Schema = z
   .object({
     schemaVersion: ControlSchemaVersionSchema,
@@ -1074,17 +918,7 @@ export const RunnerControlContextResponseV1Schema = z
     registrationGeneration: z.number().int().positive(),
     credentialGeneration: z.number().int().positive(),
     capabilities: RelayCapabilitiesSchema,
-    targets: z.array(
-      z.object({
-        projectTargetId: NonEmptyIdSchema,
-        bindingDigest: ReceiptDigestSchema,
-        provider: NonEmptyIdSchema,
-        owner: NonEmptyIdSchema,
-        repo: NonEmptyIdSchema,
-        defaultExecutor: NonEmptyIdSchema,
-        defaultBranch: NonEmptyIdSchema.nullable(),
-      }).strict(),
-    ),
+    targets: z.array(RunnerProjectTargetReadbackV1Schema),
     observedAt: ControlTimestampSchema,
   })
   .strict()
@@ -1103,15 +937,39 @@ export const RunnerControlContextResponseV1Schema = z
     }
   });
 
-const ControlMutationRequestV1Shape = {
+export const RunnerProjectTargetUpsertResponseV1Schema =
+  RunnerControlContextResponseV1Schema;
+
+const ControlRequestV1Shape = {
   schemaVersion: ControlSchemaVersionSchema,
   protocolVersion: ControlProtocolVersionSchema,
   requiredCapabilities: RequiredRelayCapabilitiesSchema,
   requestId: NonEmptyIdSchema,
+};
+
+const ControlMutationRequestV1Shape = {
+  ...ControlRequestV1Shape,
   operationId: NonEmptyIdSchema,
 };
 
 export const ControlMutationRequestV1Schema = z.object(ControlMutationRequestV1Shape).strict();
+
+export const RunnerProjectTargetUpsertRequestV1Schema = z
+  .object({
+    ...ControlRequestV1Shape,
+    requiredCapabilities: z.tuple([
+      z.literal("relay.repository-binding.v1"),
+    ]),
+    expectedAuthority: z
+      .object({
+        credentialId: NonEmptyIdSchema,
+        registrationGeneration: z.number().int().positive(),
+        credentialGeneration: z.number().int().positive(),
+      })
+      .strict(),
+    target: GitHubProjectTargetDeclarationV1Schema,
+  })
+  .strict();
 
 const VersionedResponseShape = {
   schemaVersion: ControlSchemaVersionSchema,
@@ -1176,6 +1034,7 @@ export const ControlConflictResponseV1Schema = z
       "stale_registration",
       "stale_readiness",
       "target_binding_stale",
+      "target_not_bound_to_slack",
       "idempotency_conflict",
       "operation_digest_conflict",
       "stale_control_authority",
@@ -1959,10 +1818,6 @@ export const PermissionResolutionCurrentHttpResponseV1Schema = z.union([
   z.object({ status: z.literal(202), body: PermissionResolutionWaitingReceiptEnvelopeV1Schema }).strict(),
 ]);
 
-const GitHubProviderIdV1Schema = z
-  .string()
-  .regex(/^[1-9][0-9]{0,30}$/);
-
 const HostedAdmissionEnvelopeDigestInputV1Shape = {
   kind: z.literal("hosted_admission"),
   schemaVersion: ControlSchemaVersionSchema,
@@ -1973,15 +1828,15 @@ const HostedAdmissionEnvelopeDigestInputV1Shape = {
   organizationId: NonEmptyIdSchema,
   bindingId: NonEmptyIdSchema,
   bindingSecretVersion: NonEmptyIdSchema,
-  provider: z.enum(["github", "slack"]),
+  provider: z.literal("slack"),
   deliveryId: NonEmptyIdSchema,
   deliveryPayloadDigest: ReceiptDigestSchema,
   sourceIdentityDigest: ReceiptDigestSchema,
-  eventName: z.enum(["issue_comment", "app_mention"]),
+  eventName: z.literal("app_mention"),
   action: z.literal("created"),
   repository: z
     .object({
-      provider: NonEmptyIdSchema.optional(),
+      provider: z.literal("github"),
       providerRepositoryId: NonEmptyIdSchema,
       owner: NonEmptyIdSchema,
       repo: NonEmptyIdSchema,
@@ -1989,18 +1844,17 @@ const HostedAdmissionEnvelopeDigestInputV1Shape = {
     .strict(),
   sourceThread: z
     .object({
-      kind: z.enum(["issue", "pull_request", "channel_thread"]),
+      kind: z.literal("channel_thread"),
       providerThreadId: NonEmptyIdSchema,
-      number: z.number().int().positive().optional(),
-      channelId: NonEmptyIdSchema.optional(),
-      threadTs: NonEmptyIdSchema.optional(),
+      channelId: NonEmptyIdSchema,
+      threadTs: NonEmptyIdSchema,
     })
     .strict(),
   sourceEvent: z
     .object({
       providerEventId: NonEmptyIdSchema,
-      kind: z.enum(["issue_comment", "app_mention"]),
-      messageId: NonEmptyIdSchema.optional(),
+      kind: z.literal("app_mention"),
+      messageId: NonEmptyIdSchema,
     })
     .strict(),
   verifiedActor: z
@@ -2020,7 +1874,6 @@ const HostedAdmissionEnvelopeDigestInputV1Shape = {
   projectTarget: z
     .object({
       projectTargetId: NonEmptyIdSchema,
-      version: z.number().int().positive(),
       digest: ReceiptDigestSchema,
     })
     .strict(),
@@ -2078,49 +1931,7 @@ export const HostedAdmissionEnvelopeV1Schema = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["completionContract", "mode"],
         message: "Completion mode must match the Admission-frozen publication mode." });
     }
-    if (admission.provider === "github") {
-      if (admission.eventName !== "issue_comment"
-        || !GitHubProviderIdV1Schema.safeParse(admission.repository.providerRepositoryId).success
-        || !["issue", "pull_request"].includes(admission.sourceThread.kind)
-        || !GitHubProviderIdV1Schema.safeParse(admission.sourceThread.providerThreadId).success
-        || admission.sourceThread.number === undefined
-        || admission.sourceThread.channelId !== undefined
-        || admission.sourceThread.threadTs !== undefined
-        || admission.sourceEvent.kind !== "issue_comment"
-        || !GitHubProviderIdV1Schema.safeParse(admission.sourceEvent.providerEventId).success
-        || admission.sourceEvent.messageId !== undefined
-        || !GitHubProviderIdV1Schema.safeParse(admission.verifiedActor.providerUserId).success) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["provider"],
-          message: "GitHub admission requires exact issue-comment source identity." });
-      }
-    } else if (admission.eventName !== "app_mention"
-      || admission.repository.provider === undefined
-      || admission.sourceThread.kind !== "channel_thread"
-      || admission.sourceThread.number !== undefined
-      || admission.sourceThread.channelId === undefined
-      || admission.sourceThread.threadTs === undefined
-      || admission.sourceEvent.kind !== "app_mention"
-      || admission.sourceEvent.messageId === undefined) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["provider"],
-        message: "Slack admission requires exact channel-thread app-mention identity." });
-    }
   });
-
-export const GitHubIssueCommentSourceIdentityDigestInputV1Schema = z
-  .object({
-    provider: z.literal("github"),
-    repository: HostedAdmissionEnvelopeDigestInputV1Shape.repository,
-    sourceThread: HostedAdmissionEnvelopeDigestInputV1Shape.sourceThread,
-    sourceEvent: HostedAdmissionEnvelopeDigestInputV1Shape.sourceEvent,
-    actor: z
-      .object({
-        providerUserId: GitHubProviderIdV1Schema,
-        login: NonEmptyIdSchema,
-      })
-      .strict(),
-    executionBearingCommentBody: z.string().min(1),
-  })
-  .strict();
 
 export const SlackAppMentionSourceIdentityDigestInputV1Schema = z
   .object({
@@ -2131,19 +1942,7 @@ export const SlackAppMentionSourceIdentityDigestInputV1Schema = z
     actor: z.object({ providerUserId: NonEmptyIdSchema, login: NonEmptyIdSchema }).strict(),
     executionBearingMessageBody: z.string().min(1),
   })
-  .strict()
-  .superRefine((value, ctx) => {
-    if (value.repository.provider === undefined
-      || value.sourceThread.kind !== "channel_thread"
-      || value.sourceThread.number !== undefined
-      || value.sourceThread.channelId === undefined
-      || value.sourceThread.threadTs === undefined
-      || value.sourceEvent.kind !== "app_mention"
-      || value.sourceEvent.messageId === undefined) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceThread"],
-        message: "Slack source identity must bind repository, channel thread, event, and message." });
-    }
-  });
+  .strict();
 
 export function buildHostedAdmissionEnvelopeDigestInputV1(
   envelope: z.input<typeof HostedAdmissionEnvelopeV1Schema>,
@@ -2168,20 +1967,6 @@ export async function verifyHostedAdmissionEnvelopeDigestV1(
   return (await computeHostedAdmissionEnvelopeDigestV1(parsed)) === parsed.envelopeDigest;
 }
 
-export function buildGitHubIssueCommentSourceIdentityDigestInputV1(
-  input: z.input<typeof GitHubIssueCommentSourceIdentityDigestInputV1Schema>,
-): z.output<typeof GitHubIssueCommentSourceIdentityDigestInputV1Schema> {
-  return GitHubIssueCommentSourceIdentityDigestInputV1Schema.parse(input);
-}
-
-export function computeGitHubIssueCommentSourceIdentityDigestV1(
-  input: z.input<typeof GitHubIssueCommentSourceIdentityDigestInputV1Schema>,
-): Promise<string> {
-  return sha256Utf8V1(
-    canonicalJsonStringify(buildGitHubIssueCommentSourceIdentityDigestInputV1(input)),
-  );
-}
-
 export function computeSlackAppMentionSourceIdentityDigestV1(
   input: z.input<typeof SlackAppMentionSourceIdentityDigestInputV1Schema>,
 ): Promise<string> {
@@ -2197,7 +1982,7 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
     tenant: z.object({ organizationId: NonEmptyIdSchema }).strict(),
     actor: z
       .object({
-        provider: NonEmptyIdSchema,
+        provider: z.literal("slack"),
         providerUserId: NonEmptyIdSchema,
         login: NonEmptyIdSchema,
         authorizationRef: NonEmptyIdSchema,
@@ -2207,7 +1992,7 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
       .object({
         projectTargetId: NonEmptyIdSchema,
         bindingId: NonEmptyIdSchema,
-        repositoryProvider: NonEmptyIdSchema.optional(),
+        repositoryProvider: z.literal("github"),
         providerRepositoryId: NonEmptyIdSchema,
         defaultBranch: NonEmptyIdSchema,
         authorizedPublicationModes: sortedUniqueArray(
@@ -2227,19 +2012,7 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
       })
       .strict(),
   })
-  .strict()
-  .superRefine((policy, ctx) => {
-    if (policy.actor.provider === "github"
-      && (!GitHubProviderIdV1Schema.safeParse(policy.actor.providerUserId).success
-        || !GitHubProviderIdV1Schema.safeParse(policy.target.providerRepositoryId).success)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["actor", "providerUserId"],
-        message: "GitHub policy snapshots require canonical provider IDs." });
-    }
-    if (policy.actor.provider === "slack" && policy.target.repositoryProvider === undefined) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["target", "repositoryProvider"],
-        message: "Slack policy snapshots require the bound repository provider." });
-    }
-  });
+  .strict();
 
 export const AdmissionPolicySnapshotReceiptEnvelopeV1Schema = z
   .object({
@@ -2483,7 +2256,7 @@ export const HostedClaimV1Schema = z
       [["hostedAdmission", "bindingId"], admission.bindingId !== policy.payload.target.bindingId, "Admission binding must match the policy."],
       [["hostedAdmission", "projectTarget", "projectTargetId"], admission.projectTarget.projectTargetId !== policy.payload.target.projectTargetId, "Admission target must match the policy."],
       [["hostedAdmission", "repository", "providerRepositoryId"], admission.repository.providerRepositoryId !== policy.payload.target.providerRepositoryId, "Admission repository must match the policy."],
-      [["hostedAdmission", "repository", "provider"], admission.repository.provider !== undefined && admission.repository.provider !== policy.payload.target.repositoryProvider, "Admission repository provider must match the policy."],
+      [["hostedAdmission", "repository", "provider"], admission.repository.provider !== policy.payload.target.repositoryProvider, "Admission repository provider must match the policy."],
       [["hostedAdmission", "verifiedActor", "providerUserId"], admission.verifiedActor.providerUserId !== policy.payload.actor.providerUserId, "Admission actor ID must match the policy."],
       [["hostedAdmission", "verifiedActor", "login"], admission.verifiedActor.login !== policy.payload.actor.login, "Admission actor login must match the policy."],
       [["admissionPolicySnapshot", "payload", "actor", "provider"], policy.payload.actor.provider !== admission.provider, "Policy actor provider must match the admission."],
@@ -2679,15 +2452,6 @@ export const HostedProgressRequestV1Schema = HostedLifecycleRequestBaseV1Schema
     progressDigest: ReceiptDigestSchema,
   })
   .strict();
-export const HostedCancelReasonCodeV1Schema = z.enum([
-  "operator_cancelled",
-  "runner_cancelled",
-  "timeout_cancelled",
-  "user_cancelled",
-]);
-export const HostedCancelRequestV1Schema = HostedLifecycleRequestBaseV1Schema
-  .extend({ reasonCode: HostedCancelReasonCodeV1Schema })
-  .strict();
 const HostedLifecycleSortedDigestsV1Schema = sortedUniqueArray(
   ReceiptDigestSchema,
 ).max(64);
@@ -2741,7 +2505,6 @@ export const HostedLifecycleRequestV1Schema = z.union([
   HostedRunningRequestV1Schema,
   HostedRejectStartRequestV1Schema,
   HostedProgressRequestV1Schema,
-  HostedCancelRequestV1Schema,
   HostedCompleteRequestV1Schema,
 ]);
 export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
@@ -2776,13 +2539,6 @@ export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
       occurredAt: ControlTimestampSchema,
       progressId: z.string().regex(/^progress_[0-9a-f]{64}$/u),
       progressDigest: ReceiptDigestSchema,
-      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
-      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
-    }).strict(),
-    z.object({
-      operation: z.literal("cancel"),
-      occurredAt: ControlTimestampSchema,
-      reasonCode: HostedCancelReasonCodeV1Schema,
       workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
       interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
@@ -2837,7 +2593,6 @@ export const HostedLifecycleReceiptEnvelopeV1Schema = z.object({
         "running",
         "reject_start",
         "progress",
-        "cancel",
         "executor_result",
       ]),
       HostedLifecycleMachineOperationIdV1Schema,
@@ -2862,7 +2617,6 @@ export type AttemptInterruptionEvidenceV1 = z.infer<typeof AttemptInterruptionEv
 export type HostedRunningRequestV1 = z.infer<typeof HostedRunningRequestV1Schema>;
 export type HostedRejectStartRequestV1 = z.infer<typeof HostedRejectStartRequestV1Schema>;
 export type HostedProgressRequestV1 = z.infer<typeof HostedProgressRequestV1Schema>;
-export type HostedCancelRequestV1 = z.infer<typeof HostedCancelRequestV1Schema>;
 export type HostedCompleteRequestV1 = z.infer<typeof HostedCompleteRequestV1Schema>;
 export type HostedExecutorResultReasonCodeV1 = z.infer<
   typeof HostedExecutorResultReasonCodeV1Schema
@@ -2875,7 +2629,6 @@ export type HostedLifecycleActionV1 =
   | "running"
   | "reject-start"
   | "progress"
-  | "cancel"
   | "complete";
 
 export async function computeHostedLifecycleRequestDigestV1(input: {
@@ -2936,12 +2689,7 @@ export async function computeHostedLifecycleRequestDigestV1(input: {
                 progressDigest: progress.progressDigest,
               };
             })()
-          : input.action === "cancel"
-            ? (() => {
-                const cancel = HostedCancelRequestV1Schema.parse(request);
-                return { reasonCode: cancel.reasonCode };
-              })()
-            : (() => {
+          : (() => {
                 const complete = HostedCompleteRequestV1Schema.parse(request);
                 return {
                   conclusion: complete.conclusion,
@@ -3008,10 +2756,6 @@ export async function buildHostedLifecycleRequestV1(input: {
       progressDigest: string;
     }
   | {
-      action: "cancel";
-      reasonCode: z.input<typeof HostedCancelReasonCodeV1Schema>;
-    }
-  | {
       action: "complete";
       conclusion: z.input<typeof HostedCompleteRequestV1Schema>["conclusion"];
       reasonCode: z.input<typeof HostedExecutorResultReasonCodeV1Schema>;
@@ -3050,9 +2794,7 @@ export async function buildHostedLifecycleRequestV1(input: {
               progressId: input.progressId,
               progressDigest: input.progressDigest,
             }
-          : input.action === "cancel"
-            ? { reasonCode: input.reasonCode }
-            : {
+          : {
                 conclusion: input.conclusion,
                 reasonCode: input.reasonCode,
                 resultDigest: input.resultDigest,
@@ -3155,16 +2897,7 @@ export async function verifyHostedLifecycleReceiptV1(input: {
                 progressDigest: value.progressDigest,
               };
             })()
-          : input.action === "cancel"
-            ? (() => {
-                const value = HostedCancelRequestV1Schema.parse(request);
-                return {
-                  operation,
-                  occurredAt: value.occurredAt,
-                  reasonCode: value.reasonCode,
-                };
-              })()
-            : (() => {
+          : (() => {
                 const value = HostedCompleteRequestV1Schema.parse(request);
                 return {
                   operation,
@@ -3245,864 +2978,6 @@ export async function computeHostedLifecycleReceiptIdV1(input: {
   return `lifecycle_${digest.slice("sha256:".length)}`;
 }
 
-export const GovernedProjectionAttemptRefV1Schema = z
-  .object({
-    attemptId: GovernedProjectionStableReferenceV1Schema,
-    attemptNumber: z.number().int().positive(),
-    epoch: z.number().int().positive(),
-    fencingTokenDigest: ReceiptDigestSchema,
-  })
-  .strict()
-  .superRefine((attempt, ctx) => {
-    if (attempt.epoch !== attempt.attemptNumber) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["epoch"],
-        message: "Attempt epoch must equal the Run-scoped attempt number.",
-      });
-    }
-  });
-
-export const HostedAuthorityRefV1Schema = z
-  .object({
-    claimOperationId: GovernedProjectionStableReferenceV1Schema,
-    authorityDigest: ReceiptDigestSchema,
-    attempt: GovernedProjectionAttemptRefV1Schema,
-    admissionPolicySnapshot: z
-      .object({
-        receiptId: GovernedProjectionStableReferenceV1Schema,
-        snapshotId: GovernedProjectionStableReferenceV1Schema,
-        digest: ReceiptDigestSchema,
-      })
-      .strict(),
-  })
-  .strict();
-
-export const HostedExecutorResultReceiptRefV1Schema = z
-  .object({
-    receiptId: z.string().regex(/^lifecycle_[0-9a-f]{64}$/u),
-    operationId: HostedLifecycleMachineOperationIdV1Schema,
-    requestId: HostedLifecycleMachineRequestIdV1Schema,
-    requestDigest: ReceiptDigestSchema,
-    resultDigest: ReceiptDigestSchema,
-  })
-  .strict()
-  .superRefine((reference, ctx) => {
-    const requestDigest = ReceiptDigestSchema.safeParse(
-      reference.requestDigest,
-    );
-    if (
-      requestDigest.success
-      && reference.operationId
-        !== computeHostedLifecycleOperationIdV1(requestDigest.data)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["operationId"],
-        message: "Executor-result operation ID must derive from requestDigest.",
-      });
-    }
-  });
-
-/**
- * Verifies the deterministic identity of a hosted executor-result receipt.
- *
- * The reference intentionally omits receiptDigest: local assessment remains
- * authoritative while Cloud is unavailable, before Cloud chooses observedAt
- * and can finalize the receipt bytes. The deterministic receiptId identifies
- * the unique immutable Cloud receipt that must later resolve to the same
- * operation, request, and result digests.
- */
-export async function verifyHostedExecutorResultReceiptRefV1(input: {
-  organizationId: string;
-  reference: HostedExecutorResultReceiptRefV1;
-}): Promise<boolean> {
-  const organizationId = HostedLifecycleStableIdV1Schema.parse(
-    input.organizationId,
-  );
-  const reference = HostedExecutorResultReceiptRefV1Schema.parse(
-    input.reference,
-  );
-  return reference.requestId
-    === await computeHostedLifecycleRequestIdV1({
-      operationId: reference.operationId,
-      requestDigest: reference.requestDigest,
-    })
-    && reference.receiptId
-      === await computeHostedLifecycleReceiptIdV1({
-        organizationId,
-        operationId: reference.operationId,
-      });
-}
-
-export const WorkThreadRefPayloadV1Schema = z
-  .object({
-    workThreadId: GovernedProjectionStableReferenceV1Schema,
-    sourceIdentityDigest: ReceiptDigestSchema,
-    localCreationReceiptId: GovernedProjectionStableReferenceV1Schema,
-    localCreationReceiptDigest: ReceiptDigestSchema,
-    lineageKind: GovernedProjectionStableReferenceV1Schema,
-    hostedAuthorityRef: HostedAuthorityRefV1Schema,
-    createdAt: ControlTimestampSchema,
-  })
-  .strict();
-
-export const CompletionContractRefPayloadV1Schema = z
-  .object({
-    contractId: GovernedProjectionStableReferenceV1Schema,
-    version: z.number().int().positive(),
-    cycle: z.number().int().positive(),
-    mode: z.enum(["execution_compat", "governed"]),
-    contentDigest: ReceiptDigestSchema,
-    resolvedTargetDigests: z.tuple([]),
-    requiredGateIds: sortedUniqueArray(GovernedProjectionStableReferenceV1Schema),
-    createdAt: ControlTimestampSchema,
-    supersedesContractId: GovernedProjectionStableReferenceV1Schema.optional(),
-  })
-  .strict();
-
-const ContractAssessmentRefV1Schema = z
-  .object({
-    contractId: GovernedProjectionStableReferenceV1Schema,
-    version: z.number().int().positive(),
-    cycle: z.number().int().positive(),
-    mode: z.enum(["execution_compat", "governed"]),
-    contentDigest: ReceiptDigestSchema,
-  })
-  .strict();
-
-const CompletionAssessmentGateStateV1Schema = z.enum([
-  "pending",
-  "satisfied",
-  "unsatisfied",
-  "blocked",
-  "waived",
-]);
-
-const DOMAIN_TO_PROTOCOL_GATE_STATE = {
-  passed: "satisfied",
-  failed: "unsatisfied",
-  missing: "pending",
-  unknown: "blocked",
-  waived: "waived",
-} as const;
-
-const COMPLETION_ASSESSMENT_EVIDENCE_REQUIRED_REASONS_V1 = new Set<string>([
-  "artifact_requirement_satisfied",
-  "verification_passed",
-  "verification_failed",
-  "verification_assurance_insufficient",
-  "verification_stale",
-  "external_state_satisfied",
-  "external_state_mismatch",
-  "external_state_assurance_insufficient",
-  "external_state_stale",
-  "material_action_succeeded",
-  "material_action_failed",
-  "material_action_unknown",
-  "human_acceptance_recorded",
-  "gate_waived",
-] as const);
-
-export const CompletionAssessmentPayloadV1Schema = z
-  .object({
-    assessmentId: GovernedProjectionStableReferenceV1Schema,
-    workThreadId: GovernedProjectionStableReferenceV1Schema,
-    contract: ContractAssessmentRefV1Schema,
-    admissionPolicySnapshot: z
-      .object({
-        snapshotId: GovernedProjectionStableReferenceV1Schema,
-        digest: ReceiptDigestSchema,
-      })
-      .strict(),
-    runId: GovernedProjectionRunIdV1Schema,
-    attempt: GovernedProjectionAttemptRefV1Schema,
-    executorResultReceiptRef: HostedExecutorResultReceiptRefV1Schema,
-    assessmentInputDigest: ReceiptDigestSchema,
-    evidenceReceiptDigests: DigestSetSchema,
-    gateResults: z.array(
-      z
-        .object({
-          gateId: GovernedProjectionStableReferenceV1Schema,
-          state: CompletionAssessmentGateStateV1Schema,
-          reasonCode: CompletionReasonCodeSchema,
-          evidenceReceiptDigests: DigestSetSchema,
-        })
-        .strict(),
-    ).min(1),
-    conclusion: CompletionAssessmentGateStateV1Schema,
-    assessedAt: ControlTimestampSchema,
-    assessedBy: GovernedProjectionStableReferenceV1Schema,
-    supersedesAssessmentId: GovernedProjectionStableReferenceV1Schema.optional(),
-    waiver: z
-      .object({
-        ref: GovernedProjectionStableReferenceV1Schema,
-        actorRef: GovernedProjectionStableReferenceV1Schema,
-        reasonDigest: ReceiptDigestSchema,
-      })
-      .strict()
-      .optional(),
-  })
-  .strict()
-  .superRefine((assessment, ctx) => {
-    const evidenceUnion = [...new Set(
-      assessment.gateResults.flatMap((gate) => gate.evidenceReceiptDigests),
-    )].sort(compareUnicodeCodePoints);
-    if (
-      canonicalJsonStringify(assessment.evidenceReceiptDigests)
-      !== canonicalJsonStringify(evidenceUnion)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["evidenceReceiptDigests"],
-        message: "Assessment evidence must equal the sorted unique union of gate evidence.",
-      });
-    }
-    assessment.gateResults.forEach((gate, index) => {
-      const previous = assessment.gateResults[index - 1];
-      if (previous && compareUnicodeCodePoints(previous.gateId, gate.gateId) >= 0) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["gateResults", index, "gateId"],
-          message: "Completion gate results must be in canonical Unicode gate id order.",
-        });
-      }
-      const compatibleStates = COMPLETION_REASON_ALLOWED_GATE_STATES[
-        gate.reasonCode
-      ].map((state) => DOMAIN_TO_PROTOCOL_GATE_STATE[state]);
-      if (!compatibleStates.includes(gate.state)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["gateResults", index, "state"],
-          message: "Completion gate reason and state are incompatible.",
-        });
-      }
-      const executionReason = gate.reasonCode.startsWith("execution_");
-      const syntheticHumanEscalation = gate.gateId.startsWith("human_escalation:");
-      if (syntheticHumanEscalation && (
-        gate.gateId === "human_escalation:"
-        || gate.state !== "blocked"
-        || gate.reasonCode !== "human_acceptance_missing"
-        || gate.evidenceReceiptDigests.length !== 1
-      )) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["gateResults", index],
-          message: "Synthetic human escalation gates require a blocker id, blocked state, missing-acceptance reason, and exactly one evidence receipt.",
-        });
-      }
-      if (assessment.contract.mode === "governed" && executionReason) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["gateResults", index, "reasonCode"],
-          message: "Governed assessments cannot use execution compatibility reasons.",
-        });
-      }
-      if (
-        assessment.contract.mode === "execution_compat"
-        && !syntheticHumanEscalation
-        && !executionReason
-        && gate.reasonCode !== "gate_waived"
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["gateResults", index, "reasonCode"],
-          message: "Execution compatibility assessments cannot use governed gate reasons.",
-        });
-      }
-      if (
-        COMPLETION_ASSESSMENT_EVIDENCE_REQUIRED_REASONS_V1.has(
-          gate.reasonCode,
-        )
-        && gate.evidenceReceiptDigests.length === 0
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["gateResults", index, "evidenceReceiptDigests"],
-          message: "This completion gate reason requires local evidence.",
-        });
-      }
-    });
-    if (assessment.contract.mode === "execution_compat") {
-      const executionGates = assessment.gateResults.filter(
-        (gate) => !gate.gateId.startsWith("human_escalation:"),
-      );
-      if (executionGates.length !== 1) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["gateResults"],
-          message: "Execution compatibility assessments require exactly one executor gate.",
-        });
-      }
-    }
-    const gateStates = assessment.gateResults.map((gate) => gate.state);
-    if (assessment.conclusion !== reduceCompletionGateStates(gateStates)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["conclusion"],
-        message: "Assessment conclusion is inconsistent with its gate states.",
-      });
-    }
-    const hasWaivedGate = gateStates.includes("waived");
-    if (hasWaivedGate && assessment.waiver === undefined) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["waiver"], message: "A human waiver reference is required." });
-    }
-    if (!hasWaivedGate && assessment.waiver !== undefined) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["waiver"], message: "Waiver data is only valid when a gate is waived." });
-    }
-    const expectedAssessor = assessment.waiver ? "human" : "local_opentag";
-    if (assessment.assessedBy !== expectedAssessor) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["assessedBy"],
-        message: `Assessment author must be ${expectedAssessor} for this waiver state.`,
-      });
-    }
-  });
-
-const GovernedProjectionProducerV1Schema = z
-  .object({
-    kind: z.literal("local_opentag"),
-    id: GovernedProjectionStableReferenceV1Schema,
-    credentialId: GovernedProjectionStableReferenceV1Schema,
-    registrationGeneration: z.number().int().positive(),
-  })
-  .strict();
-
-const GovernedProjectionReceiptIdentityV1Schema = z
-  .object({
-    namespace: z.string().regex(/^opentag\.control\.receipt\/[a-z0-9-]+\/v1$/u),
-    parts: z
-      .array(z.union([GovernedProjectionStableReferenceV1Schema, GovernedProjectionRunIdV1Schema]))
-      .min(2),
-  })
-  .strict();
-
-const GovernedReceiptEnvelopeShape = {
-  ...ReceiptEnvelopeBaseShape,
-  receiptId: GovernedProjectionStableReferenceV1Schema,
-  organizationId: GovernedProjectionStableReferenceV1Schema,
-  operationId: GovernedProjectionStableReferenceV1Schema,
-  producer: GovernedProjectionProducerV1Schema,
-  identity: GovernedProjectionReceiptIdentityV1Schema,
-  runId: GovernedProjectionRunIdV1Schema,
-  workThreadId: GovernedProjectionStableReferenceV1Schema,
-};
-
-export const WorkThreadRefReceiptEnvelopeV1Schema = z
-  .object({
-    ...GovernedReceiptEnvelopeShape,
-    receiptKind: z.literal("work_thread_ref"),
-    payload: WorkThreadRefPayloadV1Schema,
-  })
-  .strict()
-  .superRefine((receipt, ctx) => {
-    if (!receipt.requiredCapabilities.includes("relay.work-thread-ref.v1")) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredCapabilities"], message: "WorkThread ref capability is required." });
-    }
-    if (
-      receipt.producer.kind !== "local_opentag" ||
-      receipt.producer.credentialId === undefined ||
-      receipt.producer.registrationGeneration === undefined ||
-      receipt.payload.workThreadId !== receipt.workThreadId ||
-      !(receipt.predecessorReceiptDigests ?? []).includes(
-        receipt.payload.hostedAuthorityRef.authorityDigest,
-      ) ||
-      !(receipt.predecessorReceiptDigests ?? []).includes(
-        receipt.payload.hostedAuthorityRef.admissionPolicySnapshot.digest,
-      ) ||
-      !hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/work-thread-ref/v1", [
-        receipt.organizationId,
-        receipt.runId,
-        receipt.workThreadId,
-      ])
-    ) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["payload"], message: "WorkThread refs are locally authoritative and tenant scoped." });
-    }
-  });
-
-export const CompletionContractRefReceiptEnvelopeV1Schema = z
-  .object({
-    ...GovernedReceiptEnvelopeShape,
-    receiptKind: z.literal("completion_contract_ref"),
-    payload: CompletionContractRefPayloadV1Schema,
-  })
-  .strict()
-  .superRefine((receipt, ctx) => {
-    if (!receipt.requiredCapabilities.includes("relay.completion-contract-ref.v1")) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredCapabilities"], message: "Completion contract ref capability is required." });
-    }
-    if (
-      receipt.producer.kind !== "local_opentag" ||
-      receipt.producer.credentialId === undefined ||
-      receipt.producer.registrationGeneration === undefined ||
-      !hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/completion-contract-ref/v1", [
-        receipt.organizationId,
-        receipt.runId,
-        receipt.workThreadId,
-        receipt.payload.contractId,
-        String(receipt.payload.version),
-        String(receipt.payload.cycle),
-      ])
-    ) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "kind"], message: "Completion contracts remain locally authoritative." });
-    }
-  });
-
-export const CompletionAssessmentReceiptEnvelopeV1Schema = z
-  .object({
-    ...GovernedReceiptEnvelopeShape,
-    receiptKind: z.literal("completion_assessment"),
-    attempt: GovernedProjectionAttemptRefV1Schema,
-    payload: CompletionAssessmentPayloadV1Schema,
-  })
-  .strict()
-  .superRefine((receipt, ctx) => {
-    if (!receipt.requiredCapabilities.includes("relay.completion-assessment.v1")) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredCapabilities"], message: "Completion assessment capability is required." });
-    }
-    if (receipt.producer.kind !== "local_opentag") {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "kind"], message: "Completion assessments are locally authoritative." });
-    }
-    if (
-      receipt.producer.credentialId === undefined ||
-      receipt.producer.registrationGeneration === undefined ||
-      receipt.payload.runId !== receipt.runId ||
-      receipt.payload.workThreadId !== receipt.workThreadId ||
-      receipt.payload.attempt.attemptId !== receipt.attempt.attemptId ||
-      receipt.payload.attempt.attemptNumber !== receipt.attempt.attemptNumber ||
-      receipt.payload.attempt.epoch !== receipt.attempt.epoch ||
-      receipt.payload.attempt.fencingTokenDigest !== receipt.attempt.fencingTokenDigest ||
-      !hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/completion-assessment/v1", [
-        receipt.organizationId,
-        receipt.workThreadId,
-        receipt.payload.assessmentId,
-      ])
-    ) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["payload"], message: "Assessment refs must match the envelope identity." });
-    }
-  });
-
-const CompletionEvidenceMetadataRefV1Schema =
-  GovernedProjectionStableReferenceV1Schema;
-
-const CompletionEvidenceTargetV1Schema = z
-  .object({
-    provider: CompletionEvidenceMetadataRefV1Schema,
-    resourceRef: CompletionEvidenceMetadataRefV1Schema,
-    resourceVersion: CompletionEvidenceMetadataRefV1Schema,
-  })
-  .strict();
-
-const CompletionEvidencePayloadAuthorityShape = {
-  evidenceId: CompletionEvidenceMetadataRefV1Schema,
-  authorityDigest: ReceiptDigestSchema,
-};
-
-export const RunArtifactCompletionEvidenceObservationPayloadV1Schema = z
-  .object({
-    evidenceType: z.literal("run_artifact"),
-    ...CompletionEvidencePayloadAuthorityShape,
-    artifactKind: CompletionEvidenceMetadataRefV1Schema,
-    sourceRunId: GovernedProjectionRunIdV1Schema,
-    target: CompletionEvidenceTargetV1Schema.optional(),
-    observedAt: ControlTimestampSchema,
-  })
-  .strict();
-
-export const VerificationCompletionEvidenceObservationPayloadV1Schema = z
-  .object({
-    evidenceType: z.literal("verification_evidence"),
-    ...CompletionEvidencePayloadAuthorityShape,
-    evidenceKind: CompletionEvidenceMetadataRefV1Schema,
-    assurance: z.enum(["verified", "reported", "unverifiable"]),
-    subject: CompletionEvidenceTargetV1Schema,
-    claim: z
-      .object({
-        predicate: CompletionEvidenceMetadataRefV1Schema,
-        outcome: CompletionEvidenceMetadataRefV1Schema,
-        observationsDigest: ReceiptDigestSchema.optional(),
-      })
-      .strict(),
-    provenancePayloadDigest: ReceiptDigestSchema,
-    observedAt: ControlTimestampSchema,
-    receivedAt: ControlTimestampSchema,
-  })
-  .strict()
-  .superRefine((evidence, ctx) => {
-    if (Date.parse(evidence.receivedAt) < Date.parse(evidence.observedAt)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["receivedAt"],
-        message: "Verification evidence cannot be received before it was observed.",
-      });
-    }
-  });
-
-export const MaterialActionCompletionEvidenceObservationPayloadV1Schema = z
-  .object({
-    evidenceType: z.literal("material_action"),
-    ...CompletionEvidencePayloadAuthorityShape,
-    actionId: CompletionEvidenceMetadataRefV1Schema,
-    actionFamily: CompletionEvidenceMetadataRefV1Schema,
-    outcome: CompletionEvidenceMetadataRefV1Schema,
-    observedAt: ControlTimestampSchema,
-  })
-  .strict();
-
-export const CompletionWaiverEvidenceObservationPayloadV1Schema = z
-  .object({
-    evidenceType: z.literal("completion_waiver"),
-    ...CompletionEvidencePayloadAuthorityShape,
-    contractId: CompletionEvidenceMetadataRefV1Schema,
-    version: z.number().int().positive(),
-    cycle: z.number().int().positive(),
-    runId: GovernedProjectionRunIdV1Schema,
-    gateIds: sortedUniqueArray(CompletionEvidenceMetadataRefV1Schema),
-    actorRef: CompletionEvidenceMetadataRefV1Schema,
-    reasonDigest: ReceiptDigestSchema,
-    waivedAt: ControlTimestampSchema,
-    expiresAt: ControlTimestampSchema.optional(),
-  })
-  .strict()
-  .superRefine((waiver, ctx) => {
-    if (
-      waiver.expiresAt !== undefined
-      && Date.parse(waiver.expiresAt) <= Date.parse(waiver.waivedAt)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["expiresAt"],
-        message: "Completion waiver expiry must follow the waiver instant.",
-      });
-    }
-  });
-
-export const HumanEscalationCompletionEvidenceObservationPayloadV1Schema = z
-  .object({
-    evidenceType: z.literal("human_escalation"),
-    ...CompletionEvidencePayloadAuthorityShape,
-    class: CompletionEvidenceMetadataRefV1Schema,
-    state: z.enum(["open", "acknowledged"]),
-    blocking: z.literal(true),
-    reasonDigest: ReceiptDigestSchema,
-    observedAt: ControlTimestampSchema,
-  })
-  .strict();
-
-export const CompletionEvidenceObservationPayloadV1Schema = z.discriminatedUnion(
-  "evidenceType",
-  [
-    RunArtifactCompletionEvidenceObservationPayloadV1Schema,
-    VerificationCompletionEvidenceObservationPayloadV1Schema,
-    MaterialActionCompletionEvidenceObservationPayloadV1Schema,
-    CompletionWaiverEvidenceObservationPayloadV1Schema,
-    HumanEscalationCompletionEvidenceObservationPayloadV1Schema,
-  ],
-);
-
-const CompletionEvidenceObservationReceiptEnvelopeBaseV1Schema = z
-  .object({
-    ...GovernedReceiptEnvelopeShape,
-    receiptKind: z.literal("completion_evidence_observation"),
-    attempt: GovernedProjectionAttemptRefV1Schema,
-    payload: CompletionEvidenceObservationPayloadV1Schema,
-  })
-  .strict();
-
-export const CompletionEvidenceObservationReceiptDigestInputV1Schema =
-  CompletionEvidenceObservationReceiptEnvelopeBaseV1Schema.omit({
-    receiptDigest: true,
-  });
-
-export const CompletionEvidenceObservationReceiptEnvelopeV1Schema =
-  CompletionEvidenceObservationReceiptEnvelopeBaseV1Schema.superRefine(
-    (receipt, ctx) => {
-      if (
-        !receipt.requiredCapabilities.includes("relay.completion-evidence.v1")
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["requiredCapabilities"],
-          message: "Completion evidence capability is required.",
-        });
-      }
-      const payloadObservedAt = receipt.payload.evidenceType === "completion_waiver"
-        ? receipt.payload.waivedAt
-        : receipt.payload.observedAt;
-      const contractReceiptDigest = receipt.identity.parts[6];
-      if (
-        receipt.producer.kind !== "local_opentag"
-        || payloadObservedAt !== receipt.observedAt
-        || !ReceiptDigestSchema.safeParse(contractReceiptDigest).success
-        || !(receipt.predecessorReceiptDigests ?? []).includes(
-          contractReceiptDigest ?? "",
-        )
-        || (
-          receipt.payload.evidenceType === "run_artifact"
-          && receipt.payload.sourceRunId !== receipt.runId
-        )
-        || (
-          receipt.payload.evidenceType === "completion_waiver"
-          && receipt.payload.runId !== receipt.runId
-        )
-        || !hasExactReceiptIdentity(
-          receipt.identity,
-          "opentag.control.receipt/completion-evidence-observation/v1",
-          [
-            receipt.organizationId,
-            receipt.workThreadId,
-            receipt.runId,
-            receipt.payload.evidenceType,
-            receipt.payload.evidenceId,
-            receipt.payload.authorityDigest,
-            contractReceiptDigest ?? "",
-          ],
-        )
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["payload"],
-          message: "Completion evidence must preserve local authority, custody, and exact identity.",
-        });
-      }
-    },
-  );
-
-export function computeCompletionEvidenceObservationPayloadDigestV1(
-  payload: z.input<typeof CompletionEvidenceObservationPayloadV1Schema>,
-): Promise<string> {
-  return computeControlPayloadDigestV1(
-    CompletionEvidenceObservationPayloadV1Schema.parse(payload),
-  );
-}
-
-export function computeCompletionEvidenceObservationReceiptDigestV1(
-  receipt: z.input<
-    typeof CompletionEvidenceObservationReceiptDigestInputV1Schema
-  >,
-): Promise<string> {
-  return computeControlReceiptDigestV1(
-    CompletionEvidenceObservationReceiptDigestInputV1Schema.parse(receipt),
-  );
-}
-
-export async function verifyCompletionEvidenceObservationReceiptDigestsV1(
-  receipt: z.input<typeof CompletionEvidenceObservationReceiptEnvelopeV1Schema>,
-): Promise<boolean> {
-  const parsed = CompletionEvidenceObservationReceiptEnvelopeV1Schema.parse(
-    receipt,
-  );
-  const { receiptDigest, ...digestInput } = parsed;
-  return parsed.payloadDigest
-      === await computeCompletionEvidenceObservationPayloadDigestV1(parsed.payload)
-    && receiptDigest
-      === await computeCompletionEvidenceObservationReceiptDigestV1(digestInput);
-}
-
-export const CallbackIntentObservationPayloadV1Schema = z
-  .object({
-    localIntentId: CallbackLocalIntentIdV1Schema,
-    assessmentRef: GovernedProjectionStableReferenceV1Schema,
-    assessmentDigest: ReceiptDigestSchema,
-    provider: CallbackProviderV1Schema,
-    sourceThreadIdentityDigest: ReceiptDigestSchema,
-    operationId: GovernedProjectionStableReferenceV1Schema,
-    payloadDigest: ReceiptDigestSchema,
-    createdAt: ControlTimestampSchema,
-  })
-  .strict();
-
-export const CallbackAttemptObservationPayloadV1Schema = z
-  .object({
-    localIntentId: CallbackLocalIntentIdV1Schema,
-    localAttemptId: CallbackLocalAttemptIdV1Schema,
-    attemptNumber: z.number().int().positive(),
-    requestDigest: ReceiptDigestSchema,
-    outcome: z.enum(["accepted", "rejected", "outcome_unknown", "attention"]),
-    reasonCode: CallbackObservationReasonCodeV1Schema,
-    nextAction: CallbackNextActionV1Schema.optional(),
-    owner: GovernedProjectionStableReferenceV1Schema.optional(),
-    attemptedAt: ControlTimestampSchema,
-    observedAt: ControlTimestampSchema,
-  })
-  .strict()
-  .superRefine((observation, ctx) => {
-    const compatibleReasonCodes = {
-      accepted: ["provider_accepted"],
-      rejected: ["provider_rejected"],
-      outcome_unknown: ["provider_receipt_missing", "provider_timeout"],
-      attention: ["callback_sink_unhandled", "callback_target_invalid", "callback_local_error"],
-    } as const;
-    if (!(compatibleReasonCodes[observation.outcome] as readonly string[]).includes(observation.reasonCode)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["reasonCode"],
-        message: "Callback attempt reason code is incompatible with its outcome.",
-      });
-    }
-    const requiredNextAction = observation.outcome === "outcome_unknown"
-      ? "reconcile-provider"
-      : observation.outcome === "attention"
-        ? "repair-local-callback"
-        : undefined;
-    if (
-      requiredNextAction === undefined
-        ? observation.nextAction !== undefined || observation.owner !== undefined
-        : observation.nextAction !== requiredNextAction || !observation.owner
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["nextAction"],
-        message: "Callback attempt next action and owner are incompatible with its outcome.",
-      });
-    }
-    if (Date.parse(observation.observedAt) < Date.parse(observation.attemptedAt)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["observedAt"],
-        message: "Callback observation cannot precede the attempt.",
-      });
-    }
-  });
-
-export const CallbackProviderObservationPayloadV1Schema = z
-  .object({
-    localIntentId: CallbackLocalIntentIdV1Schema,
-    localAttemptId: CallbackLocalAttemptIdV1Schema,
-    providerReceiptId: CallbackProviderReceiptIdV1Schema,
-    resourceIdentity: CallbackResourceIdentityV1Schema,
-    targetIdentityDigest: ReceiptDigestSchema,
-    outcome: z.enum(["succeeded", "failed"]),
-    observedAt: ControlTimestampSchema,
-    reasonCode: CallbackObservationReasonCodeV1Schema,
-    nextAction: CallbackNextActionV1Schema.optional(),
-    owner: GovernedProjectionStableReferenceV1Schema.optional(),
-  })
-  .strict()
-  .superRefine((observation, ctx) => {
-    const compatibleReasonCodes = {
-      succeeded: ["provider_accepted"],
-      failed: ["provider_error", "provider_rejected"],
-    } as const;
-    if (
-      !(compatibleReasonCodes[observation.outcome] as readonly string[]).includes(
-        observation.reasonCode,
-      )
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["reasonCode"],
-        message: "Callback provider reason code is incompatible with its outcome.",
-      });
-    }
-    if (observation.nextAction !== undefined || observation.owner !== undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["nextAction"],
-        message: "Terminal provider observations cannot require local follow-up.",
-      });
-    }
-  });
-
-function callbackEnvelope<const TReceiptKind extends string, TPayload extends z.ZodType>(
-  receiptKind: TReceiptKind,
-  payload: TPayload,
-) {
-  return z
-    .object({
-      ...GovernedReceiptEnvelopeShape,
-      receiptId: CallbackOpaqueStableIdV1Schema,
-      operationId: CallbackOpaqueStableIdV1Schema,
-      receiptKind: z.literal(receiptKind),
-      payload,
-    })
-    .strict()
-    .superRefine((receipt, ctx) => {
-      if (!receipt.requiredCapabilities.includes("relay.callback-observation.v1")) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredCapabilities"], message: "Callback observation capability is required." });
-      }
-      if (
-        receipt.producer.kind !== "local_opentag"
-        || receipt.producer.credentialId === undefined
-        || receipt.producer.registrationGeneration === undefined
-      ) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["producer", "kind"], message: "Callback observations are locally authoritative." });
-      }
-      const callbackPayload = (
-        receipt as unknown as { payload: { outcome?: string; owner?: string } }
-      ).payload;
-      if (
-        (callbackPayload.outcome === "outcome_unknown" || callbackPayload.outcome === "attention") &&
-        callbackPayload.owner !== undefined &&
-        callbackPayload.owner !== receipt.producer.id
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["payload", "owner"],
-          message: "Actionable callback observation owner must match the local producer.",
-        });
-      }
-    });
-}
-
-export const CallbackIntentObservationReceiptEnvelopeV1Schema = callbackEnvelope(
-  "callback_intent_observation",
-  CallbackIntentObservationPayloadV1Schema,
-).superRefine((receipt, ctx) => {
-  if (!hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/callback-intent-observation/v1", [
-    receipt.organizationId,
-    receipt.workThreadId,
-    receipt.payload.localIntentId,
-  ])) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity"], message: "Callback intent identity tuple is invalid." });
-  }
-  if (receipt.payload.operationId !== receipt.operationId) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["payload", "operationId"], message: "Callback operation identity must match the envelope." });
-  }
-});
-export const CallbackAttemptObservationReceiptEnvelopeV1Schema = callbackEnvelope(
-  "callback_attempt_observation",
-  CallbackAttemptObservationPayloadV1Schema,
-).superRefine((receipt, ctx) => {
-  if (!hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/callback-attempt-observation/v1", [
-    receipt.organizationId,
-    receipt.workThreadId,
-    receipt.payload.localIntentId,
-    receipt.payload.localAttemptId,
-  ])) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity"], message: "Callback attempt identity tuple is invalid." });
-  }
-  if (receipt.payload.observedAt !== receipt.observedAt) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["payload", "observedAt"],
-      message: "Callback attempt observation time must match the envelope.",
-    });
-  }
-});
-export const CallbackProviderObservationReceiptEnvelopeV1Schema = callbackEnvelope(
-  "callback_provider_observation",
-  CallbackProviderObservationPayloadV1Schema,
-).superRefine((receipt, ctx) => {
-  if (!hasExactReceiptIdentity(receipt.identity, "opentag.control.receipt/callback-provider-observation/v1", [
-    receipt.organizationId,
-    receipt.workThreadId,
-    receipt.payload.localIntentId,
-    receipt.payload.localAttemptId,
-    receipt.payload.providerReceiptId,
-  ])) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["identity"], message: "Callback provider identity tuple is invalid." });
-  }
-  if (receipt.payload.observedAt !== receipt.observedAt) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["payload", "observedAt"],
-      message: "Callback provider observation time must match the envelope.",
-    });
-  }
-});
-
 export type RelayCapability = z.infer<typeof RelayCapabilitySchema>;
 export type ControlMutationRequestV1 = z.infer<typeof ControlMutationRequestV1Schema>;
 export type RunnerRegistrationRequestV1 = z.infer<typeof RunnerRegistrationRequestV1Schema>;
@@ -4117,7 +2992,19 @@ export type RunnerCredentialCurrentStateResponseV1 = z.infer<
   typeof RunnerCredentialCurrentStateResponseV1Schema
 >;
 export type RunnerReadinessReceiptEnvelopeV1 = z.infer<typeof RunnerReadinessReceiptEnvelopeV1Schema>;
+export type GitHubProjectTargetDeclarationV1 = z.infer<
+  typeof GitHubProjectTargetDeclarationV1Schema
+>;
+export type GitHubProjectTargetBindingDigestInputV1 = z.infer<
+  typeof GitHubProjectTargetBindingDigestInputV1Schema
+>;
 export type RunnerControlContextResponseV1 = z.infer<typeof RunnerControlContextResponseV1Schema>;
+export type RunnerProjectTargetUpsertRequestV1 = z.infer<
+  typeof RunnerProjectTargetUpsertRequestV1Schema
+>;
+export type RunnerProjectTargetUpsertResponseV1 = z.infer<
+  typeof RunnerProjectTargetUpsertResponseV1Schema
+>;
 export type RunnerProposalSettlementV1 = z.infer<typeof RunnerProposalSettlementV1Schema>;
 export type RunnerProposalSettlementResponseV1 = z.infer<
   typeof RunnerProposalSettlementResponseV1Schema
@@ -4126,7 +3013,6 @@ export type MaterialActionAttemptRefV1 = z.infer<typeof MaterialActionAttemptRef
 export type PublicationOperationStepV1 = z.infer<typeof PublicationOperationStepV1Schema>;
 export type PublicationRepositoryV1 = z.infer<typeof PublicationRepositoryV1Schema>;
 export type PublicationOperationCapabilityV1 = z.infer<typeof PublicationOperationCapabilityV1Schema>;
-export type RunnerPublicationClaimV1 = z.infer<typeof RunnerPublicationClaimV1Schema>;
 export type RunnerPublicationClaimNextV1 = z.infer<typeof RunnerPublicationClaimNextV1Schema>;
 export type RunnerBranchOwnershipAttestationV1 = z.infer<typeof RunnerBranchOwnershipAttestationV1Schema>;
 export type HumanPublicationApprovalV1 = z.infer<typeof HumanPublicationApprovalV1Schema>;
@@ -4142,9 +3028,6 @@ export type RunnerMaterialActionReconcileAttemptV1 = z.infer<
 >;
 export type RunnerMaterialActionReconcileRequestV1 = z.infer<
   typeof RunnerMaterialActionReconcileRequestV1Schema
->;
-export type RunnerMaterialActionNonStartProofV1 = z.infer<
-  typeof RunnerMaterialActionNonStartProofV1Schema
 >;
 export type MaterialActionBeginAuthorityV1 = z.infer<
   typeof MaterialActionBeginAuthorityV1Schema
@@ -4182,9 +3065,6 @@ export type HostedAdmissionEnvelopeDigestInputV1 = z.infer<
   typeof HostedAdmissionEnvelopeDigestInputV1Schema
 >;
 export type HostedAdmissionEnvelopeV1 = z.infer<typeof HostedAdmissionEnvelopeV1Schema>;
-export type GitHubIssueCommentSourceIdentityDigestInputV1 = z.infer<
-  typeof GitHubIssueCommentSourceIdentityDigestInputV1Schema
->;
 export type HostedClaimRequestV1 = z.infer<typeof HostedClaimRequestV1Schema>;
 export type HostedClaimExpectedAuthorityV1 = z.infer<
   typeof HostedClaimExpectedAuthorityV1Schema
@@ -4197,31 +3077,3 @@ export type HostedSourceContentRedeemResponseV1 = z.infer<
   typeof HostedSourceContentRedeemResponseV1Schema
 >;
 export type AdmissionPolicySnapshotReceiptEnvelopeV1 = z.infer<typeof AdmissionPolicySnapshotReceiptEnvelopeV1Schema>;
-export type GovernedProjectionAttemptRefV1 = z.infer<
-  typeof GovernedProjectionAttemptRefV1Schema
->;
-export type HostedAuthorityRefV1 = z.infer<typeof HostedAuthorityRefV1Schema>;
-export type HostedExecutorResultReceiptRefV1 = z.infer<
-  typeof HostedExecutorResultReceiptRefV1Schema
->;
-export type WorkThreadRefReceiptEnvelopeV1 = z.infer<typeof WorkThreadRefReceiptEnvelopeV1Schema>;
-export type CompletionContractRefReceiptEnvelopeV1 = z.infer<typeof CompletionContractRefReceiptEnvelopeV1Schema>;
-export type CompletionAssessmentReceiptEnvelopeV1 = z.infer<typeof CompletionAssessmentReceiptEnvelopeV1Schema>;
-export type CompletionEvidenceObservationPayloadV1 = z.infer<
-  typeof CompletionEvidenceObservationPayloadV1Schema
->;
-export type CompletionEvidenceObservationReceiptDigestInputV1 = z.infer<
-  typeof CompletionEvidenceObservationReceiptDigestInputV1Schema
->;
-export type CompletionEvidenceObservationReceiptEnvelopeV1 = z.infer<
-  typeof CompletionEvidenceObservationReceiptEnvelopeV1Schema
->;
-export type CallbackIntentObservationReceiptEnvelopeV1 = z.infer<
-  typeof CallbackIntentObservationReceiptEnvelopeV1Schema
->;
-export type CallbackAttemptObservationReceiptEnvelopeV1 = z.infer<
-  typeof CallbackAttemptObservationReceiptEnvelopeV1Schema
->;
-export type CallbackProviderObservationReceiptEnvelopeV1 = z.infer<
-  typeof CallbackProviderObservationReceiptEnvelopeV1Schema
->;

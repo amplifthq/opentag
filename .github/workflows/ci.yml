@@ -78,9 +78,6 @@ jobs:
       - name: Typecheck the Compose smoke contract
         run: pnpm smoke:control-plane-compose:typecheck
 
-      - name: Check deterministic factory conformance
-        run: pnpm smoke:factory-conformance
-
       - name: Check publication set consistency
         run: pnpm release:publication-set
 

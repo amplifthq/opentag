@@ -30,14 +30,11 @@ body:
     attributes:
       label: Affected surface
       options:
-        - CLI or daemon
-        - GitHub
-        - GitLab
-        - Slack
-        - Linear
-        - Lark
-        - Agent or executor integration
-        - Protocol or SDK
+        - CLI
+        - Slack Source App
+        - GitHub Project Target or publication
+        - Local Runner or executor
+        - Control Plane or relay
         - Documentation
         - Other
     validations:

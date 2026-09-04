@@ -9,23 +9,23 @@ import { createSetupConfig } from "../setup/builders.js";
 import { collectSetupInput, type SetupCommandOptions, type SetupFlowDependencies } from "../setup/flow.js";
 import { formatSetupComplete } from "../setup/summary.js";
 import { createClackPromptAdapter } from "../ui/clack.js";
-import { scanLarkPersonalAgent } from "../platforms/lark/registration-ui.js";
-import { probeDispatcherHealth } from "../health.js";
-import { formatPairRelaySummary, normalizeRelayUrl, relayConfigFrom, validateRelayPlatformCapabilities } from "../pair.js";
+import {
+  normalizeRelayUrl,
+  runPairCommand,
+  type PairRelayDependencies,
+} from "../pair.js";
 import { assertRelayTransportAllowed } from "../relay-security.js";
-import { bootstrapLocalDispatcher, runStartCommand, type BootstrapClient, type StartCommandOptions } from "../start.js";
+import { runStartCommand, type StartCommandOptions } from "../start.js";
 import { installAndStartService, serviceControllerForPlatform, type ServiceCommandOptions } from "../service.js";
 
 export type { SetupCommandOptions };
 
-export type SetupCommandDependencies = Partial<Omit<SetupFlowDependencies, "prompts" | "scanLarkPersonalAgent">> & {
+export type SetupCommandDependencies = Partial<Omit<SetupFlowDependencies, "prompts">> & {
   platform?: NodeJS.Platform;
   prompts?: SetupFlowDependencies["prompts"];
-  scanLarkPersonalAgent?: SetupFlowDependencies["scanLarkPersonalAgent"];
-  validateLarkCredentials?: SetupFlowDependencies["validateLarkCredentials"];
-  bootstrapClient?: BootstrapClient;
   fetchImpl?: typeof fetch;
-  healthTimeoutMs?: number;
+  pairDependencies?: PairRelayDependencies;
+  pairOpenTag?: typeof runPairCommand;
   probeHermesProfile?: typeof probeHermesProfileReadiness;
   startOpenTag?(options: StartCommandOptions): Promise<void>;
   startOpenTagService?(options: ServiceCommandOptions): Promise<void>;
@@ -96,21 +96,22 @@ export async function runSetupCommand(options: SetupCommandOptions, dependencies
 
   const env = dependencies.env ?? process.env;
   const configPath = options.config ?? defaultConfigPath(env);
-  if (options.yes && existsSync(configPath) && !options.force) {
-    throw new Error(`OpenTag config already exists at ${configPath}. Use --force with --yes to overwrite it.`);
+  if (!options.relay) {
+    throw new Error("opentag setup requires --relay <url>.");
+  }
+  const relayUrl = normalizeRelayUrl(options.relay);
+  assertRelayTransportAllowed(relayUrl);
+  if (existsSync(configPath)) {
+    throw new Error(
+      `OpenTag config already exists at ${configPath}. Setup never overwrites pairing authority; use \`opentag pair --config ${configPath} --relay <url>\` for an existing unpaired config.`
+    );
   }
 
   const prompts = dependencies.prompts ?? createClackPromptAdapter();
-  const setupInput = await collectSetupInput(options, configPath, {
+  const setupInput = await collectSetupInput({ ...options, relay: relayUrl }, configPath, {
     prompts,
-    scanLarkPersonalAgent: dependencies.scanLarkPersonalAgent ?? scanLarkPersonalAgent,
-    ...(dependencies.validateLarkCredentials ? { validateLarkCredentials: dependencies.validateLarkCredentials } : {}),
-    ...(dependencies.exchangeLinearOAuthCode ? { exchangeLinearOAuthCode: dependencies.exchangeLinearOAuthCode } : {}),
-    ...(dependencies.discoverLinearMetadata ? { discoverLinearMetadata: dependencies.discoverLinearMetadata } : {}),
-    ...(dependencies.now ? { now: dependencies.now } : {}),
     ...(dependencies.cwd ? { cwd: dependencies.cwd } : {}),
-    ...(dependencies.env ? { env: dependencies.env } : {}),
-    ...(dependencies.defaults ? { defaults: dependencies.defaults } : {})
+    ...(dependencies.env ? { env: dependencies.env } : {})
   });
   if (setupInput.hermes) {
     const readiness = await (dependencies.probeHermesProfile ?? probeHermesProfileReadiness)({
@@ -123,44 +124,29 @@ export async function runSetupCommand(options: SetupCommandOptions, dependencies
     }
   }
   let config = createSetupConfig(setupInput, env);
-  let relayUrl: string | undefined;
-  let relayRegistered = false;
-  if (options.relay) {
-    relayUrl = normalizeRelayUrl(options.relay);
-    assertRelayTransportAllowed(relayUrl);
-    const healthy = await probeDispatcherHealth({
-      dispatcherUrl: relayUrl,
-      ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
-      timeoutMs: dependencies.healthTimeoutMs ?? 5_000
-    });
-    if (!healthy) {
-      throw new Error(`Relay health check failed at ${relayUrl}/healthz.`);
-    }
-    config = relayConfigFrom({ config, relayUrl });
-    await validateRelayPlatformCapabilities({
-      config,
-      relayUrl,
-      ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
-      timeoutMs: dependencies.healthTimeoutMs ?? 5_000
-    });
-    await bootstrapLocalDispatcher(config, dependencies.bootstrapClient);
-    relayRegistered = true;
-  }
   ensurePrivateDirectory(config.state.directory);
   ensurePrivateDirectory(config.state.worktreeRoot);
   writeCliConfigAtomic(configPath, config);
+  config = await (dependencies.pairOpenTag ?? runPairCommand)(
+    {
+      config: configPath,
+      relay: relayUrl,
+      trustRelayOrigin: relayUrl,
+    },
+    {
+      ...dependencies.pairDependencies,
+      readBootstrapSecret:
+        dependencies.pairDependencies?.readBootstrapSecret
+        ?? (() => setupInput.bootstrapPairingToken),
+      ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+      logger: {
+        log: (message) => prompts.note(message),
+        warn: (message) => prompts.note(message),
+      },
+    },
+  );
 
   prompts.note(formatSetupComplete(config, configPath));
-  if (relayUrl) {
-    prompts.note(
-      formatPairRelaySummary({
-        configPath,
-        config,
-        relayUrl,
-        registered: relayRegistered
-      })
-    );
-  }
 
   const runMode = await collectRunMode(options, prompts, config.preferences?.language, platform);
 

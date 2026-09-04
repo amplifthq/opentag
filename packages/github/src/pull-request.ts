@@ -1,5 +1,3 @@
-import type { OpenTagRunResult } from "@opentag/core";
-
 export type CreatePullRequestInput = {
   token: string;
   owner: string;
@@ -12,26 +10,6 @@ export type CreatePullRequestInput = {
 };
 
 export type FetchLike = typeof fetch;
-
-export function buildPullRequestBody(result: OpenTagRunResult): string {
-  const lines = ["## Summary", "", result.summary];
-
-  if (result.changedFiles?.length) {
-    lines.push("", "## Changed Files");
-    for (const file of result.changedFiles) {
-      lines.push(`- \`${file}\``);
-    }
-  }
-
-  if (result.verification?.length) {
-    lines.push("", "## Verification");
-    for (const check of result.verification) {
-      lines.push(`- \`${check.command}\`: ${check.outcome}`);
-    }
-  }
-
-  return lines.join("\n");
-}
 
 export async function createPullRequestViaFetch(input: CreatePullRequestInput, fetchImpl: FetchLike = fetch): Promise<string> {
   if (input.draft !== true) throw new Error("draft_pull_request_required");

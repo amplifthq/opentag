@@ -6,15 +6,14 @@ import {
   defaultConfigPath,
   defaultStateDirectory,
   ensurePrivateDirectory,
+  hostedRunnerAuthProblem,
   readCliConfig,
   readRedactedCliConfig,
   relayUrlFromConfig,
-  runtimeModeFromConfig,
   type OpenTagCliConfig,
   type PathEnvironment
 } from "./config.js";
 import {
-  dispatcherRuntimeHardeningInputFromEnv,
   doctorHasFailures,
   executorsFromConfig,
   runDoctor,
@@ -22,10 +21,9 @@ import {
 } from "@opentag/local-runtime";
 import type { CommandRunner } from "@opentag/runner";
 import { formatConfiguredCapabilities } from "./catalogs/capabilities.js";
-import type { PlatformId } from "./catalogs/platforms.js";
 import { formatRelaySecurityChecks, relaySecurityChecksFromConfig } from "./relay-security.js";
 import { formatSecretReadiness } from "./secret-readiness.js";
-import { probeDispatcherHealth } from "./health.js";
+import { probeRelayHealth } from "./health.js";
 import { runStartCommand } from "./start.js";
 
 export const SERVICE_LABEL = "im.opentag.agent";
@@ -33,11 +31,7 @@ export const SERVICE_LABEL = "im.opentag.agent";
 export type ServiceCommandOptions = {
   config?: string;
   lines?: string | number;
-  maxRequestBodyBytes?: string | number;
   mode?: string;
-  rateLimitDisabled?: boolean;
-  rateLimitMaxRequests?: string | number;
-  rateLimitWindowMs?: string | number;
 };
 
 export type CommandResult = {
@@ -82,22 +76,13 @@ export type ServiceStatusSummary = ServicePaths & {
   relayUrl?: string;
   relaySecurity: string[];
   running: "running" | "stopped" | "unknown";
-  runtimeMode: "local_direct" | "paired_relay" | "unknown";
-  runtimeReadiness: "ready" | "starting" | "degraded" | "stale_heartbeat" | "unreachable" | "unverified" | "stopped" | "unknown";
+  runtimeReadiness: "ready" | "degraded" | "unreachable" | "unverified" | "stopped" | "unknown";
   runtimeReadinessDetail?: string;
   runtimeDiagnostics?: string[];
-  connectors: string[];
+  projectTargets: string[];
   secrets: string[];
   capabilities: string[];
-  serviceHardening: string[];
 };
-
-const serviceHardeningEnvKeys = [
-  "OPENTAG_MAX_REQUEST_BODY_BYTES",
-  "OPENTAG_RATE_LIMIT_WINDOW_MS",
-  "OPENTAG_RATE_LIMIT_MAX_REQUESTS",
-  "OPENTAG_RATE_LIMIT_DISABLED"
-] as const;
 
 const launchAgentCliPath = [
   "/opt/homebrew/bin",
@@ -459,101 +444,22 @@ function serviceProgramArguments(options: ServiceCommandOptions, dependencies: S
   ];
 }
 
-function positiveIntegerOption(flag: string, value: string | number | undefined): string | undefined {
-  if (value === undefined || value === "") return undefined;
-  const parsed = typeof value === "number" ? value : Number(String(value).trim());
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(`${flag} must be a positive integer, received ${value}`);
-  }
-  return String(parsed);
-}
-
-function serviceHardeningEnvironment(options: ServiceCommandOptions): Record<string, string> {
-  const maxRequestBodyBytes = positiveIntegerOption("--max-request-body-bytes", options.maxRequestBodyBytes);
-  const rateLimitWindowMs = positiveIntegerOption("--rate-limit-window-ms", options.rateLimitWindowMs);
-  const rateLimitMaxRequests = positiveIntegerOption("--rate-limit-max-requests", options.rateLimitMaxRequests);
-  const environment: Record<string, string> = {
-    ...(maxRequestBodyBytes ? { OPENTAG_MAX_REQUEST_BODY_BYTES: maxRequestBodyBytes } : {}),
-    ...(rateLimitWindowMs ? { OPENTAG_RATE_LIMIT_WINDOW_MS: rateLimitWindowMs } : {}),
-    ...(rateLimitMaxRequests ? { OPENTAG_RATE_LIMIT_MAX_REQUESTS: rateLimitMaxRequests } : {}),
-    ...(options.rateLimitDisabled ? { OPENTAG_RATE_LIMIT_DISABLED: "true" } : {})
-  };
-  dispatcherRuntimeHardeningInputFromEnv(environment);
-  return environment;
-}
-
 function configured(value: unknown): boolean {
   return typeof value === "string" && value.length > 0;
 }
 
-function connectorStatus(ready: boolean, detail: string): string {
-  return ready ? `ready (${detail})` : `missing (${detail})`;
-}
-
-function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
-  const lines = ["Connectors:"];
-  const github = config.platforms.github;
-  if (github) {
-    const applyReady = config.daemon.githubApplyToken === null ? "disabled" : configured(config.daemon.githubApplyToken ?? config.daemon.githubToken) ? "ready" : "missing";
-    lines.push(
-      `  github: ingress=repository_webhook path=${github.webhookPath ?? "/github/webhooks"} port=${github.port ?? "default"}, delivery=kernel_blocked, apply=${applyReady}, target=github:${github.owner}/${github.repo}`
-    );
-  }
-
-  const gitlab = config.platforms.gitlab;
-  if (gitlab) {
-    lines.push(
-      `  gitlab: ingress=project_webhook path=${gitlab.webhookPath ?? "/gitlab/webhooks"} port=${gitlab.port ?? "default"}, delivery=kernel_blocked, target=gitlab:${gitlab.projectPathWithNamespace}, baseUrl=${gitlab.baseUrl}`
-    );
-  }
-
-  const linear = config.platforms.linear;
-  if (linear) {
-    const target = linear.projectTarget;
-    lines.push(
-      `  linear: ingress=workspace_webhook path=${linear.webhookPath ?? "/linear/webhooks"} port=${linear.port ?? "default"}, delivery=kernel_blocked, target=${target ? `${target.repoProvider}:${target.owner}/${target.repo}` : "unset"}`
-    );
-  }
-
-  const discord = config.platforms.discord;
-  if (discord) {
-    const mode = discord.mode ?? "gateway";
-    if (mode === "webhook") {
-      lines.push(
-        `  discord: ingress=dispatcher_interactions path=${discord.webhookPath ?? "/discord/interactions"}, delivery=kernel_blocked, signature=${connectorStatus(configured(discord.publicKey), "publicKey")}`
-      );
-    } else {
-      lines.push(`  discord: ingress=gateway ${connectorStatus(configured(discord.botToken), "botToken")}, delivery=kernel_blocked, tunnel=not required`);
-    }
-  }
-
-  const teams = config.platforms.teams;
-  if (teams) {
-    lines.push(
-      `  teams: ingress=dispatcher_messages path=${teams.webhookPath ?? "/teams/messages"}, delivery=kernel_blocked, tenant=${teams.tenantId ?? "any"}`
-    );
-  }
-
-  const slack = config.platforms.slack;
-  if (slack) {
-    const mode = slack.mode ?? "events_api";
-    const ingressReady = mode === "socket_mode" ? configured(slack.appToken) : configured(slack.signingSecret);
-    const ingressDetail = mode === "socket_mode" ? "appToken" : `signingSecret port=${slack.port ?? "default"}`;
-    lines.push(
-      `  slack: ingress=${mode} ${connectorStatus(ingressReady, ingressDetail)}, delivery=kernel_blocked, source=${slack.teamId}/${slack.channelId}`
-    );
-  }
-
-  const lark = config.platforms.lark;
-  if (lark) {
-    const credentialsReady = configured(lark.appId) && configured(lark.appSecret);
-    const addressing = lark.botOpenId ? "bot_open_id configured" : "bot identity may need discovery";
-    lines.push(
-      `  lark: ingress=long_connection tenant=${lark.domain} ${connectorStatus(credentialsReady, "appId/appSecret")}, delivery=kernel_blocked, addressing=${addressing}`
-    );
-  }
-
-  return lines.length > 1 ? lines : [...lines, "  none configured"];
+function formatProjectTargets(config: OpenTagCliConfig): string[] {
+  const publication = configured(config.daemon.githubToken) ? "ready" : "unavailable";
+  const targets = config.daemon.repositories.filter(
+    (repository) => repository.provider === "github",
+  );
+  return [
+    "Project Targets:",
+    ...(targets.length
+      ? targets.map((target) =>
+          `  github:${target.owner}/${target.repo}, publication=${publication}`)
+      : ["  none configured"]),
+  ];
 }
 
 function serviceCliPath(dependencies: ServiceDependencies): string {
@@ -561,11 +467,10 @@ function serviceCliPath(dependencies: ServiceDependencies): string {
   return controller === "systemd" ? linuxServiceCliPath(homeFrom(dependencies)) : launchAgentCliPath;
 }
 
-function serviceEnvironment(options: ServiceCommandOptions, paths: ServicePaths, dependencies: ServiceDependencies): Record<string, string> {
+function serviceEnvironment(paths: ServicePaths, dependencies: ServiceDependencies): Record<string, string> {
   return {
     OPENTAG_CONFIG_PATH: paths.configPath,
-    PATH: serviceCliPath(dependencies),
-    ...serviceHardeningEnvironment(options)
+    PATH: serviceCliPath(dependencies)
   };
 }
 
@@ -584,7 +489,7 @@ export function installService(options: ServiceCommandOptions = {}, dependencies
       stdoutPath: paths.stdoutPath,
       stderrPath: paths.stderrPath,
       workingDirectory,
-      environment: serviceEnvironment(options, paths, dependencies)
+      environment: serviceEnvironment(paths, dependencies)
     });
     writeFileSync(paths.plistPath, plist, { mode: 0o644 });
     return paths;
@@ -596,7 +501,7 @@ export function installService(options: ServiceCommandOptions = {}, dependencies
     stdoutPath: paths.stdoutPath,
     stderrPath: paths.stderrPath,
     workingDirectory,
-    environment: serviceEnvironment(options, paths, dependencies)
+      environment: serviceEnvironment(paths, dependencies)
   });
   writeFileSync(paths.unitPath, unit, { mode: 0o644 });
   runSystemctlOrThrow(dependencies, ["daemon-reload"], "systemctl --user daemon-reload");
@@ -626,6 +531,12 @@ export function startService(options: ServiceCommandOptions = {}, dependencies: 
   if (!installed(paths, controller)) {
     throw new Error(`OpenTag service is not installed. Run \`opentag service install --config ${paths.configPath}\` first.`);
   }
+  const config = readCliConfig(paths.configPath);
+  if (!config.daemon.controlRegistration) {
+    throw new Error("The local Runner is not paired with Hosted Control V1; run `opentag pair` before starting the service.");
+  }
+  const authProblem = hostedRunnerAuthProblem(config.daemon);
+  if (authProblem) throw new Error(authProblem);
   if (controller === "systemd") {
     runSystemctlOrThrow(dependencies, ["daemon-reload"], "systemctl --user daemon-reload");
     runSystemctlOrThrow(dependencies, ["start", systemdUnitName()], "systemctl --user start");
@@ -749,24 +660,18 @@ export function getServiceStatus(options: ServiceCommandOptions = {}, dependenci
     running = result.status === 0 && result.stdout.trim() === "active" ? "running" : "stopped";
   }
 
-  let runtimeMode: ServiceStatusSummary["runtimeMode"] = "unknown";
   let relayUrl: string | undefined;
   let relaySecurity: string[] = [];
-  let connectors: string[] = ["Connectors:", "  unavailable (config missing)"];
+  let projectTargets: string[] = ["Project Targets:", "  unavailable (config missing)"];
   let secrets: string[] = ["Secrets:", "  unavailable (config missing)"];
-  let capabilities: string[] = ["Capabilities:", "  platform unknown", "  executor unknown"];
+  let capabilities: string[] = ["Capabilities:", "  executor unknown"];
   if (existsSync(paths.configPath)) {
     const config = readCliConfig(paths.configPath);
-    runtimeMode = runtimeModeFromConfig(config);
     relayUrl = relayUrlFromConfig(config);
     relaySecurity = formatRelaySecurityChecks(relaySecurityChecksFromConfig(config));
-    connectors = formatConnectorReadiness(config);
+    projectTargets = formatProjectTargets(config);
     secrets = formatSecretReadiness(readRedactedCliConfig(paths.configPath));
-    const platforms = Object.entries(config.platforms)
-      .filter(([, value]) => value !== undefined)
-      .map(([key]) => key as PlatformId);
     capabilities = formatConfiguredCapabilities({
-      platforms,
       executors: config.daemon.repositories.map((repository) => repository.defaultExecutor)
     });
   }
@@ -776,70 +681,14 @@ export function getServiceStatus(options: ServiceCommandOptions = {}, dependenci
     controller,
     installed: isInstalled,
     running,
-    runtimeMode,
     runtimeReadiness: running === "running" ? "unverified" : running === "stopped" ? "stopped" : "unknown",
     ...(relayUrl ? { relayUrl } : {}),
     relaySecurity,
-    connectors,
+    projectTargets,
     secrets,
     capabilities,
-    serviceHardening: formatServiceHardening(paths),
     autostart: serviceAutostart(dependencies, isInstalled)
   };
-}
-
-function readLaunchAgentEnvironment(paths: ServicePaths): Record<string, string> {
-  if (!existsSync(paths.plistPath)) return {};
-  const plist = readFileSync(paths.plistPath, "utf8");
-  const environmentBlock = plist.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
-  const body = environmentBlock?.[1];
-  if (!body) return {};
-  return Object.fromEntries(
-    Array.from(body.matchAll(/<key>([\s\S]*?)<\/key>\s*<string>([\s\S]*?)<\/string>/g)).flatMap((match) => {
-      const key = match[1];
-      const value = match[2];
-      return key !== undefined && value !== undefined ? [[unescapeXml(key), unescapeXml(value)]] : [];
-    })
-  );
-}
-
-function unescapeSystemdQuotedValue(value: string): string {
-  return value
-    .replaceAll("%%", "%")
-    .replaceAll('\\"', '"')
-    .replaceAll("\\$", "$")
-    .replaceAll("\\\\", "\\");
-}
-
-function readSystemdEnvironment(paths: ServicePaths): Record<string, string> {
-  if (!existsSync(paths.unitPath)) return {};
-  const unit = readFileSync(paths.unitPath, "utf8");
-  return Object.fromEntries(
-    unit.split(/\r?\n/).flatMap((line) => {
-      const match = line.match(/^Environment=(?:"((?:\\.|[^"])*)"|(.+))$/);
-      const raw = match?.[1] ?? match?.[2];
-      if (!raw) return [];
-      const value = unescapeSystemdQuotedValue(raw);
-      const separator = value.indexOf("=");
-      if (separator <= 0) return [];
-      return [[value.slice(0, separator), value.slice(separator + 1)]];
-    })
-  );
-}
-
-function readServiceEnvironment(paths: ServicePaths): Record<string, string> {
-  return {
-    ...readLaunchAgentEnvironment(paths),
-    ...readSystemdEnvironment(paths)
-  };
-}
-
-function formatServiceHardening(paths: ServicePaths): string[] {
-  const environment = readServiceEnvironment(paths);
-  const configured = serviceHardeningEnvKeys
-    .filter((key) => environment[key])
-    .map((key) => `  ${key}=${environment[key]}`);
-  return ["Service Hardening:", ...(configured.length ? configured : ["  dispatcher hardening env not configured in service definition"])];
 }
 
 function doctorCounts(checks: DoctorCheck[]): { fail: number; warn: number } {
@@ -853,25 +702,6 @@ function formatRuntimeDiagnostic(check: DoctorCheck): string {
   return `${check.status.toUpperCase()} ${check.name}: ${check.message}`;
 }
 
-function runtimeReadinessFromHeartbeatChecks(checks: DoctorCheck[]): Pick<ServiceStatusSummary, "runtimeReadiness" | "runtimeReadinessDetail"> | null {
-  if (checks.some((check) => check.status === "fail")) return null;
-  const heartbeat = checks.find((check) => check.name === "runner heartbeat" && check.status === "warn");
-  if (!heartbeat) return null;
-  if (heartbeat.message.startsWith("stale;")) {
-    return {
-      runtimeReadiness: "stale_heartbeat",
-      runtimeReadinessDetail: heartbeat.message
-    };
-  }
-  if (heartbeat.message.startsWith("no heartbeat observed")) {
-    return {
-      runtimeReadiness: "starting",
-      runtimeReadinessDetail: heartbeat.message
-    };
-  }
-  return null;
-}
-
 export async function getServiceStatusWithRuntimeReadiness(
   options: ServiceCommandOptions = {},
   dependencies: ServiceDependencies = {}
@@ -882,9 +712,9 @@ export async function getServiceStatusWithRuntimeReadiness(
   }
 
   const config = readCliConfig(summary.configPath);
-  const dispatcherUrl = config.daemon.dispatcherUrl;
-  const ready = await probeDispatcherHealth({
-    dispatcherUrl,
+  const relayUrl = config.daemon.relayUrl;
+  const ready = await probeRelayHealth({
+    relayUrl,
     ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
     timeoutMs: dependencies.healthTimeoutMs ?? 1_000
   });
@@ -892,7 +722,7 @@ export async function getServiceStatusWithRuntimeReadiness(
     return {
       ...summary,
       runtimeReadiness: "unreachable",
-      runtimeReadinessDetail: `dispatcher healthz failed (${dispatcherUrl})`
+      runtimeReadinessDetail: `relay healthz failed (${relayUrl})`
     };
   }
 
@@ -906,14 +736,6 @@ export async function getServiceStatusWithRuntimeReadiness(
     });
     const counts = doctorCounts(checks);
     const diagnostics = checks.filter((check) => check.status !== "ok").map(formatRuntimeDiagnostic);
-    const heartbeatReadiness = runtimeReadinessFromHeartbeatChecks(checks);
-    if (heartbeatReadiness) {
-      return {
-        ...summary,
-        ...heartbeatReadiness,
-        ...(diagnostics.length ? { runtimeDiagnostics: diagnostics } : {})
-      };
-    }
     if (doctorHasFailures(checks) || counts.warn > 0) {
       return {
         ...summary,
@@ -925,7 +747,7 @@ export async function getServiceStatusWithRuntimeReadiness(
     return {
       ...summary,
       runtimeReadiness: "ready",
-      runtimeReadinessDetail: `dispatcher healthz ok; doctor checks ok (${checks.length} checks)`
+      runtimeReadinessDetail: `relay healthz ok; doctor checks ok (${checks.length} checks)`
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -951,15 +773,13 @@ export function formatServiceStatus(summary: ServiceStatusSummary): string {
     `Running: ${summary.running}`,
     `Autostart: ${summary.autostart}`,
     `Config: ${summary.configPath}`,
-    `Runtime: ${summary.runtimeMode}`,
     `OpenTag runtime: ${summary.runtimeReadiness}${summary.runtimeReadinessDetail ? ` (${summary.runtimeReadinessDetail})` : ""}`,
     ...(summary.runtimeDiagnostics?.length ? ["Runtime Checks:", ...summary.runtimeDiagnostics.map((diagnostic) => `  ${diagnostic}`)] : []),
     ...(summary.relayUrl ? [`Relay: ${summary.relayUrl}`] : []),
     ...summary.relaySecurity,
-    ...summary.connectors,
+    ...summary.projectTargets,
     ...summary.secrets,
     ...summary.capabilities,
-    ...summary.serviceHardening,
     ...(definitionLine ? [definitionLine] : []),
     `Stdout log: ${summary.stdoutPath}`,
     `Stderr log: ${summary.stderrPath}`,

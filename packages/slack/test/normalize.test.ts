@@ -70,12 +70,11 @@ describe("Slack normalization", () => {
       appId: "A123",
       agentId: "gemini",
       botUserId: "U_APP",
-      callbackUri: "http://127.0.0.1:3102/github-comment",
       signatureVerified: true,
       binding: {
         teamId: "T123",
         channelId: "C123",
-        repoProvider: "gitlab",
+        repoProvider: "github",
         owner: "acme",
         repo: "demo"
       }
@@ -88,7 +87,7 @@ describe("Slack normalization", () => {
       agentId: "gemini"
     });
     expect(event?.metadata).toMatchObject({ teamId: "T123", channelId: "C123", owner: "acme", repo: "demo" });
-    expect(event?.metadata).toMatchObject({ repoProvider: "gitlab" });
+    expect(event?.metadata).toMatchObject({ repoProvider: "github" });
     expect(event?.metadata).toMatchObject({ slackAppId: "A123", slackBotUserId: "U_APP" });
     expect(event?.metadata).toMatchObject({ channelApplicationId: "A123", channelBotId: "U_APP" });
     expect(event?.metadata).toMatchObject({
@@ -107,14 +106,14 @@ describe("Slack normalization", () => {
       }),
       uri: "slack://team/T123/channel/C123/thread/1710000000.000100",
       ownerContainer: {
-        provider: "gitlab",
+        provider: "github",
         id: "acme/demo",
-        uri: "https://gitlab.com/acme/demo"
+        uri: "https://github.com/acme/demo"
       }
     });
     expect(event?.permissions.map((permission) => permission.scope)).toContain("chat:postMessage");
     expect(event?.permissions.map((permission) => permission.scope)).toContain("reactions:write");
-    expect(event?.callback.uri).toBe("http://127.0.0.1:3102/github-comment");
+    expect(event?.callback.uri).toBe("https://slack.com/api/chat.postMessage");
   });
 
   it("normalizes native Slack ingress through opentag.channel.v1", () => {
@@ -176,29 +175,6 @@ describe("Slack normalization", () => {
       expect.arrayContaining([
         expect.objectContaining({ kind: "file", uri: "src/auth.ts", line: 12 })
       ])
-    );
-  });
-
-  it("grants issue creation permission for explicit Linear issue create requests", () => {
-    const event = normalizeSlackAppMention({
-      teamId: "T123",
-      channelId: "C123",
-      userId: "U456",
-      text: "<@U_APP> create a Linear issue for the OAuth callback error",
-      ts: "1710000000.000100",
-      eventId: "EvLinearIssue",
-      eventTime: 1710000000,
-      botUserId: "U_APP",
-      binding: {
-        teamId: "T123",
-        channelId: "C123",
-        owner: "acme",
-        repo: "demo"
-      }
-    });
-
-    expect(event?.permissions.map((permission) => permission.scope)).toEqual(
-      expect.arrayContaining(["chat:postMessage", "reactions:write", "runner:local", "issue:create"])
     );
   });
 
@@ -318,14 +294,12 @@ describe("Slack normalization", () => {
       "repo:write",
       "pr:create",
       "pr:update",
-      "issue:create",
       "network:restricted"
     ]);
     expect(event?.permissions.map((permission) => permission.scope)).toEqual([
       "chat:postMessage",
       "reactions:write",
       "runner:local",
-      "issue:create",
       "network:restricted"
     ]);
   });

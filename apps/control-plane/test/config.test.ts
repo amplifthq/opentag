@@ -24,7 +24,6 @@ describe("Control Plane configuration", () => {
       databaseUrl: "postgresql://opentag:secret@postgres:5432/opentag",
       environment: "local",
       fencingTokenSecret: "bootstrap_secret",
-      githubIngressMasterSecret: null,
       host: "0.0.0.0",
       jobLeaseDurationMs: 30_000,
       jobPollIntervalMs: 1_000,
@@ -159,11 +158,6 @@ describe("Control Plane configuration", () => {
       OPENTAG_RECOVERY_PAIRING_TOKEN: "r".repeat(32),
       OPENTAG_FENCING_TOKEN_SECRET: "r".repeat(32),
     })).toThrow("configuration_invalid");
-    expect(() => parseControlPlaneConfig({
-      ...base,
-      OPENTAG_GITHUB_INGRESS_MASTER_SECRET: "g".repeat(32),
-      OPENTAG_FENCING_TOKEN_SECRET: "g".repeat(32),
-    })).toThrow("configuration_invalid");
     expect(parseControlPlaneConfig({
       ...base,
       OPENTAG_FENCING_TOKEN_SECRET: "f".repeat(32),
@@ -190,7 +184,6 @@ describe("Control Plane configuration", () => {
       { OPENTAG_RECOVERY_PAIRING_TOKEN: "replace-with-a-different-at-least-16-character-secret" },
       { OPENTAG_FENCING_TOKEN_SECRET: "replace-with-at-least-32-independent-random-characters" },
       { OPENTAG_LOGIN_THROTTLE_SECRET: "replace-with-a-different-at-least-32-character-secret" },
-      { OPENTAG_GITHUB_INGRESS_MASTER_SECRET: "replace-with-at-least-32-more-random-characters" },
     ]) {
       expect(() => parseControlPlaneConfig({ ...base, ...placeholder }))
         .toThrow("configuration_invalid");
@@ -307,28 +300,6 @@ describe("Control Plane configuration", () => {
       return;
     }
     throw new Error("missing bootstrap configuration was accepted");
-  });
-
-  it("enables GitHub ingress only with an explicit high-entropy master secret", () => {
-    const base = {
-      DATABASE_URL: "postgresql://opentag:secret@postgres:5432/opentag",
-      OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_local",
-      OPENTAG_BOOTSTRAP_ORGANIZATION_NAME: "Local OpenTag",
-      OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "bootstrap_secret",
-      OPENTAG_PUBLIC_URL: "http://127.0.0.1:3000",
-    };
-    expect(() => parseControlPlaneConfig({
-      ...base,
-      OPENTAG_GITHUB_INGRESS_MASTER_SECRET: "too-short",
-    })).toThrow("configuration_invalid");
-    expect(parseControlPlaneConfig({
-      ...base,
-      OPENTAG_GITHUB_INGRESS_MASTER_SECRET: "g".repeat(32),
-    }).githubIngressMasterSecret).toBe("g".repeat(32));
-    expect(parseControlPlaneConfig({
-      ...base,
-      OPENTAG_GITHUB_INGRESS_MASTER_SECRET: "",
-    }).githubIngressMasterSecret).toBeNull();
   });
 
   it("enables credential recovery only with a separate explicit secret", () => {

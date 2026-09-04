@@ -6,15 +6,13 @@ describe("repository-free permission scope classification", () => {
     "chat:postMessage",
     "reactions:write",
     "runner:local",
-    "issue:create",
-    "issue:comment",
     "agent:activity",
     "network:restricted"
   ])("allows the known repository-free scope %s", (scope) => {
     expect(isRepositoryFreePermissionScope(scope)).toBe(true);
   });
 
-  it.each(["repo:read", "repo:write", "pr:create", "pr:update", "git:push", "branch:write", "future:unknown"])(
+  it.each(["repo:read", "repo:write", "pr:create", "pr:update", "issue:create", "issue:comment", "git:push", "branch:write", "future:unknown"])(
     "fails closed for repository-bound or unknown scope %s",
     (scope) => {
       expect(isRepositoryFreePermissionScope(scope)).toBe(false);

@@ -129,6 +129,7 @@ const recoveryToken = `recovery_${randomSecret()}`;
 const postgresPassword = randomSecret();
 const fencingTokenSecret = randomSecret();
 const loginThrottleSecret = randomSecret();
+const slackSigningSecret = `signing_${randomSecret()}`;
 const compose = [
   "compose",
   "--project-name",
@@ -146,7 +147,7 @@ try {
   // native Linux. The private parent directory scopes this readable mount to
   // the disposable E2E run while allowing the non-root container user to read it.
   await writeFile(relayContentKekFile, randomBytes(32), { mode: 0o644 });
-  await writeFile(slackSigningSecretFile, `signing_${randomSecret()}`, { mode: 0o644 });
+  await writeFile(slackSigningSecretFile, slackSigningSecret, { mode: 0o644 });
   await writeFile(slackBotTokenFile, `xoxb-${randomSecret()}`, { mode: 0o644 });
   await writeFile(environmentFile, [
     `POSTGRES_PASSWORD=${postgresPassword}`,
@@ -160,7 +161,6 @@ try {
     `OPENTAG_PUBLIC_URL=${baseUrl}`,
     "OPENTAG_ENVIRONMENT=local",
     "OPENTAG_RELEASE_SHA=local",
-    `OPENTAG_GITHUB_INGRESS_MASTER_SECRET=${randomSecret()}`,
     `OPENTAG_FENCING_TOKEN_SECRET=${fencingTokenSecret}`,
     `OPENTAG_LOGIN_THROTTLE_SECRET=${loginThrottleSecret}`,
     "OPENTAG_LOGIN_NETWORK_THROTTLE_MODE=direct-peer",
@@ -213,21 +213,28 @@ try {
 
   await run("corepack", [
     "pnpm",
-    "--filter",
-    "@opentag/dispatcher-app",
     "exec",
     "tsx",
-    "../../scripts/test/control-plane-compose-smoke.ts",
+    "scripts/test/control-plane-compose-smoke.ts",
   ], {
     env: {
       ...process.env,
       NODE_OPTIONS: nodeOptions,
       OPENTAG_SMOKE_URL: baseUrl,
+      OPENTAG_SMOKE_RUNNER_ID: `runner_e2e_${runId}`,
       OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_e2e",
       OPENTAG_BOOTSTRAP_PAIRING_TOKEN: pairingToken,
       OPENTAG_RECOVERY_PAIRING_TOKEN: recoveryToken,
       OPENTAG_BOOTSTRAP_ADMIN_EMAIL: adminEmail,
       OPENTAG_BOOTSTRAP_ADMIN_PASSWORD: adminPassword,
+      OPENTAG_SMOKE_SLACK_SIGNING_SECRET: slackSigningSecret,
+      OPENTAG_SMOKE_SLACK_ROUTE_IDENTITY: `slack_route_${runId}`,
+      OPENTAG_SMOKE_SLACK_PROJECT_TARGET_ID: `slack_target_${runId}`,
+      OPENTAG_SMOKE_SLACK_TEAM_ID: "T_E2E",
+      OPENTAG_SMOKE_SLACK_APP_ID: "A_E2E",
+      OPENTAG_SMOKE_SLACK_CHANNEL_ID: "C_E2E",
+      OPENTAG_SMOKE_SLACK_BOT_USER_ID: "U_BOT_E2E",
+      OPENTAG_SMOKE_SLACK_ACTOR_USER_ID: "U_OPERATOR_E2E",
     },
   });
 
@@ -247,8 +254,7 @@ try {
     "-c",
     `SELECT
       (SELECT count(*) FROM cp_runner WHERE runner_id = 'runner_e2e_${runId}'),
-      (SELECT count(*) FROM cp_project_target WHERE project_target_id = 'target_e2e_${runId}'),
-      (SELECT count(*) FROM cp_github_binding WHERE binding_id = 'binding_e2e_${runId}' AND enabled),
+      (SELECT count(*) FROM cp_project_target WHERE project_target_id = 'slack_target_${runId}'),
       (SELECT count(*) FROM cp_api_key WHERE label = 'browser-e2e-${runId}' AND revoked_at IS NOT NULL),
       (SELECT count(*) FROM cp_slack_installation slack
        JOIN cp_source_app_installation installation USING(organization_id, installation_id)
@@ -262,10 +268,10 @@ try {
        WHERE job_kind IN ('hosted-attempt-reconciliation', 'runner-readiness-retention')
          AND state = 'succeeded');`,
   ], { capture: true });
-  if (verification.stdout.trim() !== "1|1|1|1|1|2") {
+  if (verification.stdout.trim() !== "1|1|1|1|2") {
     throw new Error(`persistent_e2e_state_mismatch:${verification.stdout.trim()}`);
   }
-  console.log("[control-plane-e2e] PostgreSQL persistence verified: 1|1|1|1|1|2");
+  console.log("[control-plane-e2e] PostgreSQL persistence verified: 1|1|1|1|2");
 
   await run("docker", [...compose, "restart", "control-plane", "jobs"]);
   await waitForReady(`${baseUrl}/readyz`);
@@ -368,7 +374,6 @@ try {
     `SELECT
       (SELECT count(*) FROM cp_runner WHERE runner_id = 'runner_e2e_${runId}'),
       (SELECT count(*) FROM cp_project_target WHERE project_target_id = 'target_e2e_${runId}'),
-      (SELECT count(*) FROM cp_github_binding WHERE binding_id = 'binding_e2e_${runId}' AND enabled),
       (SELECT count(*) FROM cp_slack_installation
        WHERE installation_id = 'slack_installation_${runId}'),
       (SELECT count(*) FROM control_plane_migrations),
@@ -376,7 +381,7 @@ try {
        WHERE organization_id = 'org_e2e'
          AND display_name = 'OpenTag E2E 恢复 🚀');`,
   ], { capture: true });
-  const expectedRestoredState = `1|1|1|1|${migrationFileCount}|1`;
+  const expectedRestoredState = `1|1|1|${migrationFileCount}|1`;
   if (restored.stdout.trim() !== expectedRestoredState) {
     throw new Error(`restored_e2e_state_mismatch:${restored.stdout.trim()}`);
   }

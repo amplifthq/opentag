@@ -49,51 +49,9 @@ function commandPath(cwd, command) {
 function checkInstalledDoctorCommand(installDir) {
   const opentagCommand = commandPath(installDir, "opentag");
   run(opentagCommand, ["doctor", "--help"], { cwd: installDir });
-
-  const stateDirectory = path.join(installDir, "doctor-state");
-  const configPath = path.join(installDir, "doctor-config.json");
-  mkdirSync(stateDirectory, { recursive: true });
-  writeFileSync(
-    configPath,
-    `${JSON.stringify(
-      {
-        schemaVersion: 1,
-        state: {
-          directory: stateDirectory,
-          databasePath: path.join(stateDirectory, "opentag.db"),
-          worktreeRoot: path.join(stateDirectory, "worktrees")
-        },
-        runtime: { mode: "local" },
-        daemon: {
-          runnerId: "runner_release_check",
-          dispatcherUrl: "http://127.0.0.1:9",
-          repositories: [],
-          pairingToken: "release_check_pairing_token",
-          pollIntervalMs: 5_000,
-          heartbeatIntervalMs: 15_000
-        },
-        platforms: {}
-      },
-      null,
-      2
-    )}\n`,
-    { mode: 0o600 }
-  );
-
-  const doctor = run(opentagCommand, ["doctor", "--config", configPath], {
-    cwd: installDir,
-    stdio: "pipe",
-    allowFailure: true
-  });
-  const doctorOutput = `${doctor.stdout ?? ""}\n${doctor.stderr ?? ""}`;
-  if (doctor.status !== 1) {
-    throw new Error(`Expected the intentionally incomplete doctor config to exit 1, received ${doctor.status ?? "no status"}.`);
-  }
-  for (const expected of ["OpenTag doctor", "FAIL repository config: No repositories or agents are configured."]) {
-    if (!doctorOutput.includes(expected)) {
-      throw new Error(`Installed opentag doctor output did not contain ${JSON.stringify(expected)}.`);
-    }
-  }
+  run(opentagCommand, ["status", "--help"], { cwd: installDir });
+  run(opentagCommand, ["setup", "--help"], { cwd: installDir });
+  run(opentagCommand, ["pair", "--help"], { cwd: installDir });
 }
 
 function checkInstalledAcpLaunchDefinitions(installDir) {
@@ -191,7 +149,6 @@ function checkInstalledCompletionGovernance(installDir) {
     }
   `;
   run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
-  run(commandPath(installDir, "opentag"), ["completion", "waive", "--help"], { cwd: installDir });
 }
 
 function checkInstalledCoreZodCompatibility(installDir) {
@@ -242,38 +199,17 @@ function checkInstalledCoreZodCompatibility(installDir) {
   run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
 }
 
-function checkInstalledTeamsAuthDependencies(installDir) {
-  const probe = `
-    import { readFileSync } from "node:fs";
-    import { createRequire } from "node:module";
-    import { resolve } from "node:path";
-
-    const teamsPackagePath = resolve("node_modules/@opentag/teams/package.json");
-    const teamsPackage = JSON.parse(readFileSync(teamsPackagePath, "utf8"));
-    if (teamsPackage.dependencies?.["botframework-connector"]) {
-      throw new Error("Packed @opentag/teams still publishes the vulnerable Bot Framework UUID dependency graph.");
-    }
-    if (!teamsPackage.dependencies?.jose) {
-      throw new Error("Packed @opentag/teams does not publish its JOSE runtime dependency.");
-    }
-    const requireFromTeams = createRequire(teamsPackagePath);
-    requireFromTeams.resolve("jose");
-  `;
-  run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
-}
-
 function checkInstalledSqliteRuntime(installDir) {
   const probe = `
     import { readFileSync } from "node:fs";
     import { createRequire } from "node:module";
     import { resolve } from "node:path";
-    import { migrateSchema } from "@opentag/store";
+    import { migratePairedRunnerSchema } from "@opentag/store";
 
     const storePackagePath = resolve("node_modules/@opentag/store/package.json");
-    const dispatcherPackagePath = resolve("node_modules/@opentag/dispatcher/package.json");
     const localRuntimePackagePath = resolve("node_modules/@opentag/local-runtime/package.json");
     const cliPackagePath = resolve("node_modules/@opentag/cli/package.json");
-    for (const packagePath of [storePackagePath, dispatcherPackagePath, localRuntimePackagePath, cliPackagePath]) {
+    for (const packagePath of [storePackagePath, localRuntimePackagePath, cliPackagePath]) {
       const manifest = JSON.parse(readFileSync(packagePath, "utf8"));
       if (manifest.engines?.node !== ">=22.14.0") {
         throw new Error(
@@ -282,26 +218,53 @@ function checkInstalledSqliteRuntime(installDir) {
       }
     }
 
-    const requireFromDispatcher = createRequire(dispatcherPackagePath);
-    const sqlitePackagePath = requireFromDispatcher.resolve("better-sqlite3/package.json");
+    const requireFromLocalRuntime = createRequire(localRuntimePackagePath);
+    const sqlitePackagePath = requireFromLocalRuntime.resolve("better-sqlite3/package.json");
     const sqliteManifest = JSON.parse(readFileSync(sqlitePackagePath, "utf8"));
     if (!sqliteManifest.version.startsWith("13.")) {
       throw new Error(\`Packed runtime installed better-sqlite3 \${sqliteManifest.version}; expected version 13.\`);
     }
 
-    const Database = requireFromDispatcher("better-sqlite3");
+    const Database = requireFromLocalRuntime("better-sqlite3");
     const sqlite = new Database(":memory:");
     try {
-      migrateSchema(sqlite);
-      migrateSchema(sqlite);
-      const reassessmentTable = sqlite
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reassessment_obligations'")
-        .get();
-      if (reassessmentTable?.name !== "reassessment_obligations") {
-        throw new Error("Packed SQLite runtime did not apply the reassessment-obligation migration.");
+      migratePairedRunnerSchema(sqlite);
+      migratePairedRunnerSchema(sqlite);
+      const tables = sqlite.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+      ).all().map(({ name }) => name);
+      const expected = [
+        "attempts", "control_plane_projection_outbox", "hosted_attempt_imports",
+        "hosted_claim_operations", "hosted_lifecycle_operations", "hosted_run_imports",
+        "opentag_paired_runner_schema", "opentag_schema_migrations", "run_events",
+        "runs", "source_deliveries", "work_threads"
+      ];
+      if (JSON.stringify(tables) !== JSON.stringify(expected)) {
+        throw new Error("Packed SQLite runtime created an unexpected paired schema: " + JSON.stringify(tables));
       }
     } finally {
       sqlite.close();
+    }
+
+    const legacy = new Database(":memory:");
+    try {
+      legacy.exec("CREATE TABLE legacy_dispatcher_state(id TEXT PRIMARY KEY)");
+      try {
+        migratePairedRunnerSchema(legacy);
+        throw new Error("Packed SQLite runtime accepted an unmarked legacy schema.");
+      } catch (error) {
+        if (!String(error).includes("paired_runner_schema_incompatible_existing_database")) {
+          throw error;
+        }
+      }
+      const tables = legacy.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+      ).all();
+      if (JSON.stringify(tables) !== JSON.stringify([{ name: "legacy_dispatcher_state" }])) {
+        throw new Error("Packed SQLite runtime mutated an incompatible legacy schema.");
+      }
+    } finally {
+      legacy.close();
     }
   `;
   run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
@@ -321,6 +284,8 @@ function checkInstalledPublicPackagePrivacy(installDir) {
 const tempRoot = mkdtempSync(path.join(tmpdir(), "opentag-release-check-"));
 const packDir = path.join(tempRoot, "packs");
 const installDir = path.join(tempRoot, "install");
+const npmCacheDir = path.join(tempRoot, "npm-cache");
+const isolatedNpmEnv = { npm_config_cache: npmCacheDir };
 
 try {
   console.log("Building workspace packages...");
@@ -332,8 +297,12 @@ try {
 
   console.log("Installing packed packages into a clean npm project...");
   mkdirSync(installDir, { recursive: true });
+  mkdirSync(npmCacheDir, { recursive: true });
   writeFileSync(path.join(installDir, "package.json"), "{\"private\":true,\"type\":\"module\"}\n");
-  run("npm", ["install", "--no-audit", "--no-fund", ...tarballs], { cwd: installDir });
+  run("npm", ["install", "--no-audit", "--no-fund", ...tarballs], {
+    cwd: installDir,
+    env: isolatedNpmEnv,
+  });
 
   console.log("Checking the installed SQLite runtime...");
   checkInstalledSqliteRuntime(installDir);
@@ -341,12 +310,15 @@ try {
   console.log("Auditing installed production dependencies...");
   run("npm", ["audit", "--omit=dev", "--audit-level=high"], {
     cwd: installDir,
-    env: { npm_config_audit: "true" }
+    env: { ...isolatedNpmEnv, npm_config_audit: "true" }
   });
 
   console.log("Checking the installed opentag command...");
   run(commandPath(installDir, "opentag"), ["--help"], { cwd: installDir });
-  run("npx", ["--no-install", "opentag", "--help"], { cwd: installDir });
+  run("npx", ["--no-install", "opentag", "--help"], {
+    cwd: installDir,
+    env: isolatedNpmEnv,
+  });
   checkInstalledDoctorCommand(installDir);
 
   console.log("Checking installed ACP Registry launch definitions...");
@@ -357,9 +329,6 @@ try {
 
   console.log("Checking installed Zod schema compatibility...");
   checkInstalledCoreZodCompatibility(installDir);
-
-  console.log("Checking installed Teams authentication dependencies...");
-  checkInstalledTeamsAuthDependencies(installDir);
 
   console.log("Scanning installed public package manifests and documentation for private data...");
   checkInstalledPublicPackagePrivacy(installDir);

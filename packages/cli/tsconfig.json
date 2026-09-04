@@ -9,11 +9,6 @@
     { "path": "../client" },
     { "path": "../control-protocol" },
     { "path": "../core" },
-    { "path": "../github" },
-    { "path": "../gitlab" },
-    { "path": "../lark" },
-    { "path": "../linear" },
-    { "path": "../local-runtime" },
-    { "path": "../slack" }
+    { "path": "../local-runtime" }
   ]
 }

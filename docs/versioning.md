@@ -1,146 +1,119 @@
-# Versioning and Publishing Policy
+# Versioning and Release Policy
 
-OpenTag packages are versioned and published as a coordinated package family.
+## Status
 
-## Package Family
+Current policy for the pre-1.0 OpenTag package family, 2026-09-04.
 
-Public packages, shown in one valid dependency order:
+## Package discovery
 
-- `@opentag/control-protocol`
-- `@opentag/core`
-- `@opentag/client`
-- `@opentag/delivery-contract`
-- `@opentag/discord`
-- `@opentag/github`
-- `@opentag/gitlab`
-- `@opentag/governance`
-- `@opentag/lark`
-- `@opentag/linear`
-- `@opentag/runner`
-- `@opentag/slack`
-- `@opentag/store`
-- `@opentag/teams`
-- `@opentag/telegram`
-- `@opentag/dispatcher`
-- `@opentag/local-runtime`
-- `@opentag/cli`
+The publishable package set is discovered dynamically from
+`packages/*/package.json`. A package belongs to the release set only when its
+manifest declares:
 
-Private runnable apps are not published:
+```json
+{ "publishConfig": { "access": "public" } }
+```
 
-- `@opentag/dispatcher-app`
-- `@opentag/github-probot`
-- `@opentag/slack-events`
-- `@opentag/opentagd`
+The release package-plan command is the authority for the exact set and
+dependency-first order. Do not maintain a second hard-coded package or app
+list in documentation, release scripts, or tests. Do not assume a fixed package
+count; the set may change as packages are removed or added.
 
-## Pre-1.0 Policy
+The plan must verify that every public package's runtime `@opentag/*`
+dependency is also publishable, reject dependency cycles, and resolve a valid
+topological build/publish order.
 
-The source package family is prepared as the coordinated `0.11.0` release.
-Source manifests are preparation evidence only: npm dist-tags remain
-authoritative for published channel versions, and `0.10.0` remains the
-documented stable release until registry evidence says otherwise. The public
-API is still settling, so all releases remain in the `0.x` line until the
-package contracts are stable enough for `1.0.0`.
+```bash
+corepack pnpm release:publication-set
+```
 
-The first npm release was published as the coordinated `0.1.0` package family.
-The `0.2.0` release added the published CLI, local runtime package, and Lark and Telegram packages.
-The `0.3.0` release improved CLI setup flexibility, source-thread approval rendering, Slack interactivity, and executor result summaries.
-The `0.3.4` release improves service startup reliability, Lark status updates, final-card readability, and read-only executor result summaries.
-The `0.3.5` release adds Linux user-service support and keeps unsupported platforms on terminal startup by default.
-The `0.4.0` release adds GitLab source-thread ingestion, note callbacks, and merge request action application.
-The `0.5.0` release adds Discord, Linear, and Microsoft Teams adapters, ACP-first agent execution, durable Attempt leases and fencing, governed material-action receipts and reconciliation, and the corresponding Client/Runner migration.
-The `0.6.0` release moves all built-in coding agents onto Generic ACP, adds Cursor, OpenCode, and OpenClaw executor profiles, requires Node.js 22 for the CLI/Local Runtime/Runner, and hardens ACP isolation, cancellation conformance, Slack summaries, and the coordinated release gate.
-The `0.7.0` release completes the Phase 1 completion-governance vertical slice with durable work threads and contracts, deterministic evidence-backed assessments, GitHub PR/check/merge evidence ingestion, replay-safe reassessment, CLI explanations and bounded waivers, and a 16-package publication set that includes `@opentag/governance`.
-The `0.8.0` release completes the first provider-live recipe-driven factory loop with access identity, bounded human escalation, explainable multi-runner routing, immutable recipes and WorkThread-only workstreams, restart-safe batch admission, authoritative accepted-outcome metrics, and a real GitHub issue-to-merge-to-receipt proof while keeping planning external.
-The `0.9.0` release adds an authorized, read-only Slack-to-Linear project backlog query with bounded pagination, deterministic ordering, live OAuth token use, exact channel authorization, a query-only credential boundary, and an isolated best-effort Events API lane that does not change control or mutation delivery semantics.
-The `0.10.0` release adds canonical, evidence-backed completion authority for
-governed runs, first-publishes the new `@opentag/control-protocol` and
-`@opentag/delivery-contract` packages (growing the public set from 16 to 18),
-and introduces an optional self-hosted Control Plane distributed as a private
-OCI image. Its release procedure is documented in
-[`npm-release.md`](npm-release.md); the earlier `0.10.0-next.0` candidate
-procedure in [`npm-prerelease.md`](npm-prerelease.md) was superseded before
-publication.
-The `0.11.0` release makes zero-config governed completion fail closed until
-GitHub proves a non-empty, complete current-head check rollup. It also updates
-the exported `GitHubCompletionApi` page-return contracts and adds the required
-`checksComplete` field to `GitHubVerifiedPullRequestSnapshot`; these pre-1.0
-TypeScript contract changes are documented in the changelog.
+## Pre-1.0 versioning
 
-For each npm release:
+Before `1.0.0`, all publishable packages move in lockstep on one coordinated
+version. Public TypeScript, HTTP, protocol, storage, or package-layout changes
+must be called out in release notes even though `0.x` SemVer permits breaking
+changes within a minor release.
 
-- Set every public package to the same version.
-- Keep `private: true` only on runnable apps and the root workspace.
-- Discover the public package family from `packages/*/package.json` entries with
-  `publishConfig.access=public`; do not maintain separate package arrays in
-  release scripts.
-- Validate that every public package's `@opentag/*` runtime dependency is in
-  the discovered publication set, reject dependency cycles, and build and
-  publish packages in topological order.
-- Verify `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build`.
-- Run the governance and privacy smoke suites.
-- Pack every discovered public package, install the tarballs into a clean npm
-  project, and run the installed CLI help and doctor checks.
-- Publish the coordinated version to the npm `next` dist-tag first.
-- Install the exact CLI version from the public registry and complete setup,
-  doctor, start, and one credentialed real-platform smoke before promotion.
-- Promote the same immutable package versions to `latest`; never rebuild or
-  republish between canary and promotion.
-- Create a matching annotated git tag and GitHub Release from the exact commit
-  used for npm publication.
+- Patch releases are for fixes that preserve the supported public contract.
+- Minor releases may add capabilities or make a documented breaking change.
+- Any release may remove an explicitly retired, unsupported surface when the
+  removal is recorded in the release notes and the current docs no longer
+  advertise it.
 
-For `0.x` releases:
+The root workspace and non-publishable applications remain private and are not
+included merely because they are present under the repository tree.
 
-- Patch versions fix bugs without changing public TypeScript contracts or HTTP semantics.
-- Minor versions may add optional fields, new functions, new adapters, or carefully documented breaking changes.
-- Every breaking change must be called out in release notes because SemVer treats `0.x` as unstable but users still need migration guidance.
+Historical release-by-release detail belongs in the
+[CHANGELOG](../CHANGELOG.md), not in this policy.
 
-## 1.0 and Later
+## Release authority and immutable artifacts
 
-After `1.0.0`, follow SemVer:
+The release commit is the single source for every package artifact. Build the
+coordinated package set from that commit and publish the exact resulting
+artifacts. A later retry or promotion must not rebuild a package from a
+different tree.
 
-- Patch: bug fixes and documentation updates that do not change public behavior.
-- Minor: backward-compatible additions such as optional fields, new adapters, and new helper functions.
-- Major: breaking changes to exported types, function signatures, endpoint semantics, storage requirements, or package layout.
+The required promotion sequence is:
 
-## Compatibility Rules
+```text
+clean release commit
+  -> dynamic package plan
+  -> build / test / pack
+  -> publish exact versions to npm `next`
+  -> install and verify exact registry artifacts
+  -> promote the same artifacts to `latest`
+  -> create matching git tag and GitHub Release
+```
 
-- Prefer additive changes over modifying existing fields.
-- Keep `@opentag/core` as the compatibility anchor for protocol objects.
-- Import Control V1 directly from `@opentag/control-protocol` in new control-plane code;
-  the Core export is an identity-equal compatibility path.
-- Avoid leaking app-only environment variable behavior into package APIs.
-- Treat callback message shape, executor contracts, and dispatcher client method signatures as public API.
-- If a storage change requires migration behavior, document it in release notes and keep `migrateSchema` idempotent.
+`next` is a verification channel, not a second package family. Promotion only
+changes dist-tags; it does not rebuild, repack, or republish artifacts.
 
-## Release Checklist
+## Verification gates
 
-1. Update package versions consistently across public packages.
-2. Run `pnpm release:publication-set` and verify that automatic discovery
-   returns all expected public packages, their versions match, and every
-   internal runtime dependency belongs to the publication set.
-3. Update changelog and migration notes with package-specific changes and every
-   breaking public contract.
-4. Run `pnpm install` to refresh `pnpm-lock.yaml`.
-5. Run build, lint, typecheck, and tests sequentially.
-6. Run governance and privacy smoke validation.
-7. Run `release:check` to pack the complete publication set, install it in a
-   clean npm project, and verify the installed CLI.
-8. Publish all public packages to `next` in the computed topological order.
-9. Confirm the exact version and `next` dist-tag for every package from the npm
-   registry.
-10. Install `@opentag/cli@<version>` from the registry in a clean directory.
-11. Run CLI version/help, setup, doctor, and start from that registry
-    installation, then repeat the GitHub factory acceptance loop through
-    external source, batch admission, local execution, PR, required check,
-    merge, completion, restart, source receipt, and workstream metrics.
-12. Promote the same package versions to `latest` by changing dist-tags only.
-13. Confirm `latest` and `next` for the complete package family.
-14. Create and push the matching annotated `v<version>` git tag from the exact
-    publication commit.
-15. Create the matching GitHub Release with the changelog notes and verify its
-    tag target.
+Before publication, run the repository's build, lint, typecheck, tests, package
+plan, privacy checks, ACP/Slack protocol checks, and release check described in
+the [npm release runbook](./npm-release.md).
 
-If canary validation fails, leave `latest` unchanged and remove or move the
-`next` tags after preserving diagnostics. If a promoted release must be rolled
-back, move `latest` for every package back to the previous coordinated version;
-do not unpublish or overwrite an immutable npm version.
+The release check must pack the dynamically discovered set, install the exact
+artifacts into a clean consumer, and verify the installed CLI/runtime contract.
+The package plan, lockfile, artifact manifests, and installed dependency graph
+must all agree with the release commit.
+
+After publishing to `next`:
+
+1. Read back each exact registry version and its package metadata.
+2. Install those exact versions in a clean directory.
+3. Run CLI help, setup, doctor, service, and the bounded supported runtime
+   checks from the registry installation.
+4. Verify the self-hosted Slack paired-relay path and one paired Runner where
+   the release gate requires it.
+5. Verify GitHub publication/readback evidence separately from local execution.
+6. Promote to `latest` only after all required checks pass.
+
+A passing local test or package install proves source/artifact behavior only.
+It does not prove live Slack delivery, GitHub provider acceptance, deployment,
+or completion of an external side effect.
+
+## Outcome evidence
+
+Release verification must preserve the distinction between:
+
+- artifact built;
+- artifact published to the registry;
+- exact registry artifact installed;
+- service/runtime check passed;
+- provider request attempted;
+- provider result observed;
+- external action completed.
+
+If a provider request may have happened but the result cannot be verified,
+retain `outcome_unknown` and stop before retrying or promotion. Do not turn a
+process exit, HTTP acceptance, queued intent, or stale readback into a release
+success claim.
+
+## Tag and GitHub Release
+
+Create the matching annotated `v<version>` tag and GitHub Release from the same
+commit whose artifacts were published to `next`. The tag must not silently
+point at a later rebuild. GitHub publication/readback evidence is verified as a
+provider boundary; it is not substituted by the npm or git tag operation.

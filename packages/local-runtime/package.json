@@ -1,7 +1,7 @@
 {
   "name": "@opentag/local-runtime",
   "version": "0.11.0",
-  "description": "Local OpenTag dispatcher, daemon, and diagnostics runtime helpers.",
+  "description": "Local OpenTag paired Runner and diagnostics runtime helpers.",
   "type": "module",
   "engines": {
     "node": ">=22.14.0"
@@ -23,11 +23,6 @@
       "development": "./src/daemon.ts",
       "types": "./dist/daemon.d.ts",
       "import": "./dist/daemon.js"
-    },
-    "./dispatcher": {
-      "development": "./src/dispatcher.ts",
-      "types": "./dist/dispatcher.d.ts",
-      "import": "./dist/dispatcher.js"
     },
     "./doctor": {
       "development": "./src/doctor.ts",
@@ -56,7 +51,7 @@
     "opentag",
     "runtime",
     "daemon",
-    "dispatcher",
+    "runner",
     "cli"
   ],
   "license": "MIT",
@@ -65,25 +60,18 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@hono/node-server": "^2.0.11",
     "@opentag/client": "workspace:*",
     "@opentag/control-protocol": "workspace:*",
     "@opentag/core": "workspace:*",
-    "@opentag/discord": "workspace:*",
-    "@opentag/dispatcher": "workspace:*",
-    "@opentag/gitlab": "workspace:*",
     "@opentag/github": "workspace:*",
-    "@opentag/linear": "workspace:*",
-    "@opentag/teams": "workspace:*",
-    "@opentag/telegram": "workspace:*",
     "@opentag/runner": "workspace:*",
-    "@opentag/slack": "workspace:*",
     "@opentag/store": "workspace:*",
+    "better-sqlite3": "^13.0.2",
     "drizzle-orm": "^0.45.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "jose": "^6.2.7",
+    "@types/better-sqlite3": "^7.6.12",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2"
   }

@@ -32,7 +32,6 @@ import {
   createDurableJobQueue,
   scheduleControlPlaneMaintenance,
 } from "./modules/jobs/index.js";
-import { createGithubIngress } from "./modules/github-ingress/index.js";
 import { createRunnerDirectory } from "./modules/runners/index.js";
 import {
   createRelayContentCustody,
@@ -80,6 +79,7 @@ const BASE_CAPABILITIES = [
   "relay.permission.v1",
   "relay.readiness.v1",
   "relay.registration.v1",
+  "relay.repository-binding.v1",
   "relay.source-content-redeem.v1",
 ] as const;
 
@@ -245,7 +245,7 @@ export function createControlPlaneRuntime(input: {
   const sourceResolutionPort = input.sourceResolutionPort ?? {
     async resolve(command) {
       const contextResult = z.object({
-        executionBearingCommentBody: z.string().min(1),
+        executionBearingMessageBody: z.string().min(1),
         event: OpenTagEventSchema,
       }).strict().safeParse(command.sourceContext);
       if (!contextResult.success) {
@@ -262,7 +262,7 @@ export function createControlPlaneRuntime(input: {
         credential_generation: number; credential_generation_digest: string;
         runner_id: string | null; target_binding_digest: string | null;
         repository_provider: string | null; owner: string | null; repo: string | null;
-        default_executor: string | null; default_branch: string | null; target_version: number | null;
+        default_executor: string | null; default_branch: string | null;
       }>(`SELECT slack.installation_id,slack.binding_id,slack.project_target_id,
           slack.publication_mode,slack.team_id,slack.app_id,slack.channel_id,
           slack.bot_user_id,slack.member_user_ids,installation.app_instance_id,
@@ -270,7 +270,7 @@ export function createControlPlaneRuntime(input: {
           installation.credential_generation,installation.credential_generation_digest,
           target.runner_id,target.binding_digest AS target_binding_digest,
           target.provider AS repository_provider,target.owner,target.repo,
-          target.default_executor,target.default_branch,target.version AS target_version
+          target.default_executor,target.default_branch
         FROM cp_slack_installation slack
         JOIN cp_source_app_installation installation
           ON installation.organization_id=slack.organization_id
@@ -290,9 +290,8 @@ export function createControlPlaneRuntime(input: {
         command.reservation.bindingId]);
       const installation = installationResult.rows[0];
       if (!installation || !installation.project_target_id || !installation.runner_id
-        || !installation.target_binding_digest || !installation.repository_provider
-        || !installation.owner || !installation.repo || !installation.default_executor
-        || !installation.target_version) {
+        || !installation.target_binding_digest || installation.repository_provider !== "github"
+        || !installation.owner || !installation.repo || !installation.default_executor) {
         return { kind: "setup_required", code: "slack_project_target_missing" } as const;
       }
       const teamId = typeof metadata["teamId"] === "string" ? metadata["teamId"] : null;
@@ -309,16 +308,35 @@ export function createControlPlaneRuntime(input: {
         || sourceDeliveryId !== command.reservation.sourceDeliveryId
         || messageId !== command.reservation.sourceMessageId
         || threadParts[0] !== installation.team_id || threadParts[1] !== installation.channel_id
-        || !threadTs || event.command.rawText !== context.executionBearingCommentBody
+        || !threadTs || event.command.rawText !== context.executionBearingMessageBody
         || metadata["repoProvider"] !== installation.repository_provider
         || metadata["owner"] !== installation.owner || metadata["repo"] !== installation.repo) {
         return { kind: "invalid_request", code: "source_context_identity_mismatch" } as const;
       }
       const readinessResult = await postgres.pool.query<{ receipt: unknown; receipt_digest: string }>(
-        `SELECT receipt,receipt_digest FROM cp_runner_readiness
-         WHERE organization_id=$1 AND runner_id=$2 AND expires_at>$3
-         ORDER BY observed_at DESC LIMIT 1`,
-        [command.reservation.organizationId, installation.runner_id, clock.now()]);
+        `SELECT readiness.receipt,readiness.receipt_digest
+         FROM cp_runner_readiness readiness
+         JOIN cp_runner runner
+           ON runner.organization_id=readiness.organization_id
+          AND runner.runner_id=readiness.runner_id
+         JOIN cp_runner_credential credential
+           ON credential.organization_id=runner.organization_id
+          AND credential.runner_id=runner.runner_id
+          AND credential.credential_id=runner.current_credential_id
+          AND credential.credential_generation=runner.credential_generation
+          AND credential.revoked_at IS NULL
+         WHERE readiness.organization_id=$1 AND readiness.runner_id=$2
+           AND readiness.expires_at>$3
+           AND readiness.receipt->>'organizationId'=runner.organization_id
+           AND readiness.receipt->'producer'->>'id'=runner.runner_id
+           AND readiness.receipt->'producer'->>'credentialId'=runner.current_credential_id
+           AND readiness.receipt->'producer'->>'registrationGeneration'
+             =runner.registration_generation::text
+           AND readiness.receipt->'payload'->>'runnerId'=runner.runner_id
+           AND readiness.receipt->'payload'->>'registrationGeneration'
+             =runner.registration_generation::text
+         ORDER BY readiness.observed_at DESC,readiness.receipt_id DESC LIMIT 1`,
+         [command.reservation.organizationId, installation.runner_id, clock.now()]);
       const readinessRow = readinessResult.rows[0];
       const readiness = readinessRow
         ? RunnerReadinessReceiptEnvelopeV1Schema.safeParse(readinessRow.receipt) : null;
@@ -329,10 +347,12 @@ export function createControlPlaneRuntime(input: {
       const readyExecutor = readiness?.success ? readiness.data.payload.executors.find((candidate) =>
         candidate.executorId === installation.default_executor && candidate.state === "ready") : null;
       if (!readiness?.success || readiness.data.receiptDigest !== readinessRow?.receipt_digest
+        || readiness.data.organizationId !== command.reservation.organizationId
+        || readiness.data.producer.id !== installation.runner_id
         || !readyTarget || !readyExecutor) {
         return { kind: "temporarily_unavailable", code: "runner_not_ready" } as const;
       }
-      const repository = { provider: installation.repository_provider,
+      const repository = { provider: "github" as const,
         providerRepositoryId: installation.project_target_id,
         owner: installation.owner, repo: installation.repo };
       const sourceThread = { kind: "channel_thread" as const, providerThreadId: threadKey!,
@@ -343,7 +363,7 @@ export function createControlPlaneRuntime(input: {
         login: event.actor.handle ?? event.actor.providerUserId };
       const sourceIdentityDigest = await computeSlackAppMentionSourceIdentityDigestV1({
         provider: "slack", repository, sourceThread, sourceEvent, actor,
-        executionBearingMessageBody: context.executionBearingCommentBody,
+        executionBearingMessageBody: context.executionBearingMessageBody,
       });
       const identitySuffix = sourceIdentityDigest.slice("sha256:".length, 38);
       const runId = `run_${identitySuffix}`;
@@ -358,7 +378,7 @@ export function createControlPlaneRuntime(input: {
         actor: { provider: "slack", ...actor, authorizationRef },
         target: { projectTargetId: installation.project_target_id,
           bindingId: installation.binding_id,
-          repositoryProvider: installation.repository_provider,
+          repositoryProvider: "github",
           providerRepositoryId: installation.project_target_id,
           defaultBranch: installation.default_branch ?? "main",
           authorizedPublicationModes: installation.publication_mode === "pull_request"
@@ -411,7 +431,7 @@ export function createControlPlaneRuntime(input: {
           grantDigest: await computeControlPayloadDigestV1({ authorizationRef,
             actorId: actor.providerUserId, bindingId: installation.binding_id }) } },
         projectTarget: { projectTargetId: installation.project_target_id,
-          version: installation.target_version, digest: installation.target_binding_digest },
+          digest: installation.target_binding_digest },
         runnerId: installation.runner_id, sourceContextEnvelope, queueClaimDeadline,
         permissionCeiling: { allowedActionDescriptors: permissionDescriptors,
           digest: await computeControlPayloadDigestV1(permissionDescriptors) },
@@ -535,15 +555,6 @@ export function createControlPlaneRuntime(input: {
     clock,
     includeSourceContentPurge: Boolean(sourceContent),
   });
-  const github = input.config.githubIngressMasterSecret && sourceContent
-    ? createGithubIngress({
-        pool: postgres.pool,
-        hosted,
-        clock,
-        masterSecret: input.config.githubIngressMasterSecret,
-        sourceContent,
-      })
-    : null;
   slack = sourceContent && input.slackSecrets
     ? createPostgresSlackIngress({ pool: postgres.pool, clock, custody: sourceContent,
         jobs, secrets: input.slackSecrets, sourceApps, commandAuthority: slackCommandAuthority,
@@ -691,24 +702,6 @@ export function createControlPlaneRuntime(input: {
       materials,
       publisher,
       permissions,
-      approver: {
-        async authenticate(token) {
-          const outcome = await identity.authenticateApiKey(token);
-          if (outcome.kind !== "authenticated") return outcome;
-          if (!outcome.principal.scopes.includes("permission:resolve")
-            && !outcome.principal.scopes.includes("publication:approve")) {
-            return { kind: "insufficient_scope" as const };
-          }
-          return {
-            kind: "authenticated" as const,
-            principal: {
-              organizationId: outcome.principal.organizationId,
-              actorId: outcome.principal.apiKeyId,
-              scopes: outcome.principal.scopes,
-            },
-          };
-        },
-      },
       ...(sourceContent ? { sourceContent } : {}),
       ...(sourceIngress ? { sourceIngress } : {}),
     },
@@ -717,16 +710,13 @@ export function createControlPlaneRuntime(input: {
       reads,
       publicOrigin: input.config.publicOrigin,
       loginNetworkMode: input.config.loginRateLimit.networkMode,
-      targets: runners,
     },
-    ...(github ? { github } : {}),
     ...(slack ? { slack } : {}),
   });
 
   return {
     application,
     hosted,
-    github,
     identity,
     jobHandlers,
     jobs,

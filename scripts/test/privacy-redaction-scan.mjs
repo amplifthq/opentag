@@ -4,7 +4,7 @@ import { dirname, extname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const defaultPaths = ["packages/dispatcher/test/fixtures/replay", ".omx/live-e2e", ".omx/governance-matrix"];
+const defaultPaths = [".omx/live-e2e"];
 const scannedExtensions = new Set([".json", ".md", ".txt", ".log"]);
 const localAbsolutePathRegex =
   /(?:\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"',)]+|\/(?:home|root)\/[A-Za-z0-9._-]+\/[^\s"',)]+|[A-Za-z]:\\Users\\[^\s"',)]+)/g;

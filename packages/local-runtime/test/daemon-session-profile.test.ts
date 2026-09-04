@@ -1,21 +1,18 @@
-import type { OpenTagEvent, OpenTagRun } from "@opentag/core";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { OpenTagEvent } from "@opentag/core";
 import type { ExecutorAdapter, ExecutorRunInput } from "@opentag/runner";
-import { describe, expect, it } from "vitest";
-import { runOneDaemonIteration } from "../src/daemon.js";
-
-const run: OpenTagRun = {
-  id: "run_1",
-  eventId: "evt_slack_1",
-  status: "assigned",
-  assignedRunnerId: "runner_1",
-  createdAt: "2026-06-24T00:00:00.000Z",
-  updatedAt: "2026-06-24T00:00:00.000Z"
-};
+import { describe, expect, it, vi } from "vitest";
+import {
+  executeClaimedRun,
+  type ClaimedRunExecutionClient,
+} from "../src/daemon.js";
 
 const slackEvent: OpenTagEvent = {
-  id: "evt_slack_1",
+  id: "evt_slack_profile",
   source: "slack",
-  sourceEventId: "EvSlack",
+  sourceEventId: "EvSlackProfile",
   receivedAt: "2026-06-24T00:00:00.000Z",
   actor: { provider: "slack", providerUserId: "U456", handle: "U456", organizationId: "T123" },
   target: { mention: "@opentag", agentId: "opentag" },
@@ -23,14 +20,26 @@ const slackEvent: OpenTagEvent = {
   context: [],
   permissions: [{ scope: "repo:write", reason: "edit the local checkout" }],
   callback: { provider: "slack", uri: "https://slack.com/api/chat.postMessage", threadKey: "T123|C123|1710000000.000100" },
-  metadata: { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" }
+  metadata: { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" },
 };
 
-describe("daemon agent session profile", () => {
-  it("passes a generic agent session profile to the selected executor", async () => {
+function lifecycleClient(): ClaimedRunExecutionClient {
+  return {
+    markRunning: vi.fn(async () => {}),
+    heartbeat: vi.fn(async () => {}),
+    progress: vi.fn(async () => {}),
+    complete: vi.fn(async () => {}),
+    requestActionPermission: vi.fn(async () => { throw new Error("unexpected permission request"); }),
+    resolveActionPermission: vi.fn(async () => { throw new Error("unexpected permission resolution"); }),
+    recordMaterialActionReceipt: vi.fn(async () => { throw new Error("unexpected material receipt"); }),
+  };
+}
+
+describe("claimed Run agent session profile", () => {
+  it("passes one resolved profile to readiness and execution", async () => {
     let canRunInput: ExecutorRunInput | undefined;
     let runInput: ExecutorRunInput | undefined;
-    const captureExecutor: ExecutorAdapter = {
+    const executor: ExecutorAdapter = {
       id: "capture",
       displayName: "Capture",
       async canRun(input) {
@@ -41,25 +50,40 @@ describe("daemon agent session profile", () => {
         runInput = input;
         return { conclusion: "success", summary: "captured" };
       },
-      async cancel() {}
+      async cancel() {},
     };
+    const client = lifecycleClient();
 
-    await runOneDaemonIteration({
+    await executeClaimedRun({
       runnerId: "runner_1",
-      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo", defaultExecutor: "capture" }],
-      executors: { capture: captureExecutor },
-      agentSessionProfile: {
-        profileTemplate: "agent-{provider}-{projectTarget}-{actorId}"
-      },
-      client: {
-        async claim() {
-          return { run, event: slackEvent, attemptId: "attempt_1", attemptNumber: 1, fencingToken: "fence_1" };
+      claimed: {
+        run: {
+          id: "run_profile",
+          eventId: slackEvent.id,
+          status: "assigned",
+          assignedRunnerId: "runner_1",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          updatedAt: "2026-06-24T00:00:00.000Z",
         },
-        async markRunning() {},
-        async heartbeat() {},
-        async progress() {},
-        async complete() {}
-      }
+        event: slackEvent,
+        attemptId: "attempt_profile",
+        attemptNumber: 1,
+        fencingToken: "fence_profile",
+      },
+      repositories: [{
+        projectTargetId: "target_1",
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        checkoutPath: mkdtempSync(join(tmpdir(), "opentag-profile-")),
+        defaultExecutor: "capture",
+      }],
+      executors: { capture: executor },
+      agentSessionProfile: {
+        profileTemplate: "agent-{provider}-{projectTarget}-{actorId}",
+      },
+      heartbeatIntervalMs: 0,
+      client,
     });
 
     expect(canRunInput?.sessionProfile).toMatchObject({
@@ -68,8 +92,9 @@ describe("daemon agent session profile", () => {
       projectTarget: "github:acme/demo",
       accountId: "T123",
       conversationId: "C123",
-      actorId: "U456"
+      actorId: "U456",
     });
     expect(runInput?.sessionProfile).toEqual(canRunInput?.sessionProfile);
+    expect("claim" in client).toBe(false);
   });
 });

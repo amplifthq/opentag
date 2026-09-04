@@ -1,6 +1,4 @@
-import { OPEN_TAG_PLATFORM_CAPABILITIES, type PlatformCapabilityDescriptor } from "@opentag/core";
 import { EXECUTOR_CATALOG, type ExecutorId, isExecutorId } from "./executors.js";
-import { PLATFORM_CATALOG, type PlatformId } from "./platforms.js";
 
 export type ExecutorCapabilityDescriptor = {
   id: string;
@@ -22,8 +20,6 @@ export type ExecutorCapabilityDescriptor = {
   requiredSecrets: string[];
   completionSignals: Array<"process_exit" | "hook_event" | "stream_event">;
 };
-
-export const PLATFORM_CAPABILITIES: Record<PlatformId, PlatformCapabilityDescriptor> = OPEN_TAG_PLATFORM_CAPABILITIES;
 
 export const EXECUTOR_CAPABILITIES: Record<ExecutorId, ExecutorCapabilityDescriptor> = {
   codex: {
@@ -172,13 +168,6 @@ function yesNo(value: boolean): "yes" | "no" {
   return value ? "yes" : "no";
 }
 
-export function formatPlatformCapability(id: PlatformId): string {
-  const descriptor = PLATFORM_CATALOG.find((platform) => platform.id === id);
-  const capability = PLATFORM_CAPABILITIES[id];
-  const label = descriptor?.label ?? id;
-  return `${label}: events=${yesNo(capability.receivesEvents)}, replies=${yesNo(capability.repliesToSourceThread)}, status_updates=${yesNo(capability.supportsStatusUpdates)}, rich=${yesNo(capability.supportsRichPresentation)}, actions=${yesNo(capability.supportsActionReplies)}, explicit_addressing=${yesNo(capability.requiresExplicitAddressing)}, liveness=${capability.livenessStrategy}`;
-}
-
 export function formatExecutorCapability(id: string): string {
   const capability = isExecutorId(id) ? EXECUTOR_CAPABILITIES[id] : undefined;
   const label = EXECUTOR_CATALOG.find((executor) => executor.id === id)?.label ?? id;
@@ -191,9 +180,8 @@ export function formatExecutorCapability(id: string): string {
   return `${label}: invocation=${capability.invocation}, profile=${yesNo(capability.supportsProfile)}, streaming=${yesNo(capability.supportsStreaming)}, cancel=${yesNo(capability.supportsCancel)}, hook_completion=${yesNo(capability.supportsHookCompletion)}, progress=${capability.progressEvents}, approval=${capability.approvalMode}, context=${context}, prompt=${capability.promptAssembly}, write=${capability.writeAccess}, conversation=${capability.conversationAccess}, prompt_mutation=${capability.promptMutation}, raw_context=${yesNo(capability.rawContextAccess)}, write_actions=${capability.writeActionAccess}, isolation=${capability.workspaceIsolation}, secrets=${secrets}, completion=${completion}`;
 }
 
-export function formatConfiguredCapabilities(input: { platforms: PlatformId[]; executors: string[] }): string[] {
-  const platformLines = input.platforms.map((id) => `  platform ${formatPlatformCapability(id)}`);
+export function formatConfiguredCapabilities(input: { executors: string[] }): string[] {
   const uniqueExecutors = [...new Set(input.executors)];
   const executorLines = uniqueExecutors.map((id) => `  executor ${formatExecutorCapability(id)}`);
-  return ["Capabilities:", ...(platformLines.length ? platformLines : ["  platform none"]), ...(executorLines.length ? executorLines : ["  executor none"])];
+  return ["Capabilities:", ...(executorLines.length ? executorLines : ["  executor none"])];
 }

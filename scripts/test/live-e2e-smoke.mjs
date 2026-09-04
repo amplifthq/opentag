@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { accessSync, constants, mkdirSync, writeFileSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -20,29 +20,15 @@ function requiredCommandsForBuiltInAcpAgent(agent) {
 
 const cases = [
   {
-    id: "protocol-runtime",
-    label: "In-memory GitHub-shaped protocol smoke",
+    id: "paired-relay",
+    label: "Self-hosted Control Plane and paired Runner contract",
     live: false,
-    command: "corepack pnpm smoke:protocol",
-    requiredCommands: ["corepack"]
-  },
-  {
-    id: "slack-protocol",
-    label: "In-memory Slack-shaped protocol smoke",
-    live: false,
-    command: "corepack pnpm smoke:slack-protocol",
-    requiredCommands: ["corepack"]
-  },
-  {
-    id: "factory-conformance",
-    label: "Restart-safe recipe factory conformance",
-    live: false,
-    command: "corepack pnpm smoke:factory-conformance",
-    requiredCommands: ["corepack", "git", "node"],
+    command: "corepack pnpm test:team-relay",
+    requiredCommands: ["corepack"],
+    requiredEnv: ["OPENTAG_TEST_DATABASE_URL"],
     notes: [
-      "Runs one file-backed recipe/workstream/batch loop through the dispatcher and local daemon.",
-      "Exercises the Echo and deterministic local ACP fixture executor paths without provider credentials.",
-      "Proves durable replay, bounded batch exceptions, and current-assessment accepted-outcome attribution; it is not a provider-live public proof."
+      "Runs the deterministic Slack Source App, Control Plane, paired Runner, GitHub publication-control, and recovery contract against PostgreSQL.",
+      "No provider credentials are read and no real Slack or GitHub API is contacted."
     ]
   },
   {
@@ -73,19 +59,6 @@ const cases = [
       "Uses real model and file tools in temporary worktree and scratch fixtures, then exercises live cancellation.",
       "Stock 2026.7.1 currently fails the strict hard-cancellation probe because its cancelled shell can still reach the completion marker; built-in support remains available with cancel=no.",
       "The profile owns Gateway authentication; never put its token in the integration manifest."
-    ]
-  },
-  {
-    id: "slack-linear-registry-live",
-    label: "Registry-installed live Slack /linear acceptance",
-    live: true,
-    command: "scripts/dev/run-slack-linear-backlog-live-test.sh",
-    requiredCommands: ["corepack", "node", "npm"],
-    notes: [
-      "Loads .env.slack-test and .env.linear by default; override the two OPENTAG_SLACK_LINEAR_*_ENV_FILE paths for an isolated worktree.",
-      "Installs the exact expected @opentag/cli release from npm, verifies CLI/Slack/Linear/Core lockfile sha512 receipts, and runs the installed CLI in Slack Socket Mode.",
-      "Requires one real human Slack message containing exactly @OpenTag /linear, then verifies the provider-delivered source event, real Linear GraphQL reads, and provider-visible Slack thread reply.",
-      "The Linear audit proxy fails closed on mutations; retained evidence is mode 0600 and contains hashes/counts instead of credentials, Linear issue titles, or raw Slack messages."
     ]
   }
 ];
@@ -168,12 +141,20 @@ function parseArgs(argv) {
 }
 
 function commandExists(command) {
-  const result = spawnSync("command", ["-v", command], {
-    cwd: rootDir,
-    shell: true,
-    stdio: "ignore"
+  const candidates = isAbsolute(command)
+    ? [command]
+    : (process.env.PATH ?? "")
+      .split(delimiter)
+      .filter(Boolean)
+      .map((directory) => resolve(directory, command));
+  return candidates.some((candidate) => {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
   });
-  return result.status === 0;
 }
 
 function envPresent(name) {

@@ -1,7 +1,6 @@
 import {
   HostedClaimRequestV1Schema,
   computeControlPayloadDigestV1,
-  HostedCancelRequestV1Schema,
   HostedCompleteRequestV1Schema,
   HostedHeartbeatRequestV1Schema,
   HostedProgressRequestV1Schema,
@@ -9,16 +8,12 @@ import {
   HostedRunningRequestV1Schema,
   HostedSourceContentRedeemRequestV1Schema,
   HostedSourceContentRedeemResponseV1Schema,
-  HumanPermissionDecisionRequestV1Schema,
-  HumanPublicationApprovalV1Schema,
   RunnerBranchOwnershipAttestationV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
   RelayCapabilitiesResponseV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
-  RunnerMaterialActionNonStartProofV1Schema,
   HostedRunnerMaterialActionBeginV1Schema,
   RunnerPublicationBeginV1Schema,
-  RunnerPublicationClaimV1Schema,
   RunnerPublicationClaimNextV1Schema,
   RunnerPublicationCompletionV1Schema,
   RunnerPublicationReceiptV1Schema,
@@ -27,13 +22,14 @@ import {
   RunnerProposalSettlementV1Schema,
   HostedRunnerPermissionRequestV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
+  RunnerProjectTargetUpsertRequestV1Schema,
   RunnerCredentialReprovisionRequestV1Schema,
   RunnerRegistrationRequestV1Schema,
   type RelayCapability,
 } from "@opentag/control-protocol";
 import { randomUUID } from "node:crypto";
 import { getConnInfo } from "@hono/node-server/conninfo";
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { ZodError } from "zod";
@@ -42,7 +38,6 @@ import type { HostedRunCoordinator } from "./modules/hosted-runs/index.js";
 import type { PermissionCoordinator } from "./modules/hosted-runs/permissions.js";
 import type { MaterialActionCoordinator } from "./modules/hosted-runs/material-actions.js";
 import type { PublicationPublisher } from "./modules/publication-candidates/publisher.js";
-import type { GithubIngress } from "./modules/github-ingress/index.js";
 import type {
   ConsolePrincipal,
   IdentityModule,
@@ -91,16 +86,6 @@ export type ControlPlaneDependencies = {
     materials?: MaterialActionCoordinator;
     publisher?: PublicationPublisher;
     permissions?: PermissionCoordinator;
-    approver?: {
-      authenticate(token: string): Promise<
-        | {
-            kind: "authenticated";
-            principal: { organizationId: string; actorId: string; scopes: readonly string[] };
-          }
-        | { kind: "invalid_credential" }
-        | { kind: "insufficient_scope" }
-      >;
-    };
     sourceContent?: RelayContentCustody;
     sourceIngress?: Pick<SourceIngressService, "reserve">;
   };
@@ -109,9 +94,7 @@ export type ControlPlaneDependencies = {
     reads: ConsoleReadModel;
     publicOrigin: string;
     loginNetworkMode?: "direct-peer" | "trusted-edge";
-    targets?: Pick<RunnerDirectory, "declareProjectTarget">;
   };
-  github?: Pick<GithubIngress, "receive"> & Partial<Pick<GithubIngress, "createBinding">>;
   slack?: {
     receiveEvents(routeIdentity: string, request: {
       rawBody: Uint8Array; headers: Headers; receivedAt: string;
@@ -166,6 +149,7 @@ export function createControlPlaneApplication(
       | "missing_or_concealed"
       | "invalid_request_body"
       | "idempotency_conflict"
+      | "target_not_bound_to_slack"
       | "stale_attempt"
       | "invalid_state_transition",
     requestId = "request_unknown",
@@ -203,14 +187,7 @@ export function createControlPlaneApplication(
     maxSize,
     onError: (context) => context.json({ error: "payload_too_large" }, 413),
   });
-  app.use("/v1/*", async (context, next) => {
-    const maxSize = context.req.path.startsWith(
-      "/v1/providers/github/webhooks/",
-    )
-      ? 10 * 1024 * 1024
-      : 256 * 1024;
-    return boundedBody(maxSize)(context, next);
-  });
+  app.use("/v1/*", boundedBody(256 * 1024));
   app.use("/api/console/*", boundedBody(64 * 1024));
 
   app.get("/healthz", (context) => context.json({ status: "ok" }));
@@ -241,45 +218,6 @@ export function createControlPlaneApplication(
     };
     app.post("/v1/providers/slack/events/:routeIdentity", slackRoute("events"));
     app.post("/v1/providers/slack/interactivity/:routeIdentity", slackRoute("interactivity"));
-  }
-
-  if (dependencies.github) {
-    app.post("/v1/providers/github/webhooks/:bindingId", async (context) => {
-      const deliveryId = context.req.header("x-github-delivery");
-      const eventName = context.req.header("x-github-event");
-      const signature = context.req.header("x-hub-signature-256");
-      if (!deliveryId || !eventName || !signature) {
-        return context.json({ error: "invalid_github_delivery" }, 400);
-      }
-      const outcome = await dependencies.github!.receive({
-        bindingId: context.req.param("bindingId"),
-        deliveryId,
-        eventName,
-        signature,
-        body: new Uint8Array(await context.req.raw.arrayBuffer()),
-      });
-      if (outcome.kind === "invalid_binding_or_signature") {
-        return context.json({ error: "not_found" }, 404);
-      }
-      if (outcome.kind === "invalid_payload") {
-        return context.json({ error: "invalid_github_delivery" }, 400);
-      }
-      if (outcome.kind === "rejected_authority") {
-        return context.json({ error: "forbidden_provider_principal" }, 403);
-      }
-      if (
-        outcome.kind === "runner_not_ready"
-        || outcome.kind === "admission_conflict"
-        || outcome.kind === "delivery_conflict"
-        || outcome.kind === "delivery_in_progress"
-      ) {
-        return context.json({ error: outcome.kind }, 409);
-      }
-      if (outcome.kind === "replayed" || outcome.kind === "evidence_replayed") {
-        return context.json(outcome, 200);
-      }
-      return context.json(outcome, 202);
-    });
   }
 
   if (dependencies.control) {
@@ -380,6 +318,40 @@ export function createControlPlaneApplication(
       return context.json(await control.runners.getControlContext(principal));
     });
 
+    app.put(
+      "/v1/runners/:runnerId/project-targets/:projectTargetId",
+      async (context) => {
+        const principal = await runtimePrincipal(context.req.raw);
+        if (!principal) {
+          return context.json(controlError("invalid_credential"), 401);
+        }
+        let request: ReturnType<typeof RunnerProjectTargetUpsertRequestV1Schema.parse>;
+        try {
+          request = RunnerProjectTargetUpsertRequestV1Schema.parse(
+            await context.req.json(),
+          );
+        } catch {
+          return context.json(controlError("invalid_request_body"), 400);
+        }
+        if (principal.runnerId !== context.req.param("runnerId")
+          || request.target.projectTargetId !== context.req.param("projectTargetId")
+          || request.expectedAuthority.credentialId !== principal.credentialId
+          || request.expectedAuthority.registrationGeneration
+            !== principal.registrationGeneration
+          || request.expectedAuthority.credentialGeneration
+            !== principal.credentialGeneration) {
+          return context.json(controlError("stale_attempt", request.requestId), 409);
+        }
+        const outcome = await control.runners.upsertProjectTarget({ principal, request });
+        if (outcome.kind === "upserted") return context.json(outcome.context, 200);
+        return context.json(
+          controlError(outcome.reason === "authority_mismatch"
+            ? "stale_attempt" : "target_not_bound_to_slack", request.requestId),
+          409,
+        );
+      },
+    );
+
     app.post("/v1/runners/:runnerId/readiness", async (context) => {
       const principal = await runtimePrincipal(context.req.raw);
       if (!principal) {
@@ -435,9 +407,6 @@ export function createControlPlaneApplication(
         return context.json(outcome.claim, 200);
       }
       if (outcome.kind === "empty") return context.body(null, 204);
-      if (outcome.kind === "legacy_interrupted") {
-        return context.json(outcome, 409);
-      }
       return context.json(
         controlError("idempotency_conflict", request.requestId),
         409,
@@ -553,64 +522,6 @@ export function createControlPlaneApplication(
         },
       );
 
-      app.post(
-        "/v1/runners/:runnerId/runs/:runId/action-permissions/:actionId/resolve",
-        async (context) => {
-          let decision: ReturnType<
-            typeof HumanPermissionDecisionRequestV1Schema.parse
-          >;
-          try {
-            decision = HumanPermissionDecisionRequestV1Schema.parse(
-              await context.req.json(),
-            );
-          } catch {
-            return context.json(controlError("invalid_request_body"), 400);
-          }
-          const token = bearerToken(context.req.raw);
-          const authentication = token && control.approver
-            ? await control.approver.authenticate(token)
-            : { kind: "invalid_credential" as const };
-          if (authentication.kind === "invalid_credential") {
-            return context.json(
-              controlError("invalid_credential", decision.requestId),
-              401,
-            );
-          }
-          if (authentication.kind === "insufficient_scope") {
-            return context.json(
-              controlError("insufficient_scope", decision.requestId),
-              403,
-            );
-          }
-          if (
-            decision.runId !== context.req.param("runId")
-            || decision.actionId !== context.req.param("actionId")
-          ) {
-            return context.json(
-              controlError("stale_attempt", decision.requestId),
-              409,
-            );
-          }
-          const outcome = await permissions.resolve({
-            principal: authentication.principal,
-            runnerId: context.req.param("runnerId"),
-            decision,
-          });
-          if (outcome.kind === "resolved" || outcome.kind === "replayed") {
-            return context.json(outcome.receipt, 200);
-          }
-          return context.json(
-            controlError(
-              outcome.kind === "stale_fence"
-                ? "stale_attempt"
-                : "idempotency_conflict",
-              decision.requestId,
-            ),
-            409,
-          );
-        },
-      );
-
       app.get(
         "/v1/runners/:runnerId/runs/:runId/action-permissions/:actionId/current",
         async (context) => {
@@ -656,38 +567,6 @@ export function createControlPlaneApplication(
 
     if (control.materials) {
       const materials = control.materials;
-
-      app.post(
-        "/v1/runners/:runnerId/runs/:runId/material-actions/non-start-proof",
-        async (context) => {
-          const principal = await runtimePrincipal(context.req.raw);
-          if (!principal) return context.json(controlError("invalid_credential"), 401);
-          let proof;
-          try {
-            proof = RunnerMaterialActionNonStartProofV1Schema.parse(await context.req.json());
-          } catch {
-            return context.json(controlError("invalid_request_body"), 400);
-          }
-          if (principal.runnerId !== context.req.param("runnerId")
-            || proof.runnerId !== principal.runnerId
-            || proof.runId !== context.req.param("runId")
-            || proof.organizationId !== principal.organizationId) {
-            return context.json(controlError("stale_attempt", proof.requestId), 409);
-          }
-          const outcome = await materials.recordNotStarted({ principal,
-            fencingToken: proof.attempt.fencingToken,
-            fencingTokenDigest: proof.attempt.fencingTokenDigest, runId: proof.runId,
-            attemptId: proof.attempt.attemptId,
-            attemptNumber: proof.attempt.attemptNumber,
-            proofId: proof.proofId, proofDigest: proof.proofDigest });
-          if (outcome.kind === "recorded" || outcome.kind === "replayed") {
-            return context.json({ outcome: outcome.kind, proofId: proof.proofId },
-              outcome.kind === "recorded" ? 201 : 200);
-          }
-          return context.json(controlError(outcome.kind === "stale_fence"
-            ? "stale_attempt" : "idempotency_conflict", proof.requestId), 409);
-        },
-      );
 
       app.post(
         "/v1/runners/:runnerId/runs/:runId/material-actions/begin",
@@ -854,50 +733,6 @@ export function createControlPlaneApplication(
         return context.json(controlError("idempotency_conflict", request.requestId), 409);
       });
 
-      const publicationApprovalHandler = async (context: Context) => {
-        let request: ReturnType<typeof HumanPublicationApprovalV1Schema.parse>;
-        try { request = HumanPublicationApprovalV1Schema.parse(await context.req.json()); }
-        catch { return context.json(controlError("invalid_request_body"), 400); }
-        const token = bearerToken(context.req.raw);
-        const authentication = token && control.approver
-          ? await control.approver.authenticate(token) : { kind: "invalid_credential" as const };
-        if (authentication.kind === "invalid_credential") return context.json(controlError("invalid_credential", request.requestId), 401);
-        if (authentication.kind === "insufficient_scope") return context.json(controlError("insufficient_scope", request.requestId), 403);
-        if (!authentication.principal.scopes.includes("publication:approve")) {
-          return context.json(controlError("insufficient_scope", request.requestId), 403);
-        }
-        if (authentication.principal.organizationId !== request.organizationId
-          || request.runnerId !== context.req.param("runnerId") || request.runId !== context.req.param("runId")) {
-          return context.json(controlError("stale_attempt", request.requestId), 409);
-        }
-        const outcome = await publisher.approve({ ...request,
-          approverId: authentication.principal.actorId });
-        if (outcome.kind === "approved" || outcome.kind === "replayed") return context.json(outcome, 200);
-        return context.json(controlError("idempotency_conflict", request.requestId), 409);
-      };
-      app.post("/v1/runners/:runnerId/runs/:runId/publication/approve", publicationApprovalHandler);
-      app.post("/v1/source-thread-controls/runners/:runnerId/runs/:runId/publication/approve",
-        publicationApprovalHandler);
-
-      app.post("/v1/runners/:runnerId/runs/:runId/publication/claim", async (context) => {
-        const principal = await runtimePrincipal(context.req.raw);
-        if (!principal) return context.json(controlError("invalid_credential"), 401);
-        let request: ReturnType<typeof RunnerPublicationClaimV1Schema.parse>;
-        try { request = RunnerPublicationClaimV1Schema.parse(await context.req.json()); }
-        catch { return context.json(controlError("invalid_request_body"), 400); }
-        if (principal.organizationId !== request.organizationId || principal.runnerId !== request.runnerId
-          || request.runnerId !== context.req.param("runnerId") || request.runId !== context.req.param("runId")) {
-          return context.json(controlError("stale_attempt", request.requestId), 409);
-        }
-        const outcome = await publisher.claim({ principal, runId: request.runId,
-          attemptId: request.attemptId, attemptNumber: request.attemptNumber,
-          fencingToken: request.fencingToken, candidateId: request.candidateId,
-          candidateDigest: request.candidateDigest, runnerGeneration: request.runnerGeneration,
-          step: request.step });
-        if (outcome.kind === "issued") return context.json(outcome.capability, 201);
-        return context.json(controlError("stale_attempt", request.requestId), 409);
-      });
-
       app.post("/v1/runners/:runnerId/publication/claim-next", async (context) => {
         const principal = await runtimePrincipal(context.req.raw);
         if (!principal) return context.json(controlError("invalid_credential"), 401);
@@ -1028,7 +863,6 @@ export function createControlPlaneApplication(
       running: HostedRunningRequestV1Schema,
       progress: HostedProgressRequestV1Schema,
       "reject-start": HostedRejectStartRequestV1Schema,
-      cancel: HostedCancelRequestV1Schema,
       complete: HostedCompleteRequestV1Schema,
     } as const;
     for (const action of Object.keys(lifecycleSchemas) as Array<
@@ -1189,6 +1023,16 @@ export function createControlPlaneApplication(
       });
     });
 
+    app.get("/api/console/presence", async (context) => {
+      const principal = await consolePrincipal(
+        getCookie(context, "opentag_session"),
+      );
+      if (!principal) return context.json({ error: "invalid_session" }, 401);
+      return context.json({
+        presence: await consoleDependencies.reads.presence(principal),
+      });
+    });
+
     app.get("/api/console/runners", async (context) => {
       const principal = await consolePrincipal(
         getCookie(context, "opentag_session"),
@@ -1236,82 +1080,9 @@ export function createControlPlaneApplication(
         getCookie(context, "opentag_session"),
       );
       if (!principal) return context.json({ error: "invalid_session" }, 401);
-      const [targets, bindings] = await Promise.all([
-        consoleDependencies.reads.listProjectTargets(principal),
-        consoleDependencies.reads.listGithubBindings(principal),
-      ]);
-      return context.json({ bindings, targets });
-    });
-
-    app.post("/api/console/project-targets", async (context) => {
-      if (!consoleDependencies.targets) {
-        return context.json({ error: "target_management_disabled" }, 404);
-      }
-      if (!trustedMutationOrigin(context.req.raw)) {
-        return context.json({ error: "forbidden_origin" }, 403);
-      }
-      const principal = await consolePrincipal(
-        getCookie(context, "opentag_session"),
-      );
-      if (!principal) return context.json({ error: "invalid_session" }, 401);
-      if (principal.role !== "owner" && principal.role !== "admin") {
-        return context.json({ error: "forbidden_action" }, 403);
-      }
-      let body: {
-        projectTargetId: string;
-        runnerId: string;
-        bindingDigest: string;
-        provider: string;
-        owner: string;
-        repo: string;
-        defaultExecutor: string;
-        defaultBranch: string | null;
-        version: number;
-      };
-      try {
-        const value = await context.req.json() as Record<string, unknown>;
-        if (
-          typeof value !== "object"
-          || value === null
-          || ![
-            "projectTargetId",
-            "runnerId",
-            "bindingDigest",
-            "provider",
-            "owner",
-            "repo",
-            "defaultExecutor",
-          ].every((key) => typeof value[key] === "string")
-          || (value.defaultBranch !== null && typeof value.defaultBranch !== "string")
-          || typeof value.version !== "number"
-        ) {
-          throw new Error("invalid body");
-        }
-        body = value as typeof body;
-      } catch {
-        return context.json({ error: "invalid_request" }, 400);
-      }
-      try {
-        const { runnerId, ...target } = body;
-        const outcome = await consoleDependencies.targets.declareProjectTarget({
-          organizationId: principal.organizationId,
-          runnerId,
-          actor: { kind: "operator", id: principal.operatorId },
-          target,
-        });
-        return context.json(
-          { outcome: outcome.kind, projectTargetId: body.projectTargetId },
-          outcome.kind === "created" ? 201 : 200,
-        );
-      } catch (error) {
-        if (
-          error instanceof ZodError
-          || (error instanceof Error && error.message === "target_runner_not_found")
-        ) {
-          return context.json({ error: "invalid_request" }, 400);
-        }
-        throw error;
-      }
+      return context.json({
+        targets: await consoleDependencies.reads.listProjectTargets(principal),
+      });
     });
 
     app.get("/api/console/api-keys", async (context) => {
@@ -1386,67 +1157,6 @@ export function createControlPlaneApplication(
       return context.body(null, 204);
     });
 
-    app.post("/api/console/github-bindings", async (context) => {
-      if (!dependencies.github?.createBinding) {
-        return context.json({ error: "github_ingress_disabled" }, 404);
-      }
-      if (!trustedMutationOrigin(context.req.raw)) {
-        return context.json({ error: "forbidden_origin" }, 403);
-      }
-      const principal = await consolePrincipal(
-        getCookie(context, "opentag_session"),
-      );
-      if (!principal) return context.json({ error: "invalid_session" }, 401);
-      let body: {
-        bindingId: string;
-        providerRepositoryId: string;
-        owner: string;
-        repo: string;
-        runnerId: string;
-        projectTargetId: string;
-        allowedActorIds: string[];
-        enabled: boolean;
-      };
-      try {
-        const value = await context.req.json();
-        const candidate = value as Record<string, unknown>;
-        if (
-          typeof value !== "object"
-          || value === null
-          || ![
-            "bindingId",
-            "providerRepositoryId",
-            "owner",
-            "repo",
-            "runnerId",
-            "projectTargetId",
-          ].every((key) => typeof candidate[key] === "string")
-          || !Array.isArray(candidate.allowedActorIds)
-          || !candidate.allowedActorIds.every((actor) => typeof actor === "string")
-          || typeof candidate.enabled !== "boolean"
-        ) {
-          throw new Error("invalid body");
-        }
-        body = candidate as typeof body;
-      } catch {
-        return context.json({ error: "invalid_request" }, 400);
-      }
-      try {
-        const outcome = await dependencies.github.createBinding(principal, body);
-        if (outcome.kind === "conflict") {
-          return context.json({ error: "binding_conflict" }, 409);
-        }
-        return context.json(outcome, outcome.kind === "created" ? 201 : 200);
-      } catch (error) {
-        if (error instanceof Error && error.message === "forbidden_action") {
-          return context.json({ error: "forbidden_action" }, 403);
-        }
-        if (error instanceof Error && error.message === "invalid_github_binding") {
-          return context.json({ error: "invalid_request" }, 400);
-        }
-        throw error;
-      }
-    });
   }
 
   app.notFound((context) =>

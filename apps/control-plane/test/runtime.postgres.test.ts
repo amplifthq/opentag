@@ -9,6 +9,8 @@ import type { SourceAppDefinition } from "@opentag/source-app-runtime";
 import { DeliveryIntentV2Schema } from "@opentag/delivery-contract";
 import { computeHostedAdmissionEnvelopeDigestV1,
   computeControlPayloadDigestV1, computeControlReceiptDigestV1,
+  computeGitHubProjectTargetBindingDigestV1,
+  computeSlackAppMentionSourceIdentityDigestV1,
   buildHostedLifecycleRequestV1, computePermissionRequestDigestV1,
   HostedAdmissionEnvelopeV1Schema,
   RunnerBranchOwnershipAttestationV1Schema,
@@ -45,7 +47,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         databaseUrl: TEST_DATABASE_URL!,
         environment: "local",
         fencingTokenSecret: "f".repeat(32),
-        githubIngressMasterSecret: null,
         host: "127.0.0.1",
         jobLeaseDurationMs: 30_000,
         jobPollIntervalMs: 1_000,
@@ -111,7 +112,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     const config = {
       bootstrapOrganizationId: "org_slack_runtime", bootstrapOrganizationName: "Slack",
       bootstrapPairingToken: "bootstrap_slack_runtime_secret", databaseUrl: TEST_DATABASE_URL!,
-      environment: "local", fencingTokenSecret: "f".repeat(32), githubIngressMasterSecret: null,
+      environment: "local", fencingTokenSecret: "f".repeat(32),
       host: "127.0.0.1", jobLeaseDurationMs: 30_000, jobPollIntervalMs: 1_000,
       jobRetryDelayMs: 30_000, loginRateLimit: { secret: "l".repeat(32), networkMode: "direct-peer",
         maxFailures: 5, networkMaxFailures: 50, windowMs: 300_000, lockoutMs: 900_000 },
@@ -136,7 +137,10 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
       return response;
     };
     const sourceBindingDigest = digest("binding");
-    const targetBindingDigest = digest("target-binding");
+    const target = { projectTargetId: "target_slack_runtime", provider: "github" as const,
+      owner: "acme", repo: "demo", defaultExecutor: "executor_acp",
+      defaultBranch: "main" };
+    const targetBindingDigest = await computeGitHubProjectTargetBindingDigestV1(target);
     const generationDigest = digest("generation");
     const registered = await runtime.runners.register({ organizationId: "org_slack_runtime",
       organizationName: "Slack", request: { schemaVersion: 1, protocolVersion: "1.0",
@@ -146,12 +150,30 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     if (registered.kind !== "created") throw new Error("runner registration failed");
     const authenticated = await runtime.runners.authenticate(registered.response.runnerToken);
     if (authenticated.kind !== "authenticated") throw new Error("runner authentication failed");
-    const runtimeClient = createOpenTagClient({ dispatcherUrl: "http://control.test",
+    const runtimeClient = createOpenTagClient({ controlPlaneUrl: "http://control.test",
       controlCredential: { kind: "runtime", token: registered.response.runnerToken }, fetchImpl });
+    await slackFixture.pool.query(`INSERT INTO cp_source_app_installation(organization_id,installation_id,
+      source_app_id,app_instance_id,binding_digest,credential_generation,credential_generation_digest,
+      state,created_at,updated_at) VALUES('org_slack_runtime','install_runtime','slack','A_RUNTIME',$1,1,$2,'active',$3,$3)`,
+      [sourceBindingDigest, generationDigest, now]);
+    await slackFixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,installation_id,
+      binding_digest,state,created_at,updated_at) VALUES('org_slack_runtime','binding_runtime',
+      'install_runtime',$1,'active',$2,$2)`, [sourceBindingDigest, now]);
+    await slackFixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,binding_id,
+      project_target_id,publication_mode,route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,
+      operator_user_ids,approver_user_id,admin_user_ids,
+      signing_secret_ref,bot_token_ref,created_at,updated_at)
+      VALUES('org_slack_runtime','install_runtime','binding_runtime','target_slack_runtime','pull_request','route_runtime',
+      'T_RUNTIME','A_RUNTIME','C_RUNTIME','U_APP',ARRAY['U_MEMBER','U_APPROVER','U_OPERATOR'],
+      ARRAY['U_OPERATOR'],'U_APPROVER',ARRAY['U_OPERATOR'],
+      'env:SLACK_SIGNING_SECRET','env:SLACK_BOT_TOKEN',$1,$1)`, [now]);
     await runtime.runners.upsertProjectTarget({ principal: authenticated.principal,
-      target: { projectTargetId: "target_slack_runtime", bindingDigest: targetBindingDigest,
-        provider: "github", owner: "acme", repo: "demo", defaultExecutor: "executor_acp",
-        defaultBranch: "main", version: 1 } });
+      request: { schemaVersion: 1, protocolVersion: "1.0",
+        requiredCapabilities: ["relay.repository-binding.v1"],
+        requestId: "request_target_slack_runtime",
+        expectedAuthority: { credentialId: authenticated.principal.credentialId,
+          registrationGeneration: authenticated.principal.registrationGeneration,
+          credentialGeneration: authenticated.principal.credentialGeneration }, target } });
     const readinessPayload = { readinessId: "readiness_slack_runtime",
       runnerId: "runner_slack_runtime", registrationGeneration: 1,
       capabilities: [...HOSTED_CAPABILITIES],
@@ -174,21 +196,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     const readiness = RunnerReadinessReceiptEnvelopeV1Schema.parse({ ...readinessSeed,
       receiptDigest: await computeControlReceiptDigestV1(readinessDigestInput) });
     await runtime.runners.recordReadiness({ principal: authenticated.principal, receipt: readiness });
-    await slackFixture.pool.query(`INSERT INTO cp_source_app_installation(organization_id,installation_id,
-      source_app_id,app_instance_id,binding_digest,credential_generation,credential_generation_digest,
-      state,created_at,updated_at) VALUES('org_slack_runtime','install_runtime','slack','A_RUNTIME',$1,1,$2,'active',$3,$3)`,
-      [sourceBindingDigest, generationDigest, now]);
-    await slackFixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,installation_id,
-      binding_digest,state,created_at,updated_at) VALUES('org_slack_runtime','binding_runtime',
-      'install_runtime',$1,'active',$2,$2)`, [sourceBindingDigest, now]);
-    await slackFixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,binding_id,
-      project_target_id,publication_mode,route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,
-      operator_user_ids,approver_user_id,admin_user_ids,
-      signing_secret_ref,bot_token_ref,created_at,updated_at)
-      VALUES('org_slack_runtime','install_runtime','binding_runtime','target_slack_runtime','pull_request','route_runtime',
-      'T_RUNTIME','A_RUNTIME','C_RUNTIME','U_APP',ARRAY['U_MEMBER','U_APPROVER','U_OPERATOR'],
-      ARRAY['U_OPERATOR'],'U_APPROVER',ARRAY['U_OPERATOR'],
-      'env:SLACK_SIGNING_SECRET','env:SLACK_BOT_TOKEN',$1,$1)`, [now]);
     await expect(runtime.providerDeliveryWorker.processNext()).resolves.toEqual({ kind: "empty", recovered: 0,
       failures: [] });
     const send = (teamId: string) => { const timestamp = String(Math.floor(Date.now() / 1000));
@@ -300,9 +307,25 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
           grant: claimed.claim.sourceContentGrant,
           admissionEnvelopeDigest: claimed.claim.hostedAdmission.envelopeDigest,
           contentEnvelope: claimed.claim.hostedAdmission.sourceContextEnvelope } });
-      expect(redeemed.content.payload).toMatchObject({ executionBearingCommentBody: "fix",
+      expect(redeemed.content.payload).toMatchObject({ executionBearingMessageBody: "fix",
         event: { source: "slack", sourceEventId: "Ev_T_RUNTIME",
           command: { rawText: "fix" } } });
+      expect(await computeControlPayloadDigestV1(redeemed.content.payload))
+        .toBe(redeemed.payloadDigest);
+      const redeemedPayload = redeemed.content.payload as {
+        executionBearingMessageBody: string;
+      };
+      expect(await computeSlackAppMentionSourceIdentityDigestV1({
+        provider: "slack",
+        repository: claimed.claim.hostedAdmission.repository,
+        sourceThread: claimed.claim.hostedAdmission.sourceThread,
+        sourceEvent: claimed.claim.hostedAdmission.sourceEvent,
+        actor: {
+          providerUserId: claimed.claim.hostedAdmission.verifiedActor.providerUserId,
+          login: claimed.claim.hostedAdmission.verifiedActor.login,
+        },
+        executionBearingMessageBody: redeemedPayload.executionBearingMessageBody,
+      })).toBe(claimed.claim.hostedAdmission.sourceIdentityDigest);
       const workspaceAttestation = { workspaceId: "workspace_slack_runtime",
         workspacePathDigest: digest("workspace-path"), repositoryPathDigest: digest("repository-path"),
         worktreeIdentityDigest: digest("worktree"), baseRevision: "a".repeat(40),
@@ -461,11 +484,278 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     }
   });
 
+  it("rejects a stale readiness receipt after Runner credential rotation", async () => {
+    const authorityFixture = await createIsolatedPostgres();
+    await authorityFixture.migrate();
+    const now = new Date();
+    const digest = (value: string) => `sha256:${createHash("sha256")
+      .update(value).digest("hex")}`;
+    const runtime = createControlPlaneRuntime({
+      config: {
+        bootstrapOrganizationId: "org_stale_readiness",
+        bootstrapOrganizationName: "Stale readiness",
+        bootstrapPairingToken: "bootstrap_stale_readiness_secret",
+        databaseUrl: TEST_DATABASE_URL!,
+        environment: "local",
+        fencingTokenSecret: "f".repeat(32),
+        host: "127.0.0.1",
+        jobLeaseDurationMs: 30_000,
+        jobPollIntervalMs: 1_000,
+        jobRetryDelayMs: 30_000,
+        loginRateLimit: {
+          secret: "l".repeat(32),
+          networkMode: "direct-peer",
+          maxFailures: 5,
+          networkMaxFailures: 50,
+          windowMs: 300_000,
+          lockoutMs: 900_000,
+        },
+        poolMax: 4,
+        port: 3000,
+        publicOrigin: "http://127.0.0.1:3000",
+        recoveryPairingToken: null,
+        releaseSha: "local",
+      },
+      migrations: authorityFixture.migrations,
+      postgres: { pool: authorityFixture.pool, async close() {} },
+    });
+    try {
+      const registered = await runtime.runners.register({
+        organizationId: "org_stale_readiness",
+        organizationName: "Stale readiness",
+        request: {
+          schemaVersion: 1,
+          protocolVersion: "1.0",
+          requiredCapabilities: ["relay.registration.v1"],
+          requestId: "request_register_stale_readiness",
+          operationId: "operation_register_stale_readiness",
+          runnerId: "runner_stale_readiness",
+          capabilities: [...HOSTED_CAPABILITIES],
+        },
+      });
+      expect(registered.kind).toBe("created");
+      if (registered.kind !== "created") throw new Error("runner registration failed");
+      const authenticated = await runtime.runners.authenticate(registered.response.runnerToken);
+      expect(authenticated.kind).toBe("authenticated");
+      if (authenticated.kind !== "authenticated") throw new Error("runner authentication failed");
+
+      const sourceBindingDigest = digest("stale-source-binding");
+      const target = {
+        projectTargetId: "target_stale_readiness",
+        provider: "github" as const,
+        owner: "acme",
+        repo: "stale-readiness",
+        defaultExecutor: "executor_acp",
+        defaultBranch: "main",
+      };
+      const targetBindingDigest = await computeGitHubProjectTargetBindingDigestV1(target);
+      await authorityFixture.pool.query(
+        `INSERT INTO cp_source_app_installation(
+           organization_id,installation_id,source_app_id,app_instance_id,binding_digest,
+           credential_generation,credential_generation_digest,state,created_at,updated_at)
+         VALUES('org_stale_readiness','install_stale_readiness','slack','A_STALE',$1,
+           1,$2,'active',$3,$3)`,
+        [sourceBindingDigest, digest("stale-source-generation"), now],
+      );
+      await authorityFixture.pool.query(
+        `INSERT INTO cp_source_binding(
+           organization_id,binding_id,installation_id,binding_digest,state,created_at,updated_at)
+         VALUES('org_stale_readiness','binding_stale_readiness',
+           'install_stale_readiness',$1,'active',$2,$2)`,
+        [sourceBindingDigest, now],
+      );
+      await authorityFixture.pool.query(
+        `INSERT INTO cp_slack_installation(
+           organization_id,installation_id,binding_id,project_target_id,publication_mode,
+           route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,
+           operator_user_ids,approver_user_id,admin_user_ids,signing_secret_ref,
+           bot_token_ref,created_at,updated_at)
+         VALUES('org_stale_readiness','install_stale_readiness','binding_stale_readiness',
+           'target_stale_readiness','proposal_only','route_stale_readiness','T_STALE',
+           'A_STALE','C_STALE','U_APP',ARRAY['U_MEMBER'],ARRAY['U_MEMBER'],
+           'U_MEMBER',ARRAY['U_MEMBER'],'env:SLACK_SIGNING_SECRET',
+           'env:SLACK_BOT_TOKEN',$1,$1)`,
+        [now],
+      );
+      await expect(runtime.runners.upsertProjectTarget({
+        principal: authenticated.principal,
+        request: {
+          schemaVersion: 1,
+          protocolVersion: "1.0",
+          requiredCapabilities: ["relay.repository-binding.v1"],
+          requestId: "request_target_stale_readiness",
+          expectedAuthority: {
+            credentialId: authenticated.principal.credentialId,
+            registrationGeneration: authenticated.principal.registrationGeneration,
+            credentialGeneration: authenticated.principal.credentialGeneration,
+          },
+          target,
+        },
+      })).resolves.toMatchObject({ kind: "upserted" });
+
+      const readinessPayload = {
+        readinessId: "readiness_stale_generation",
+        runnerId: authenticated.principal.runnerId,
+        registrationGeneration: authenticated.principal.registrationGeneration,
+        capabilities: [...HOSTED_CAPABILITIES],
+        executors: [{
+          executorId: "executor_acp",
+          adapterVersion: "1.0.0",
+          capabilityDigest: digest("stale-executor"),
+          state: "ready" as const,
+        }],
+        targets: [{
+          projectTargetId: target.projectTargetId,
+          bindingDigest: targetBindingDigest,
+          state: "ready" as const,
+        }],
+        observedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 10 * 60_000).toISOString(),
+      };
+      const readinessSeed = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        receiptId: "readiness_receipt_stale_generation",
+        organizationId: authenticated.principal.organizationId,
+        operationId: "operation_readiness_stale_generation",
+        requiredCapabilities: ["relay.readiness.v1"] as const,
+        producer: {
+          kind: "runner" as const,
+          id: authenticated.principal.runnerId,
+          credentialId: authenticated.principal.credentialId,
+          registrationGeneration: authenticated.principal.registrationGeneration,
+        },
+        identity: {
+          namespace: "opentag.control.receipt/runner-readiness/v1" as const,
+          parts: [
+            authenticated.principal.organizationId,
+            authenticated.principal.runnerId,
+            String(authenticated.principal.registrationGeneration),
+            readinessPayload.readinessId,
+          ],
+        },
+        observedAt: readinessPayload.observedAt,
+        payloadDigest: await computeControlPayloadDigestV1(readinessPayload),
+        receiptDigest: digest("unused-stale-readiness"),
+        receiptKind: "runner_readiness" as const,
+        payload: readinessPayload,
+      };
+      const { receiptDigest: _receiptDigest, ...readinessDigestInput } = readinessSeed;
+      const staleReadiness = RunnerReadinessReceiptEnvelopeV1Schema.parse({
+        ...readinessSeed,
+        receiptDigest: await computeControlReceiptDigestV1(readinessDigestInput),
+      });
+      await expect(runtime.runners.recordReadiness({
+        principal: authenticated.principal,
+        receipt: staleReadiness,
+      })).resolves.toMatchObject({ kind: "recorded" });
+      await expect(runtime.runners.reprovision({
+        organizationId: authenticated.principal.organizationId,
+        request: {
+          schemaVersion: 1,
+          protocolVersion: "1.0",
+          requiredCapabilities: ["relay.credential-reprovision.v1"],
+          requestId: "request_rotate_stale_readiness",
+          operationId: "operation_rotate_stale_readiness",
+          runnerId: authenticated.principal.runnerId,
+          recoveryCredentialId: authenticated.principal.credentialId,
+          expectedRegistrationGeneration: authenticated.principal.registrationGeneration,
+          expectedCredentialGeneration: authenticated.principal.credentialGeneration,
+        },
+      })).resolves.toMatchObject({
+        kind: "created",
+        response: { registrationGeneration: 2, credentialGeneration: 2 },
+      });
+      await authorityFixture.pool.query(
+        `INSERT INTO cp_runner_readiness(
+           organization_id,runner_id,receipt_id,receipt_digest,observed_at,expires_at,receipt)
+         VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)`,
+        [authenticated.principal.organizationId, authenticated.principal.runnerId,
+          staleReadiness.receiptId, staleReadiness.receiptDigest, staleReadiness.observedAt,
+          staleReadiness.payload.expiresAt, JSON.stringify(staleReadiness)],
+      );
+
+      const sourceDeliveryId = "delivery_stale_readiness";
+      const sourceMessageId = "1700000001.000200";
+      const threadTs = "1700000000.000100";
+      const resolution = await runtime.sourceResolutionPort.resolve({
+        idempotencyKey: "source-ingress:stale-readiness",
+        reservation: {
+          reservationId: "reservation_stale_readiness",
+          organizationId: authenticated.principal.organizationId,
+          installationId: "install_stale_readiness",
+          bindingId: "binding_stale_readiness",
+          sourceAppId: "slack",
+          sourceDeliveryId,
+          sourceMessageId,
+          sourceVersionRef: "slack:stale-readiness:v1",
+          rawDigest: digest("stale-raw"),
+          contentRef: {
+            contentId: "content_stale_readiness",
+            sourceVersionRef: "slack:stale-readiness:v1",
+            aadDigest: "a".repeat(64),
+            keyVersion: "v1",
+            payloadDigest: digest("stale-payload"),
+          },
+          state: "pending",
+          createdAt: now.toISOString(),
+        },
+        sourceContext: {
+          executionBearingMessageBody: "fix",
+          event: {
+            id: "event_stale_readiness",
+            source: "slack",
+            sourceEventId: "Ev_STALE_READINESS",
+            receivedAt: now.toISOString(),
+            actor: { provider: "slack", providerUserId: "U_MEMBER" },
+            target: { mention: "@opentag", agentId: "opentag" },
+            command: { rawText: "fix", intent: "fix", args: {} },
+            context: [],
+            permissions: [],
+            callback: {
+              provider: "slack",
+              uri: "https://slack.com/api/chat.postMessage",
+              threadKey: `T_STALE|C_STALE|${threadTs}`,
+            },
+            metadata: {
+              teamId: "T_STALE",
+              channelId: "C_STALE",
+              messageTs: sourceMessageId,
+              sourceDeliveryId,
+              repoProvider: "github",
+              owner: target.owner,
+              repo: target.repo,
+            },
+          },
+        },
+        job: {
+          jobId: "source-ingress:stale-readiness",
+          leaseOwner: "worker_stale_readiness",
+          leaseToken: "lease_stale_readiness",
+          leaseExpiresAt: new Date(now.getTime() + 60_000).toISOString(),
+          attemptNumber: 1,
+          maxAttempts: 1,
+        },
+      });
+      expect(resolution).toEqual({
+        kind: "temporarily_unavailable",
+        code: "runner_not_ready",
+      });
+      await expect(authorityFixture.pool.query(
+        `SELECT count(*)::int AS count FROM cp_hosted_run
+         WHERE organization_id = 'org_stale_readiness'`,
+      ).then(({ rows }) => rows[0])).resolves.toEqual({ count: 0 });
+    } finally {
+      await runtime.close();
+      await authorityFixture.close();
+    }
+  });
+
   it("claims a scheduled delivery job and reconciles through the real kernel once", async () => {
     await fixture.migrate();
     const config = { bootstrapOrganizationId: "org_delivery", bootstrapOrganizationName: "Delivery",
       bootstrapPairingToken: "bootstrap_delivery_secret", databaseUrl: TEST_DATABASE_URL!,
-      environment: "local", fencingTokenSecret: "f".repeat(32), githubIngressMasterSecret: null,
+      environment: "local", fencingTokenSecret: "f".repeat(32),
       host: "127.0.0.1", jobLeaseDurationMs: 30_000, jobPollIntervalMs: 1_000,
       jobRetryDelayMs: 30_000, loginRateLimit: { secret: "l".repeat(32), networkMode: "direct-peer",
         maxFailures: 5, networkMaxFailures: 50, windowMs: 300_000, lockoutMs: 900_000 },
@@ -527,7 +817,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         bootstrapOrganizationName: "Runtime Source",
         bootstrapPairingToken: "bootstrap_runtime_source_secret",
         databaseUrl: TEST_DATABASE_URL!, environment: "local",
-        fencingTokenSecret: "f".repeat(32), githubIngressMasterSecret: null,
+        fencingTokenSecret: "f".repeat(32),
         host: "127.0.0.1", jobLeaseDurationMs: 30_000, jobPollIntervalMs: 1_000,
         jobRetryDelayMs: 30_000, loginRateLimit: { secret: "l".repeat(32),
           networkMode: "direct-peer", maxFailures: 5, networkMaxFailures: 50,

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +16,7 @@ import {
   runServiceStatusCommand,
   serviceControllerForPlatform,
   servicePaths,
+  startService,
   type CommandResult
 } from "../src/service.js";
 import { createSetupConfig } from "../src/setup.js";
@@ -29,55 +29,50 @@ function configPathIn(home: string): string {
   return join(home, ".config", "opentag", "config.json");
 }
 
-function tokenFingerprint(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
-}
-
 function writeConfig(path: string, mutate?: (config: OpenTagCliConfig) => void): void {
   const projectPath = tempDir();
   const config = createSetupConfig({
     language: "en",
-    platform: "github",
+    relayUrl: "https://relay.example",
     projectPath,
     executor: "echo",
     stateDirectory: join(tempDir(), "state"),
     github: {
+      projectTargetId: "target_1",
       token: "ghp_token",
-      webhookSecret: "github_webhook_secret",
       owner: "acme",
-      repo: "demo",
-      webhookPath: "/github/webhooks",
-      port: 3050
+      repo: "demo"
     }
   });
+  config.daemon.runnerToken = "runner_runtime_token";
+  config.daemon.trustedRelay = {
+    schemaVersion: 1,
+    origin: "https://relay.example",
+    authorizedAt: "2026-08-08T00:00:00.000Z",
+    authorizationMethod: "explicit_cli"
+  };
+  config.daemon.controlRegistration = {
+    kind: "hosted_control_v1",
+    state: "paired",
+    operationId: "operation-service",
+    registration: {
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      organizationId: "org_1",
+      runnerId: config.daemon.runnerId,
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      credentialId: "credential-service",
+      credentialPurpose: "runtime",
+      createdAt: "2026-08-08T00:00:00.000Z"
+    }
+  };
   mutate?.(config);
   writeCliConfigAtomic(path, config);
 }
 
 function writeRelayConfig(path: string): void {
-  const projectPath = tempDir();
-  const config = createSetupConfig({
-    language: "en",
-    platform: "github",
-    projectPath,
-    executor: "echo",
-    stateDirectory: join(tempDir(), "state"),
-    github: {
-      token: "ghp_token",
-      webhookSecret: "github_webhook_secret",
-      owner: "acme",
-      repo: "demo",
-      webhookPath: "/github/webhooks",
-      port: 3050
-    }
-  });
-  config.runtime = {
-    mode: "paired_relay",
-    relayUrl: "https://relay.example",
-    relayProvider: "custom"
-  };
-  config.daemon.dispatcherUrl = "https://relay.example";
-  writeCliConfigAtomic(path, config);
+  writeConfig(path);
 }
 
 function launchctl(status: number): (args: string[]) => CommandResult {
@@ -97,37 +92,46 @@ const doctorCommandRunner = {
   }
 };
 
-function runtimeFetch(input: { runnerMissing?: boolean; heartbeatAt?: string | null } = {}): { fetchImpl: typeof fetch; requests: string[] } {
-  const requests: string[] = [];
-  const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+function responseAt(url: string, response: Response): Response {
+  Object.defineProperty(response, "url", { value: url });
+  return response;
+}
+
+function runtimeFetch(input: { runnerMissing?: boolean } = {}): {
+  fetchImpl: typeof fetch;
+  requests: Array<{ url: string; authorization: string | null }>;
+} {
+  const requests: Array<{ url: string; authorization: string | null }> = [];
+  const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url);
-    requests.push(href);
+    requests.push({ url: href, authorization: new Headers(init?.headers).get("authorization") });
     if (href.endsWith("/healthz")) {
       return Response.json({ ok: true });
     }
-    if (href.endsWith("/v1/runners/runner_local")) {
+    if (href.endsWith("/v1/runners/runner_local/control-context")) {
       return input.runnerMissing
-        ? Response.json({ error: "runner_not_found" }, { status: 404 })
-        : Response.json({
-            runner: {
-              runnerId: "runner_local",
-              name: "runner_local",
-              createdAt: "2026-06-24T00:00:00.000Z",
-              ...(input.heartbeatAt !== null ? { heartbeatAt: input.heartbeatAt ?? new Date().toISOString() } : {})
-            }
-          });
-    }
-    if (href.includes("/v1/repo-bindings/")) {
-      return Response.json({
-        binding: {
-          provider: "github",
-          owner: "acme",
-          repo: "demo",
-          runnerId: "runner_local",
-          workspacePath: "/tmp/demo",
-          defaultExecutor: "echo"
-        }
-      });
+        ? responseAt(href, Response.json({ error: "runner_not_found" }, { status: 404 }))
+        : responseAt(href, Response.json({
+            schemaVersion: 1,
+            protocolVersion: "1.0",
+            contextKind: "runner_control",
+            organizationId: "org_1",
+            runnerId: "runner_local",
+            credentialId: "credential-service",
+            registrationGeneration: 1,
+            credentialGeneration: 1,
+            capabilities: [],
+            targets: [{
+              projectTargetId: "target_1",
+              bindingDigest: `sha256:${"a".repeat(64)}`,
+              provider: "github",
+              owner: "acme",
+              repo: "demo",
+              defaultExecutor: "echo",
+              defaultBranch: "main"
+            }],
+            observedAt: "2026-08-08T00:00:00.000Z"
+          }));
     }
     return Response.json({ error: "not_found" }, { status: 404 });
   }) as unknown as typeof fetch;
@@ -216,6 +220,30 @@ describe("OpenTag CLI service", () => {
     expect(plist).toContain(`<string>${configPath}</string>`);
     expect(plist).toContain(`<string>${paths.stdoutPath}</string>`);
     expect(plist).toContain(`<string>${paths.stderrPath}</string>`);
+  });
+
+  it("refuses to start a service while Runner credential recovery is required", () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath, (config) => {
+      delete config.daemon.runnerToken;
+      config.daemon.controlRegistration = {
+        kind: "hosted_control_v1",
+        state: "unpaired",
+        reason: "recovery_required",
+        registration: {
+          ...config.daemon.controlRegistration!.registration
+        }
+      };
+    });
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+    const startCall = vi.fn(launchctl(0));
+
+    expect(() => startService(
+      { config: configPath },
+      { platform: "darwin", homeDir: home, launchctl: startCall }
+    )).toThrow("credential recovery is required");
+    expect(startCall).not.toHaveBeenCalled();
   });
 
   it("installs and starts the LaunchAgent for setup service mode", async () => {
@@ -359,71 +387,6 @@ describe("OpenTag CLI service", () => {
     expect(logs).toEqual(["OpenTag service restarted: im.opentag.agent"]);
   });
 
-  it("persists only explicit non-secret dispatcher hardening env in the LaunchAgent", () => {
-    const home = tempDir();
-    const configPath = configPathIn(home);
-    writeConfig(configPath);
-    const paths = installService(
-      {
-        config: configPath,
-        maxRequestBodyBytes: "4096",
-        rateLimitWindowMs: "60000",
-        rateLimitMaxRequests: "120"
-      },
-      {
-        platform: "darwin",
-        homeDir: home,
-        nodePath: "/usr/local/bin/node",
-        cliEntry: "/opt/opentag/dist/index.js",
-        uid: 501,
-        launchctl: () => {
-          throw new Error("install should not call launchctl");
-        }
-      }
-    );
-
-    const plist = readFileSync(paths.plistPath, "utf8");
-    expect(plist).toContain("<key>OPENTAG_CONFIG_PATH</key>");
-    expect(plist).toContain("<key>OPENTAG_MAX_REQUEST_BODY_BYTES</key>");
-    expect(plist).toContain("<string>4096</string>");
-    expect(plist).toContain("<key>OPENTAG_RATE_LIMIT_WINDOW_MS</key>");
-    expect(plist).toContain("<string>60000</string>");
-    expect(plist).toContain("<key>OPENTAG_RATE_LIMIT_MAX_REQUESTS</key>");
-    expect(plist).toContain("<string>120</string>");
-    expect(plist).not.toContain("OPENTAG_PAIRING_TOKEN");
-    expect(plist).not.toContain("github_webhook_secret");
-
-    const formatted = formatServiceStatus(
-      getServiceStatus({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) })
-    );
-    expect(formatted).toContain("Service Hardening:");
-    expect(formatted).toContain("OPENTAG_MAX_REQUEST_BODY_BYTES=4096");
-    expect(formatted).toContain("OPENTAG_RATE_LIMIT_WINDOW_MS=60000");
-    expect(formatted).toContain("OPENTAG_RATE_LIMIT_MAX_REQUESTS=120");
-  });
-
-  it("validates service dispatcher hardening options before writing the LaunchAgent", () => {
-    const home = tempDir();
-    const configPath = configPathIn(home);
-    writeConfig(configPath);
-
-    expect(() =>
-      installService({ config: configPath, rateLimitWindowMs: "60000" }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) })
-    ).toThrow("OPENTAG_RATE_LIMIT_WINDOW_MS and OPENTAG_RATE_LIMIT_MAX_REQUESTS must be configured together");
-
-    expect(() =>
-      installService(
-        {
-          config: configPath,
-          rateLimitDisabled: true,
-          rateLimitWindowMs: "60000",
-          rateLimitMaxRequests: "120"
-        },
-        { platform: "darwin", homeDir: home, launchctl: launchctl(0) }
-      )
-    ).toThrow("OPENTAG_RATE_LIMIT_DISABLED cannot be true");
-  });
-
   it("formats service status for installed and not installed launchd services", () => {
     const home = tempDir();
     const configPath = configPathIn(home);
@@ -438,75 +401,26 @@ describe("OpenTag CLI service", () => {
     expect(running.installed).toBe(true);
     expect(running.running).toBe("running");
     expect(formatServiceStatus(running)).toContain("Controller: launchd");
-    expect(formatServiceStatus(running)).toContain("Runtime: local");
+    expect(formatServiceStatus(running)).not.toContain("Runtime: paired_relay");
     expect(formatServiceStatus(running)).toContain("OpenTag runtime: unverified");
-    expect(formatServiceStatus(running)).toContain("Connectors:");
+    expect(formatServiceStatus(running)).toContain("Project Targets:");
     expect(formatServiceStatus(running)).toContain(
-      "github: ingress=repository_webhook path=/github/webhooks port=3050, delivery=kernel_blocked, apply=ready, target=github:acme/demo"
+      "github:acme/demo, publication=ready"
     );
     expect(formatServiceStatus(running)).toContain("Secrets:");
-    expect(formatServiceStatus(running)).toContain("daemon.pairingToken: inline (redacted)");
-    expect(formatServiceStatus(running)).toContain("daemon.runnerToken: daemon.pairingToken fallback");
+    expect(formatServiceStatus(running)).toContain("daemon.runnerToken: inline (redacted)");
     expect(formatServiceStatus(running)).toContain("daemon.githubToken: inline (redacted)");
-    expect(formatServiceStatus(running)).toContain("daemon.githubApplyToken: daemon.githubToken fallback");
-    expect(formatServiceStatus(running)).toContain("platforms.github.webhookSecret: inline (redacted)");
-    expect(formatServiceStatus(running)).not.toContain("github_webhook_secret");
     expect(formatServiceStatus(running)).toContain("Capabilities:");
-    expect(formatServiceStatus(running)).toContain("platform GitHub:");
-    expect(formatServiceStatus(running)).toContain("liveness=status_update");
     expect(formatServiceStatus(running)).toContain("executor Echo:");
     expect(formatServiceStatus(running)).toContain("isolation=none");
     expect(formatServiceStatus(running)).toContain("completion=process_exit");
   });
 
-  it("summarizes platform connector readiness without printing secret values", () => {
+  it("summarizes GitHub publication readiness without local ingress state", () => {
     const home = tempDir();
     const configPath = configPathIn(home);
     writeConfig(configPath, (config) => {
-      config.platforms.slack = {
-        mode: "events_api",
-        signingSecret: "slack_signing_secret",
-        botToken: "xoxb_secret",
-        teamId: "T123",
-        channelId: "C456",
-        port: 3060
-      };
-      config.platforms.lark = {
-        appId: "cli_lark",
-        appSecret: "lark_secret",
-        domain: "lark",
-        botOpenId: "ou_bot"
-      };
-      config.platforms.discord = {
-        mode: "webhook",
-        publicKey: "discord_public_key",
-        botToken: "discord_bot_secret",
-        webhookPath: "/discord/interactions"
-      };
-      config.platforms.linear = {
-        token: "linear_api_secret",
-        webhookSecret: "linear_webhook_secret",
-        webhookPath: "/linear/webhooks",
-        projectTarget: {
-          repoProvider: "github",
-          owner: "acme",
-          repo: "demo"
-        }
-      };
-      config.platforms.gitlab = {
-        token: "gitlab_api_secret",
-        webhookSecret: "gitlab_webhook_secret",
-        projectPathWithNamespace: "acme/team/demo",
-        baseUrl: "https://gitlab.example.com",
-        webhookPath: "/gitlab/webhooks",
-        port: 3070
-      };
-      config.platforms.teams = {
-        appId: "teams_app_id",
-        appPassword: "teams_app_password",
-        tenantId: "teams_tenant_id",
-        webhookPath: "/teams/messages"
-      };
+      delete config.daemon.githubToken;
     });
     installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
 
@@ -514,38 +428,12 @@ describe("OpenTag CLI service", () => {
       getServiceStatus({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) })
     );
 
-    expect(formatted).toContain("Connectors:");
-    expect(formatted).toContain("slack: ingress=events_api ready (signingSecret port=3060), delivery=kernel_blocked, source=T123/C456");
-    expect(formatted).toContain("lark: ingress=long_connection tenant=lark ready (appId/appSecret), delivery=kernel_blocked");
-    expect(formatted).toContain("addressing=bot_open_id configured");
-    expect(formatted).toContain(
-      "gitlab: ingress=project_webhook path=/gitlab/webhooks port=3070, delivery=kernel_blocked, target=gitlab:acme/team/demo, baseUrl=https://gitlab.example.com"
-    );
-    expect(formatted).toContain(
-      "linear: ingress=workspace_webhook path=/linear/webhooks port=default, delivery=kernel_blocked, target=github:acme/demo"
-    );
-    expect(formatted).toContain(
-      "discord: ingress=dispatcher_interactions path=/discord/interactions, delivery=kernel_blocked, signature=ready (publicKey)"
-    );
-    expect(formatted).toContain(
-      "teams: ingress=dispatcher_messages path=/teams/messages, delivery=kernel_blocked, tenant=teams_tenant_id"
-    );
-    expect(formatted).not.toContain("callback=");
-    expect(formatted).not.toContain("delivery=ready");
-    expect(formatted).toContain("platforms.linear.token: inline (redacted)");
-    expect(formatted).toContain("platforms.discord.botToken: inline (redacted)");
-    expect(formatted).not.toContain("slack_signing_secret");
-    expect(formatted).not.toContain("xoxb_secret");
-    expect(formatted).not.toContain("lark_secret");
-    expect(formatted).not.toContain("linear_api_secret");
-    expect(formatted).not.toContain("linear_webhook_secret");
-    expect(formatted).not.toContain("discord_bot_secret");
-    expect(formatted).not.toContain("gitlab_api_secret");
-    expect(formatted).not.toContain("gitlab_webhook_secret");
-    expect(formatted).not.toContain("teams_app_password");
+    expect(formatted).toContain("Project Targets:");
+    expect(formatted).toContain("github:acme/demo, publication=unavailable");
+    expect(formatted).not.toContain("ingress=");
   });
 
-  it("marks a running service ready only after dispatcher health succeeds", async () => {
+  it("marks a running service ready only after relay health succeeds", async () => {
     const home = tempDir();
     const configPath = configPathIn(home);
     writeConfig(configPath);
@@ -558,15 +446,16 @@ describe("OpenTag CLI service", () => {
     );
 
     expect(requests).toEqual([
-      "http://localhost:3030/healthz",
-      "http://localhost:3030/healthz",
-      "http://localhost:3030/v1/runners/runner_local",
-      expect.stringContaining("http://localhost:3030/v1/repo-bindings/"),
-      "http://localhost:3030/v1/repo-bindings/github/acme/demo"
+      { url: "https://relay.example/healthz", authorization: null },
+      { url: "https://relay.example/healthz", authorization: null },
+      {
+        url: "https://relay.example/v1/runners/runner_local/control-context",
+        authorization: "Bearer runner_runtime_token"
+      }
     ]);
     expect(running.running).toBe("running");
     expect(running.runtimeReadiness).toBe("ready");
-    expect(formatServiceStatus(running)).toContain("OpenTag runtime: ready (dispatcher healthz ok; doctor checks ok");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: ready (relay healthz ok; doctor checks ok");
   });
 
   it("reports disabled launchd autostart separately from installation", () => {
@@ -612,52 +501,16 @@ describe("OpenTag CLI service", () => {
 
     expect(running.running).toBe("running");
     expect(running.runtimeReadiness).toBe("degraded");
-    expect(formatServiceStatus(running)).toContain("OpenTag runtime: degraded (doctor checks degraded (1 fail, 0 warn))");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: degraded (doctor checks degraded (2 fail, 0 warn))");
     expect(formatServiceStatus(running)).toContain("Runtime Checks:");
     expect(formatServiceStatus(running)).toContain("FAIL runner registration:");
   });
 
-  it("marks a launchd-running service stale when runner heartbeat is old", async () => {
-    const home = tempDir();
-    const configPath = configPathIn(home);
-    writeConfig(configPath);
-    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
-    const { fetchImpl } = runtimeFetch({ heartbeatAt: "2000-01-01T00:00:00.000Z" });
-
-    const running = await getServiceStatusWithRuntimeReadiness(
-      { config: configPath },
-      { platform: "darwin", homeDir: home, launchctl: launchctl(0), fetchImpl, commandRunner: doctorCommandRunner }
-    );
-
-    expect(running.running).toBe("running");
-    expect(running.runtimeReadiness).toBe("stale_heartbeat");
-    expect(formatServiceStatus(running)).toContain("OpenTag runtime: stale_heartbeat (stale; last heartbeat 2000-01-01T00:00:00.000Z");
-    expect(formatServiceStatus(running)).toContain("WARN runner heartbeat: stale;");
-  });
-
-  it("marks a launchd-running service starting when no runner heartbeat is visible yet", async () => {
-    const home = tempDir();
-    const configPath = configPathIn(home);
-    writeConfig(configPath);
-    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
-    const { fetchImpl } = runtimeFetch({ heartbeatAt: null });
-
-    const running = await getServiceStatusWithRuntimeReadiness(
-      { config: configPath },
-      { platform: "darwin", homeDir: home, launchctl: launchctl(0), fetchImpl, commandRunner: doctorCommandRunner }
-    );
-
-    expect(running.running).toBe("running");
-    expect(running.runtimeReadiness).toBe("starting");
-    expect(formatServiceStatus(running)).toContain("OpenTag runtime: starting (no heartbeat observed yet");
-  });
-
-  it("marks a launchd-running service degraded when the current runner token is revoked", async () => {
+  it("keeps the paired service ready when the optional GitHub publication credential is absent", async () => {
     const home = tempDir();
     const configPath = configPathIn(home);
     writeConfig(configPath, (config) => {
-      config.daemon.runnerToken = "runner_token";
-      config.daemon.revokedRunnerTokenFingerprints = [tokenFingerprint("runner_token")];
+      delete config.daemon.githubToken;
     });
     installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
     const { fetchImpl } = runtimeFetch();
@@ -668,12 +521,11 @@ describe("OpenTag CLI service", () => {
     );
 
     expect(running.running).toBe("running");
-    expect(running.runtimeReadiness).toBe("degraded");
-    expect(formatServiceStatus(running)).toContain("OpenTag runtime: degraded (doctor checks degraded (1 fail, 0 warn))");
-    expect(formatServiceStatus(running)).toContain("FAIL runner token revocation: Current daemon.runnerToken fingerprint is revoked");
+    expect(running.runtimeReadiness).toBe("ready");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: ready");
   });
 
-  it("marks a launchd-running service unreachable when dispatcher health fails", async () => {
+  it("marks a launchd-running service unreachable when relay health fails", async () => {
     const home = tempDir();
     const configPath = configPathIn(home);
     writeConfig(configPath);
@@ -689,7 +541,7 @@ describe("OpenTag CLI service", () => {
 
     expect(running.running).toBe("running");
     expect(running.runtimeReadiness).toBe("unreachable");
-    expect(formatServiceStatus(running)).toContain("OpenTag runtime: unreachable (dispatcher healthz failed (http://localhost:3030))");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: unreachable (relay healthz failed (https://relay.example))");
   });
 
   it("uses runtime readiness probing in the service status command", async () => {
@@ -778,11 +630,11 @@ describe("OpenTag CLI service", () => {
       getServiceStatus({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) })
     );
 
-    expect(formatted).toContain("Runtime: paired_relay");
+    expect(formatted).not.toContain("Runtime: paired_relay");
     expect(formatted).toContain("Relay Security:");
     expect(formatted).toContain("OK relay transport: HTTPS is enabled.");
     expect(formatted).toContain("WARN relay trust: Use only a relay you operate or trust");
-    expect(formatted).toContain("WARN relay token scope: This self-hosted MVP still uses the daemon pairing token for registration and runner calls");
+    expect(formatted).toContain("OK relay token scope: Runner calls use the scoped daemon.runnerToken");
   });
 
   it("prints recent stdout and stderr logs", () => {

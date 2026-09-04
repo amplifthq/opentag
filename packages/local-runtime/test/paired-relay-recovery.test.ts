@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildRunnerReadinessReceipt, createHostedControlLoop } from "../src/control-v1.js";
-import { executePublicationOperation } from "../src/pr.js";
 
 const now = new Date("2026-08-15T07:00:00.000Z");
 const sha = (character: string) => `sha256:${character.repeat(64)}`;
@@ -8,7 +7,7 @@ const sha = (character: string) => `sha256:${character.repeat(64)}`;
 describe("paired relay recovery certification", () => {
   it("recovers a durable assignment after restart without adopting a relay workspace and fences stale execution", async () => {
     const localCheckout = process.cwd();
-    const repository = { provider: "github", owner: "acme", repo: "widget",
+    const repository = { projectTargetId: "target_1", provider: "github", owner: "acme", repo: "widget",
       checkoutPath: localCheckout, defaultExecutor: "reviewer", baseBranch: "main",
       pushRemote: "origin", keepWorktree: "on_failure" as const };
     const executor = { id: "reviewer", displayName: "Review Agent",
@@ -27,6 +26,7 @@ describe("paired relay recovery certification", () => {
       workspacePath: "/relay/must/not/be/adopted" };
     let recoveryAvailable = true;
     const repo = {
+      getHostedProposalSettlementForRetry: vi.fn(async () => null),
       recoverExpiredHostedLifecycleOperations: vi.fn(async () => 0),
       claimDueHostedLifecycleOperations: vi.fn(async () => []),
       acknowledgeHostedLifecycleOperation: vi.fn(), retryHostedLifecycleOperation: vi.fn(),
@@ -52,8 +52,11 @@ describe("paired relay recovery certification", () => {
       isHostedExecutionCurrent: vi.fn(async () => false),
       getHostedExecutionLease: vi.fn(async () => null),
     } as never;
-    const controlClient = { getRunnerControlContextV1: vi.fn(async () => context) } as never;
-    const config = { runnerId: "runner_1", dispatcherUrl: "https://control.example",
+    const controlClient = {
+      claimNextPublicationOperationControlV1: vi.fn(async () => null),
+      getRunnerControlContextV1: vi.fn(async () => context),
+    } as never;
+    const config = { runnerId: "runner_1", relayUrl: "https://control.example",
       runnerToken: "local_runtime_secret", repositories: [repository], agents: {},
       scratchRoot: "/tmp/opentag-cert", keepScratch: "on_failure", approvalMode: "auto",
       controlRegistration: { kind: "hosted_control_v1", state: "paired", operationId: "pair_1",
@@ -85,46 +88,4 @@ describe("paired relay recovery certification", () => {
     await restarted?.close();
   });
 
-  it("preserves outcome_unknown and never blindly retries an ambiguous provider effect", async () => {
-    const provider = vi.fn(async () => ({ kind: "ambiguous" as const }));
-    const record = vi.fn(async (receipt) => receipt);
-    const capability = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
-      capabilityId: "capability_1", organizationId: "org_1", runId: "run_1",
-      attemptId: "attempt_1", attemptNumber: 1, epoch: 1, fencingTokenDigest: sha("f"),
-      candidateId: "candidate_1", candidateDigest: sha("c"), approvalId: "approval_1",
-      approverId: "operator_1", repository: { provider: "github" as const, owner: "acme",
-        repo: "widget", remote: "origin", baseBranch: "main" }, branch: "opentag/run_1",
-      expectedHeadSha: "a".repeat(40), step: "create_draft_pull_request" as const,
-      operationId: "publication_1", idempotencyKey: "publication_1", runnerId: "runner_1",
-      runnerGeneration: 1, issuedAt: "2026-08-15T06:59:00.000Z",
-      expiresAt: "2026-08-15T07:01:00.000Z" };
-    const receipt = await executePublicationOperation({ capability,
-      localAuthority: { organizationId: "org_1", runId: "run_1", attemptId: "attempt_1",
-        attemptNumber: 1, epoch: 1, fencingTokenDigest: sha("f"), candidateId: "candidate_1",
-        candidateDigest: sha("c"), runnerId: "runner_1", runnerGeneration: 1,
-        now: now.toISOString() }, credential: { githubToken: "local-only" },
-      begin: async () => ({ kind: "begun" }), createDraftPullRequest: provider, record });
-    expect(receipt.outcome).toBe("outcome_unknown");
-    expect(provider).toHaveBeenCalledTimes(1);
-    expect(record).toHaveBeenCalledTimes(1);
-  });
-
-  it("rejects a stale publication fence before any provider call", async () => {
-    const provider = vi.fn();
-    await expect(executePublicationOperation({ capability: {
-      schemaVersion: 1, protocolVersion: "1.0", capabilityId: "capability_stale",
-      organizationId: "org_1", runId: "run_1", attemptId: "attempt_1", attemptNumber: 1,
-      epoch: 1, fencingTokenDigest: sha("f"), candidateId: "candidate_1",
-      candidateDigest: sha("c"), approvalId: "approval_1", approverId: "operator_1",
-      repository: { provider: "github", owner: "acme", repo: "widget", remote: "origin", baseBranch: "main" },
-      branch: "opentag/run_1", expectedHeadSha: "a".repeat(40), step: "create_draft_pull_request",
-      operationId: "publication_stale", idempotencyKey: "publication_stale", runnerId: "runner_1",
-      runnerGeneration: 1, issuedAt: "2026-08-15T06:59:00.000Z", expiresAt: "2026-08-15T07:01:00.000Z",
-    }, localAuthority: { organizationId: "org_1", runId: "run_1", attemptId: "attempt_old",
-      attemptNumber: 1, epoch: 1, fencingTokenDigest: sha("f"), candidateId: "candidate_1",
-      candidateDigest: sha("c"), runnerId: "runner_1", runnerGeneration: 1, now: now.toISOString() },
-      credential: { githubToken: "local-only" }, begin: vi.fn(),
-      createDraftPullRequest: provider, record: vi.fn() })).rejects.toThrow("publication_capability_identity_mismatch");
-    expect(provider).not.toHaveBeenCalled();
-  });
 });

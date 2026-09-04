@@ -1,11 +1,12 @@
 # OpenTag Control Plane
 
-The Control Plane is OpenTag's optional shared coordination service. It owns
-tenant identity, runner pairing, Project Targets, public ingress, hosted run
+The Control Plane is OpenTag's required, self-hosted coordination service. It owns
+tenant identity, runner pairing, Project Targets, Slack ingress, hosted run
 leases, governed permissions, evidence receipts, durable jobs, and retained
-audit projections. Repositories, source-control credentials, coding-agent
-credentials, worktrees, context packets, and coding-agent execution remain on
-user-controlled runners.
+audit projections. Slack credentials and the Control Plane's service credentials
+remain here. Source code, local checkouts and worktrees, coding-agent
+login/session state, GitHub credentials, context packets, and coding-agent
+execution remain on user-controlled Runners.
 
 The service is an independently authored Node application:
 
@@ -23,12 +24,6 @@ The service is an independently authored Node application:
 TanStack Start, Cloudflare Workers, D1, KV, R2, Redis, a message broker, and an
 object store are not runtime dependencies. Cloudflare may be placed in front
 of the canonical HTTPS origin as an optional edge provider.
-
-GitHub ingress is a default-disabled local foundation. Signature, durable
-delivery reservation, replay, and hosted admission are covered, but audited
-binding-secret rotation and disable/re-enable recovery are not implemented.
-Do not activate a production GitHub webhook until that lifecycle is added and
-reviewed.
 
 ## Run with Docker Compose
 
@@ -84,7 +79,7 @@ OPENTAG_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5433/opentag_
 
 The real-PostgreSQL suite covers migrations, runner credentials and recovery,
 concurrent hosted claims, fencing, cancellation versus late completion,
-permissions, material evidence, durable jobs, GitHub ingress replay, console
+permissions, material evidence, durable jobs, Slack ingress, console
 authorization, and tenant-scoped projections.
 
 The browser E2E builds the production OCI image, creates a disposable Compose
@@ -98,9 +93,9 @@ corepack pnpm e2e:control-plane
 
 The journeys cover anonymous-route protection, owner login/session/logout,
 one-time API-key material and revocation, real runner pairing through
-`@opentag/client`, Project Target and GitHub binding creation, same-origin
+`@opentag/client`, GitHub Project Target registration, same-origin
 mutation enforcement, reload persistence, and browser diagnostics. The same
-run then exercises signed GitHub admission, claim, permission, material
+run then exercises signed Slack admission, claim, permission, material
 evidence, cancellation, credential reprovisioning, and recurring job
 settlement through the public Control V1 client before exact PostgreSQL row
 verification. Finally, it restarts the HTTP and jobs services, waits for HTTP
@@ -131,7 +126,9 @@ containers, network, secret file, and volume in `finally`.
   immutable claim identity. The Control Plane stores only its digest and never
   persists the live fencing token in claims, permission requests, audit, or
   console projections.
-- Local OpenTag continues to work without a Control Plane URL or credential.
+- Every Runner is paired to a trusted self-hosted Control Plane URL and uses
+  Control Plane-issued pairing/runtime authority. There is no standalone local
+  mode without that URL and credential flow.
 
 See [the runtime architecture](../../docs/control-plane-runtime-architecture.md),
 [ADR 0003](../../docs/adr/0003-node-postgresql-control-plane.md), and the

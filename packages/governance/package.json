@@ -1,7 +1,7 @@
 {
   "name": "@opentag/governance",
   "version": "0.11.0",
-  "description": "Deterministic execution governance for OpenTag work loops.",
+  "description": "Deterministic proposal and publication evidence evaluation for OpenTag.",
   "type": "module",
   "engines": {
     "node": ">=20"

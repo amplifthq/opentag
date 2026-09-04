@@ -20,20 +20,20 @@ database rows, and destroys the containers, network, secret file, and volume.
 - The durable key projection remains visible after reload.
 - The owner revokes the key and the durable state changes to `revoked`.
 
-## CP-E2E-003 — runner, target, and ingress binding
+## CP-E2E-003 — runner and GitHub Project Target
 
-- A real `@opentag/client` call pairs a runner with the bootstrap credential.
-- The paired runner appears in the authenticated browser console.
-- The owner declares a Project Target through the real form.
-- The owner creates an enabled GitHub ingress binding.
-- The binding secret is shown once; the binding persists after reload.
+- The authenticated Project Targets page is read-only.
+- It directs operators to `opentag setup` or `opentag pair` on the intended Runner.
+- No console target mutation or user-supplied binding digest control exists.
 - A cross-origin mutation is rejected before session authorization.
 
 ## CP-E2E-004 — governed Control V1 lifecycle and recurring jobs
 
-- A second real `@opentag/client` pairs and reports bounded readiness.
-- A locally signed GitHub issue-comment delivery admits exactly one hosted run;
-  replay resolves to the same run.
+- A real `@opentag/client` pairs a Runner, registers the Slack-bound Project
+  Target through runtime authority, verifies Control Context readback, and
+  reports bounded readiness.
+- A locally signed Slack app mention admits exactly one hosted run through the
+  configured active installation and binding.
 - The runner claims the run, requests governed permission, records material
   evidence, reconciles it, and cancels through the canonical lifecycle route.
 - Credential reprovisioning revokes the old runtime token and advances the
@@ -50,9 +50,9 @@ database rows, and destroys the containers, network, secret file, and volume.
 - PostgreSQL produces a logical backup without exposing it outside the
   disposable test process.
 - The backup restores into a fresh database in the isolated Compose project.
-- The restored database contains all four migrations, the exact runner,
-  Project Target, and GitHub binding records created by the journeys, and an
-  exact non-ASCII organization-name canary.
+- The restored database contains every migration, the exact runner, Project
+  Target, and Slack installation records created by the journeys, and an exact
+  non-ASCII organization-name canary.
 
 ## Diagnostics and cleanup
 

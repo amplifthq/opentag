@@ -541,7 +541,7 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
   });
 }
 
-async function main(): Promise<void> {
+export async function runBuiltinAcpConformance(): Promise<void> {
   assert(Number.isFinite(runTimeoutMs) && runTimeoutMs > 0, "OPENTAG_BUILTIN_ACP_RUN_TIMEOUT_MS must be positive.");
   assert(Number.isFinite(cancelStartTimeoutMs) && cancelStartTimeoutMs > 0, "OPENTAG_BUILTIN_ACP_CANCEL_START_TIMEOUT_MS must be positive.");
   assert(Number.isFinite(cancelCleanupTimeoutMs) && cancelCleanupTimeoutMs > 0, "OPENTAG_BUILTIN_ACP_CANCEL_CLEANUP_TIMEOUT_MS must be positive.");
@@ -561,7 +561,7 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
-  main().catch((error) => {
+  runBuiltinAcpConformance().catch((error) => {
     process.stderr.write(`Built-in ACP conformance failed: ${safeDiagnostic(error)}\n`);
     process.exitCode = 1;
   });

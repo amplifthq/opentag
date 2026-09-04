@@ -80,11 +80,11 @@ The authenticated operator console is a Vite-built React single-page
 application using TanStack Router and TanStack Query. The console and HTTP
 application deploy on one origin by default.
 
-This is a minimal installation-operations console, not the broad hosted SaaS
-control plane excluded by `docs/design.md`. It exposes only the authority and
-read models already required to operate the optional service. It does not add
-planning, source custody, hosted execution, billing, marketing, or general
-workspace features, and it does not imply that a managed service is deployed.
+This is a minimal self-hosted operations console, not a broad hosted SaaS
+control plane. It exposes identity, Slack installation, Runner, Project Target,
+derived Presence, Run, and evidence views needed to operate the service. It
+does not add planning, billing, marketing, or general workspace features, and
+it does not imply that a managed service is deployed.
 
 TanStack Start will not be part of the new runtime. The Control Plane does not
 currently justify SSR, streaming, hydration, route loaders with server
@@ -321,8 +321,8 @@ release or production claim requires the applicable evidence below:
    release on success and failure, a bounded pool, and graceful pool drain.
 5. The existing OpenTag client negotiates capabilities, pairs, registers,
    claims, reports progress, and completes without deployment-specific fields.
-6. GitHub webhook verification consumes the raw body and is tenant- and
-   repository-bound independently of the React console.
+6. Slack request verification consumes the raw body and is installation- and
+   channel-bound independently of the React console.
 7. Deleting static console assets leaves Control V1 and provider ingress
    operational.
 8. The new application package has no runtime dependency on

@@ -2,7 +2,6 @@ export * from "./action.js";
 export * from "./capability.js";
 export * from "./canonical-json.js";
 export * from "./credential-safety.js";
-export * from "./factory.js";
 export * from "./channel-protocol.js";
 export * from "@opentag/control-protocol";
 export * from "./integration-protocol.js";

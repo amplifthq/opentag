@@ -1,19 +1,23 @@
 import { createHash } from "node:crypto";
 import {
+  computeGitHubProjectTargetBindingDigestV1,
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
   FreshRunnerCredentialResponseV1Schema,
+  GitHubProjectTargetDeclarationV1Schema,
   ReplayedRunnerCredentialResponseV1Schema,
   RunnerCredentialReprovisionRequestV1Schema,
   RunnerControlContextResponseV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
   RunnerRegistrationRequestV1Schema,
+  RunnerProjectTargetUpsertRequestV1Schema,
+  type GitHubProjectTargetDeclarationV1,
+  type RunnerProjectTargetUpsertRequestV1,
   type RunnerReadinessReceiptEnvelopeV1,
   type RunnerCredentialReprovisionRequestV1,
   type RunnerRegistrationRequestV1,
 } from "@opentag/control-protocol";
 import type { Pool } from "pg";
-import { z } from "zod";
 import { withPostgresTransaction } from "../../database/postgres.js";
 import { recordManagementAudit } from "../audit/index.js";
 
@@ -21,25 +25,11 @@ type Clock = { now(): Date };
 type IdFactory = (kind: "credential") => string;
 type TokenFactory = () => string;
 
-const ProjectTargetDeclarationSchema = z.object({
-  projectTargetId: z.string().min(1).max(200).refine((value) => value === value.trim()),
-  bindingDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
-  provider: z.string().min(1).max(32).regex(/^[a-z][a-z0-9_-]*$/u),
-  owner: z.string().min(1).max(200).refine((value) => value === value.trim()),
-  repo: z.string().min(1).max(200).refine((value) => value === value.trim()),
-  defaultExecutor: z.string().min(1).max(120).refine((value) => value === value.trim()),
-  defaultBranch: z.string().min(1).max(255).refine((value) => value === value.trim()).nullable(),
-  version: z.number().int().positive(),
-}).strict();
-
-type ProjectTargetDeclaration = z.infer<typeof ProjectTargetDeclarationSchema>;
-
 const UPSERT_PROJECT_TARGET_SQL = `
   INSERT INTO cp_project_target(
     organization_id, project_target_id, runner_id, binding_digest,
-    provider, owner, repo, default_executor, default_branch, version,
-    updated_at
-  ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    provider, owner, repo, default_executor, default_branch, updated_at
+  ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
   ON CONFLICT (organization_id, project_target_id) DO UPDATE SET
     runner_id = EXCLUDED.runner_id,
     binding_digest = EXCLUDED.binding_digest,
@@ -48,27 +38,26 @@ const UPSERT_PROJECT_TARGET_SQL = `
     repo = EXCLUDED.repo,
     default_executor = EXCLUDED.default_executor,
     default_branch = EXCLUDED.default_branch,
-    version = EXCLUDED.version,
     updated_at = EXCLUDED.updated_at
 `;
 
 function projectTargetValues(input: {
   organizationId: string;
   runnerId: string;
-  target: ProjectTargetDeclaration;
+  target: GitHubProjectTargetDeclarationV1;
+  bindingDigest: string;
   updatedAt: string;
 }) {
   return [
     input.organizationId,
     input.target.projectTargetId,
     input.runnerId,
-    input.target.bindingDigest,
+    input.bindingDigest,
     input.target.provider,
     input.target.owner,
     input.target.repo,
     input.target.defaultExecutor,
     input.target.defaultBranch,
-    input.target.version,
     input.updatedAt,
   ];
 }
@@ -114,23 +103,11 @@ export type RunnerDirectory = {
   >;
   upsertProjectTarget(input: {
     principal: RuntimePrincipal;
-    target: {
-      projectTargetId: string;
-      bindingDigest: string;
-      provider: string;
-      owner: string;
-      repo: string;
-      defaultExecutor: string;
-      defaultBranch: string | null;
-      version: number;
-    };
-  }): Promise<void>;
-  declareProjectTarget(input: {
-    organizationId: string;
-    runnerId: string;
-    actor?: { kind: "operator" | "runner" | "system"; id: string };
-    target: ProjectTargetDeclaration;
-  }): Promise<{ kind: "created" | "updated" }>;
+    request: RunnerProjectTargetUpsertRequestV1;
+  }): Promise<
+    | { kind: "upserted"; context: ReturnType<typeof RunnerControlContextResponseV1Schema.parse> }
+    | { kind: "conflict"; reason: "authority_mismatch" | "target_not_bound_to_slack" }
+  >;
   recordReadiness(input: {
     principal: RuntimePrincipal;
     receipt: RunnerReadinessReceiptEnvelopeV1;
@@ -156,6 +133,60 @@ export function createRunnerDirectory(input: {
   idFactory: IdFactory;
   tokenFactory: TokenFactory;
 }): RunnerDirectory {
+  const readControlContext = async (principal: RuntimePrincipal) => {
+    const runnerResult = await input.pool.query<{
+      capabilities: unknown;
+    }>(
+      `SELECT capabilities
+       FROM cp_runner
+       WHERE organization_id = $1 AND runner_id = $2
+         AND current_credential_id = $3
+         AND registration_generation = $4
+         AND credential_generation = $5`,
+      [principal.organizationId, principal.runnerId, principal.credentialId,
+        principal.registrationGeneration, principal.credentialGeneration],
+    );
+    const runner = runnerResult.rows[0];
+    if (!runner) throw new Error("runner_context_unavailable");
+    const targets = await input.pool.query<{
+      project_target_id: string;
+      binding_digest: string;
+      provider: string;
+      owner: string;
+      repo: string;
+      default_executor: string;
+      default_branch: string | null;
+    }>(
+      `SELECT project_target_id, binding_digest, provider, owner, repo,
+              default_executor, default_branch
+       FROM cp_project_target
+       WHERE organization_id = $1 AND runner_id = $2
+       ORDER BY project_target_id`,
+      [principal.organizationId, principal.runnerId],
+    );
+    return RunnerControlContextResponseV1Schema.parse({
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      contextKind: "runner_control",
+      organizationId: principal.organizationId,
+      runnerId: principal.runnerId,
+      credentialId: principal.credentialId,
+      registrationGeneration: principal.registrationGeneration,
+      credentialGeneration: principal.credentialGeneration,
+      capabilities: runner.capabilities,
+      targets: targets.rows.map((target) => ({
+        projectTargetId: target.project_target_id,
+        bindingDigest: target.binding_digest,
+        provider: target.provider,
+        owner: target.owner,
+        repo: target.repo,
+        defaultExecutor: target.default_executor,
+        defaultBranch: target.default_branch,
+      })),
+      observedAt: input.clock.now().toISOString(),
+    });
+  };
+
   return {
     async register(command) {
       const request = RunnerRegistrationRequestV1Schema.parse(command.request);
@@ -195,8 +226,8 @@ export function createRunnerDirectory(input: {
 
         const existingRunner = await client.query(
           `SELECT 1 FROM cp_runner
-           WHERE organization_id = $1 AND runner_id = $2`,
-          [command.organizationId, request.runnerId],
+           WHERE organization_id = $1`,
+          [command.organizationId],
         ) as { rows: unknown[] };
         if (existingRunner.rows.length > 0) {
           return { kind: "conflict", reason: "runner_already_registered" };
@@ -501,67 +532,83 @@ export function createRunnerDirectory(input: {
     },
 
     async upsertProjectTarget(command) {
+      const request = RunnerProjectTargetUpsertRequestV1Schema.parse(command.request);
+      const principal = command.principal;
+      if (request.expectedAuthority.credentialId !== principal.credentialId
+        || request.expectedAuthority.registrationGeneration
+          !== principal.registrationGeneration
+        || request.expectedAuthority.credentialGeneration
+          !== principal.credentialGeneration) {
+        return { kind: "conflict", reason: "authority_mismatch" } as const;
+      }
       const updatedAt = input.clock.now().toISOString();
-      const target = ProjectTargetDeclarationSchema.parse(command.target);
-      await withPostgresTransaction(input.pool, async (client) => {
+      const target = GitHubProjectTargetDeclarationV1Schema.parse(request.target);
+      const bindingDigest = await computeGitHubProjectTargetBindingDigestV1(target);
+      const outcome = await withPostgresTransaction(input.pool, async (client) => {
+        const runner = await client.query<{
+          current_credential_id: string;
+          registration_generation: number;
+          credential_generation: number;
+        }>(
+          `SELECT current_credential_id, registration_generation, credential_generation
+           FROM cp_runner
+           WHERE organization_id = $1 AND runner_id = $2
+           FOR UPDATE`,
+          [principal.organizationId, principal.runnerId],
+        );
+        const current = runner.rows[0];
+        if (!current || current.current_credential_id !== principal.credentialId
+          || current.registration_generation !== principal.registrationGeneration
+          || current.credential_generation !== principal.credentialGeneration) {
+          return { kind: "conflict", reason: "authority_mismatch" } as const;
+        }
+        const slackBinding = await client.query(
+          `SELECT 1
+           FROM cp_slack_installation slack
+           JOIN cp_source_app_installation installation
+             ON installation.organization_id = slack.organization_id
+            AND installation.installation_id = slack.installation_id
+            AND installation.source_app_id = 'slack'
+            AND installation.state = 'active'
+           JOIN cp_source_binding binding
+             ON binding.organization_id = slack.organization_id
+            AND binding.binding_id = slack.binding_id
+            AND binding.installation_id = slack.installation_id
+            AND binding.binding_digest = installation.binding_digest
+            AND binding.state = 'active'
+           WHERE slack.organization_id = $1
+             AND slack.project_target_id = $2
+           LIMIT 1
+           FOR SHARE OF slack, installation, binding`,
+          [principal.organizationId, target.projectTargetId],
+        );
+        if (slackBinding.rows.length === 0) {
+          return { kind: "conflict", reason: "target_not_bound_to_slack" } as const;
+        }
         await client.query(
           UPSERT_PROJECT_TARGET_SQL,
           projectTargetValues({
-            organizationId: command.principal.organizationId,
-            runnerId: command.principal.runnerId,
+            organizationId: principal.organizationId,
+            runnerId: principal.runnerId,
             target,
+            bindingDigest,
             updatedAt,
           }),
         );
         await recordManagementAudit(client, {
-          organizationId: command.principal.organizationId,
-          actor: { kind: "runner", id: command.principal.runnerId },
+          organizationId: principal.organizationId,
+          actor: { kind: "runner", id: principal.runnerId },
           operationKind: "project_target.upsert",
           resource: { kind: "project_target", id: target.projectTargetId },
           outcome: "upserted",
-          event: { runnerId: command.principal.runnerId, version: target.version },
+          event: { bindingDigest, requestId: request.requestId,
+            runnerId: principal.runnerId },
           createdAt: updatedAt,
         });
+        return { kind: "upserted" } as const;
       });
-    },
-
-    async declareProjectTarget(command) {
-      const target = ProjectTargetDeclarationSchema.parse(command.target);
-      return withPostgresTransaction(input.pool, async (client) => {
-        const runner = await client.query(
-          `SELECT 1 FROM cp_runner
-           WHERE organization_id = $1 AND runner_id = $2
-           FOR UPDATE`,
-          [command.organizationId, command.runnerId],
-        ) as { rows: unknown[] };
-        if (runner.rows.length === 0) throw new Error("target_runner_not_found");
-        const existing = await client.query(
-          `SELECT 1 FROM cp_project_target
-           WHERE organization_id = $1 AND project_target_id = $2`,
-          [command.organizationId, target.projectTargetId],
-        ) as { rows: unknown[] };
-        const updatedAt = input.clock.now().toISOString();
-        await client.query(
-          UPSERT_PROJECT_TARGET_SQL,
-          projectTargetValues({
-            organizationId: command.organizationId,
-            runnerId: command.runnerId,
-            target,
-            updatedAt,
-          }),
-        );
-        const outcome = existing.rows.length === 0 ? "created" : "updated";
-        await recordManagementAudit(client, {
-          organizationId: command.organizationId,
-          actor: command.actor ?? { kind: "system", id: "control_plane" },
-          operationKind: "project_target.declare",
-          resource: { kind: "project_target", id: target.projectTargetId },
-          outcome,
-          event: { runnerId: command.runnerId, version: target.version },
-          createdAt: updatedAt,
-        });
-        return { kind: outcome };
-      });
+      if (outcome.kind === "conflict") return outcome;
+      return { kind: "upserted", context: await readControlContext(principal) };
     },
 
     async recordReadiness(command) {
@@ -590,6 +637,25 @@ export function createRunnerDirectory(input: {
       }
 
       return withPostgresTransaction(input.pool, async (client) => {
+        const runnerResult = await client.query<{
+          current_credential_id: string;
+          registration_generation: number;
+          credential_generation: number;
+        }>(
+          `SELECT current_credential_id, registration_generation,
+                  credential_generation
+           FROM cp_runner
+           WHERE organization_id = $1 AND runner_id = $2
+           FOR UPDATE`,
+          [principal.organizationId, principal.runnerId],
+        );
+        const runner = runnerResult.rows[0];
+        if (!runner
+          || runner.current_credential_id !== principal.credentialId
+          || runner.registration_generation !== principal.registrationGeneration
+          || runner.credential_generation !== principal.credentialGeneration) {
+          return { kind: "conflict", reason: "authority_mismatch" } as const;
+        }
         const existing = await client.query(
           `SELECT receipt_digest, receipt
            FROM cp_runner_readiness
@@ -626,54 +692,7 @@ export function createRunnerDirectory(input: {
     },
 
     async getControlContext(principal) {
-      const runnerResult = await input.pool.query<{
-        capabilities: unknown;
-      }>(
-        `SELECT capabilities
-         FROM cp_runner
-         WHERE organization_id = $1 AND runner_id = $2
-           AND current_credential_id = $3`,
-        [principal.organizationId, principal.runnerId, principal.credentialId],
-      );
-      const runner = runnerResult.rows[0];
-      if (!runner) throw new Error("runner_context_unavailable");
-      const targets = await input.pool.query<{
-        project_target_id: string;
-        binding_digest: string;
-        provider: string;
-        owner: string;
-        repo: string;
-        default_executor: string;
-        default_branch: string | null;
-      }>(
-        `SELECT project_target_id, binding_digest, provider, owner, repo,
-                default_executor, default_branch
-         FROM cp_project_target
-         WHERE organization_id = $1 AND runner_id = $2
-         ORDER BY project_target_id`,
-        [principal.organizationId, principal.runnerId],
-      );
-      return RunnerControlContextResponseV1Schema.parse({
-        schemaVersion: 1,
-        protocolVersion: "1.0",
-        contextKind: "runner_control",
-        organizationId: principal.organizationId,
-        runnerId: principal.runnerId,
-        credentialId: principal.credentialId,
-        registrationGeneration: principal.registrationGeneration,
-        credentialGeneration: principal.credentialGeneration,
-        capabilities: runner.capabilities,
-        targets: targets.rows.map((target) => ({
-          projectTargetId: target.project_target_id,
-          bindingDigest: target.binding_digest,
-          provider: target.provider,
-          owner: target.owner,
-          repo: target.repo,
-          defaultExecutor: target.default_executor,
-          defaultBranch: target.default_branch,
-        })),
-        observedAt: input.clock.now().toISOString(),
-      });
+      return readControlContext(principal);
     },
 
     async pruneExpiredReadiness(organizationId: string | null) {

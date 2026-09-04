@@ -1,10 +1,13 @@
 # @opentag/slack
 
-Slack adapter helpers for OpenTag.
+Slack Source App helpers for the OpenTag Control Plane.
 
-Use this package to normalize Slack `app_mention` events into `OpenTagEvent`
-objects, encode or parse Slack source-thread keys, and adapt unified delivery
-presentations for Slack.
+Use this package to verify signed Slack requests, normalize `app_mention` and
+authenticated deletion events, read bounded thread context, render governed
+presentations, and deliver through the active Control Plane installation.
+
+This package does not start an HTTP listener, open Socket Mode, or own a local
+transport. Transport ownership belongs to the Control Plane.
 
 ## Install
 
@@ -15,9 +18,12 @@ pnpm add @opentag/slack
 ## Exports
 
 - `normalizeSlackAppMention`: converts a Slack app mention into an `OpenTagEvent`.
+- `createSlackSourceApp`: creates the registry-backed ingress, context,
+  presentation, and delivery definition used by the Control Plane.
+- `computeSlackSignature`, `verifySlackSignature`, and `verifySlackTimestamp`:
+  verify the raw Slack request before parsing it.
 - `slackThreadKey`: encodes team, channel, and thread timestamp for source-thread delivery.
 - `parseSlackThreadKey`: decodes a Slack thread key for `chat.postMessage`.
-- `SlackChannelBinding`: Slack compatibility binding contract that maps into the generic channel binding layer.
 
 ## Example
 
@@ -43,11 +49,12 @@ const event = normalizeSlackAppMention({
 });
 
 if (event) {
-  // Send event to @opentag/client or your own OpenTag-compatible control plane.
+  // Admit it through the Control Plane's active Slack installation and binding.
 }
 ```
 
 ## Stability
 
-Thread key format is part of the source-thread identity used by ingress and the
-delivery adapter. A breaking format change must update both sides atomically.
+Thread key and signature behavior are part of the Control Plane Source App
+boundary. A breaking change must update the Control Plane and this package
+atomically.

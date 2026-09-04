@@ -3,7 +3,6 @@ import {
   computePermissionRequestDigestV1,
   computeControlPayloadDigestV1,
   computeHostedAdmissionEnvelopeDigestV1,
-  HumanPermissionDecisionRequestV1Schema,
   RunnerPermissionRequestV1Schema,
 } from "@opentag/control-protocol";
 import { createOpenTagClient } from "@opentag/client";
@@ -81,7 +80,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       return response;
     };
     const bootstrapClient = createOpenTagClient({
-      dispatcherUrl: "http://control.test",
+      controlPlaneUrl: "http://control.test",
       controlCredential: {
         kind: "bootstrap_pairing",
         token: "bootstrap_http_secret",
@@ -107,7 +106,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
     });
 
     const runtimeClient = createOpenTagClient({
-      dispatcherUrl: "http://control.test",
+      controlPlaneUrl: "http://control.test",
       controlCredential: {
         kind: "runtime",
         token: registered.runnerToken,
@@ -175,53 +174,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
         request: complete,
       }),
     ).resolves.toMatchObject({ status: 201, replayed: false });
-
-    const cancelInput = await hostedAdmissionFixture({
-      runId: "run_http_cancel",
-      suffix: "8",
-      organizationId: "org_http",
-      runnerId: "runner_http",
-    });
-    await hosted.admit({
-      runId: "run_http_cancel",
-      admission: cancelInput.admission,
-      policy: cancelInput.policy,
-    });
-    const cancelClaim = await runtimeClient.claimHostedRunControlV1({
-      runnerId: "runner_http",
-      request: hostedClaimRequest({
-        operationId: "operation_claim_http_cancel",
-        requestId: "request_claim_http_cancel",
-        credentialId: "credential_http",
-      }),
-    });
-    if (!cancelClaim) throw new Error("cancel claim missing");
-    const cancel = await buildHostedLifecycleRequestV1({
-      organizationId: "org_http",
-      runnerId: "runner_http",
-      runId: "run_http_cancel",
-      action: "cancel",
-      attempt: {
-        attemptId: cancelClaim.attempt.id,
-        attemptNumber: cancelClaim.attempt.number,
-        epoch: cancelClaim.attempt.epoch,
-        fencingToken: cancelClaim.attempt.fencingToken,
-        fencingTokenDigest: cancelClaim.attempt.fencingTokenDigest,
-      },
-      occurredAt: now.toISOString(),
-      reasonCode: "operator_cancelled",
-    });
-    await expect(runtimeClient.cancelHostedRunControlV1({
-      organizationId: "org_http",
-      credentialId: "credential_http",
-      runnerId: "runner_http",
-      runId: "run_http_cancel",
-      request: cancel,
-    })).resolves.toMatchObject({
-      status: 201,
-      replayed: false,
-      receipt: { payload: { operation: "cancel" } },
-    });
 
     const replayInput = await hostedAdmissionFixture({
       runId: "run_http_claim_replay",
@@ -328,7 +280,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
     const admitted = await hostedAdmissionFixture({ runId: "run_redeem", suffix: "91",
       organizationId: "org_redeem", runnerId: "runner_redeem", contentId: "content_redeem" });
     const contentRef = await custody.store({ organizationId: "org_redeem", installationId: "install_redeem",
-      sourceAppId: "github", sourceDeliveryId: admitted.admission.deliveryId,
+      sourceAppId: "slack", sourceDeliveryId: admitted.admission.deliveryId,
       sourceMessageId: admitted.admission.sourceEvent.providerEventId,
       sourceVersionRef: admitted.admission.sourceContextEnvelope.sourceVersionRef,
       purpose: "source_context", contentId: "content_redeem",
@@ -354,7 +306,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
     const fetchImpl: typeof fetch = async (url, init) => { const response = await application.fetch(
       new Request(String(url), init)); Object.defineProperty(response, "url", { value: String(url) });
       return response; };
-    const client = createOpenTagClient({ dispatcherUrl: "http://control.test",
+    const client = createOpenTagClient({ controlPlaneUrl: "http://control.test",
       controlCredential: { kind: "runtime", token: "runtime_redeem_secret" }, fetchImpl });
     const claim = await client.claimHostedRunControlV1({ runnerId: "runner_redeem",
       request: hostedClaimRequest({ operationId: "operation_claim_redeem",
@@ -377,7 +329,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
         payload: { text: "private source" } } });
     await expect(client.redeemHostedSourceContentControlV1({ runnerId: claim.runnerId, request }))
       .rejects.toMatchObject({ status: 409 });
-    const wrongCredential = createOpenTagClient({ dispatcherUrl: "http://control.test",
+    const wrongCredential = createOpenTagClient({ controlPlaneUrl: "http://control.test",
       controlCredential: { kind: "runtime", token: "wrong" }, fetchImpl });
     await expect(wrongCredential.redeemHostedSourceContentControlV1({ runnerId: claim.runnerId,
       request: { ...request, operationId: "operation_wrong_credential" } }))
@@ -477,7 +429,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       return response;
     };
     const bootstrap = createOpenTagClient({
-      dispatcherUrl: "http://control.test",
+      controlPlaneUrl: "http://control.test",
       controlCredential: {
         kind: "bootstrap_pairing",
         token: "bootstrap_reprovision_secret",
@@ -494,7 +446,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       capabilities: [...HOSTED_CAPABILITIES],
     });
     const recovery = createOpenTagClient({
-      dispatcherUrl: "http://control.test",
+      controlPlaneUrl: "http://control.test",
       controlCredential: {
         kind: "recovery_pairing",
         token: "recovery_reprovision_secret",
@@ -520,7 +472,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
     });
     if (reprovisioned.replayed) throw new Error("fresh credential missing");
     const oldRuntime = createOpenTagClient({
-      dispatcherUrl: "http://control.test",
+      controlPlaneUrl: "http://control.test",
       controlCredential: { kind: "runtime", token: registered.runnerToken },
       fetchImpl,
     });
@@ -528,7 +480,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       runnerId: "runner_reprovision_http",
     })).rejects.toMatchObject({ status: 401 });
     const newRuntime = createOpenTagClient({
-      dispatcherUrl: "http://control.test",
+      controlPlaneUrl: "http://control.test",
       controlCredential: {
         kind: "runtime",
         token: reprovisioned.runnerToken,
@@ -543,7 +495,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
     });
   });
 
-  it("runs permission request, scoped approval, and current lookup through the existing client", async () => {
+  it("runs permission request and current lookup through the Runner client", async () => {
     const runners = createRunnerDirectory({
       pool: fixture.pool,
       clock: { now: () => now },
@@ -622,19 +574,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       readiness: { check: async () => ({ ready: true }) },
       control: {
         bootstrap: { authenticate: () => null },
-        approver: {
-          authenticate: async (token) => token === "approver_permission_http"
-            ? {
-                kind: "authenticated" as const,
-                principal: {
-                  organizationId: "org_permission_http",
-                  actorId: "api_key_permission_http",
-                },
-              }
-            : token === "unscoped_permission_http"
-              ? { kind: "insufficient_scope" as const }
-              : { kind: "invalid_credential" as const },
-        },
         runners,
         hosted,
         permissions,
@@ -693,7 +632,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       ),
     });
     const runtime = createOpenTagClient({
-      dispatcherUrl: "http://control.test",
+      controlPlaneUrl: "http://control.test",
       controlCredential: {
         kind: "runtime",
         token: "runtime_permission_http_secret",
@@ -714,63 +653,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
     await expect(
       runtime.getActionPermissionCurrentControlV1(query),
     ).resolves.toMatchObject({ status: 202, outcome: "waiting" });
-    const decision = HumanPermissionDecisionRequestV1Schema.parse({
-      schemaVersion: 1,
-      protocolVersion: "1.0",
-      requiredCapabilities: ["relay.permission.v1"],
-      requestId: "request_permission_decision_http",
-      operationId: "operation_permission_decision_http",
-      organizationId: request.organizationId,
-      runId: request.runId,
-      attempt: digestInput.attempt,
-      actionId: request.actionId,
-      permissionRequestId: request.permissionRequestId,
-      permissionRequestDigest: request.permissionRequestDigest,
-      policySnapshotDigest: request.policySnapshotDigest,
-      decisionId: "decision_permission_http",
-      decision: "allow_once",
-      decidedAt: now.toISOString(),
-    });
-    const unscoped = createOpenTagClient({
-      dispatcherUrl: "http://control.test",
-      controlCredential: {
-        kind: "approver",
-        token: "unscoped_permission_http",
-      },
-      fetchImpl,
-    });
-    await expect(
-      unscoped.resolveActionPermissionControlV1({
-        runnerId: request.runnerId,
-        decision,
-      }),
-    ).rejects.toMatchObject({ status: 403, code: "insufficient_scope" });
-    const approver = createOpenTagClient({
-      dispatcherUrl: "http://control.test",
-      controlCredential: {
-        kind: "approver",
-        token: "approver_permission_http",
-      },
-      fetchImpl,
-    });
-    await expect(
-      approver.resolveActionPermissionControlV1({
-        runnerId: request.runnerId,
-        decision,
-      }),
-    ).resolves.toMatchObject({
-      status: 200,
-      outcome: "resolved",
-      receipt: {
-        payload: {
-          state: "authorized",
-          decisionActorRef: "api_key_permission_http",
-        },
-      },
-    });
-    await expect(
-      runtime.getActionPermissionCurrentControlV1(query),
-    ).resolves.toMatchObject({ status: 200, outcome: "resolved" });
   });
 
   it("settles proposal evidence through the authenticated Control V1 transport", async () => {
@@ -797,7 +679,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       Object.defineProperty(response, "url", { value: String(url) });
       return response;
     };
-    const client = createOpenTagClient({ dispatcherUrl: "http://control.test",
+    const client = createOpenTagClient({ controlPlaneUrl: "http://control.test",
       controlCredential: { kind: "runtime", token: "runtime_proposal_http" }, fetchImpl });
     const proposalArtifact = { id: "run_proposal_http:proposal-evidence",
       metadata: { artifactDigest: `sha256:${"a".repeat(64)}` } };

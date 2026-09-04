@@ -1,5 +1,4 @@
 import {
-  HostedCancelRequestV1Schema,
   HostedCompleteRequestV1Schema,
   HostedLifecycleReceiptEnvelopeV1Schema,
   HostedHeartbeatRequestV1Schema,
@@ -11,7 +10,7 @@ import {
   type HostedLifecycleActionV1,
   type HostedLifecycleReceiptEnvelopeV1,
   type HostedLifecycleRequestV1,
-} from '@opentag/core';
+} from '@opentag/control-protocol';
 import { describe, expect, it, vi } from 'vitest';
 import { createOpenTagClient } from '../src/index.js';
 
@@ -20,6 +19,7 @@ const CREDENTIAL_ID = 'credential_1';
 const RUNNER_ID = 'runner_1';
 const RUN_ID = 'run_1';
 const DIGEST = `sha256:${'1'.repeat(64)}`;
+type ClientLifecycleAction = Exclude<HostedLifecycleActionV1, 'cancel'>;
 
 function response(
   body: unknown,
@@ -37,14 +37,13 @@ function response(
 
 function runtimeClient(fetchImpl: typeof fetch) {
   return createOpenTagClient({
-    dispatcherUrl: 'https://control.example',
-    pairingToken: 'legacy_pairing_token_must_not_be_used',
+    controlPlaneUrl: 'https://control.example',
     controlCredential: { kind: 'runtime', token: 'runtime_secret' },
     fetchImpl,
   });
 }
 
-async function requestFor(action: HostedLifecycleActionV1) {
+async function requestFor(action: ClientLifecycleAction) {
   const common = {
     organizationId: ORGANIZATION_ID,
     runnerId: RUNNER_ID,
@@ -92,13 +91,6 @@ async function requestFor(action: HostedLifecycleActionV1) {
       progressDigest: DIGEST,
     });
   }
-  if (action === 'cancel') {
-    return buildHostedLifecycleRequestV1({
-      ...common,
-      action,
-      reasonCode: 'operator_cancelled',
-    });
-  }
   return buildHostedLifecycleRequestV1({
     ...common,
     action,
@@ -111,7 +103,7 @@ async function requestFor(action: HostedLifecycleActionV1) {
 }
 
 async function receiptFor(
-  action: HostedLifecycleActionV1,
+  action: ClientLifecycleAction,
   request: HostedLifecycleRequestV1,
 ): Promise<HostedLifecycleReceiptEnvelopeV1> {
   const operation = action === 'reject-start'
@@ -155,15 +147,7 @@ async function receiptFor(
                 ? request.progressDigest
                 : DIGEST,
             }
-          : action === 'cancel'
-            ? {
-                operation,
-                occurredAt: request.occurredAt,
-                reasonCode: 'reasonCode' in request
-                  ? request.reasonCode
-                  : 'operator_cancelled',
-              }
-            : {
+          : {
               operation,
               occurredAt: request.occurredAt,
               conclusion: 'conclusion' in request
@@ -242,7 +226,6 @@ describe('hosted lifecycle Control V1 transports', () => {
       'progress',
       'complete',
       'reject-start',
-      'cancel',
     ] as const;
     const requests = await Promise.all(actions.map(requestFor));
     let index = 0;
@@ -264,12 +247,10 @@ describe('hosted lifecycle Control V1 transports', () => {
       await client.progressHostedRunControlV1(input(requests[2])),
       await client.completeHostedRunControlV1(input(requests[3])),
       await client.rejectHostedAttemptStartControlV1(input(requests[4])),
-      await client.cancelHostedRunControlV1(input(requests[5])),
     ];
 
     expect(results.map(({ status, replayed }) => ({ status, replayed }))).toEqual([
       { status: 201, replayed: false },
-      { status: 200, replayed: true },
       { status: 200, replayed: true },
       { status: 200, replayed: true },
       { status: 200, replayed: true },
@@ -281,25 +262,9 @@ describe('hosted lifecycle Control V1 transports', () => {
       'https://control.example/v1/runners/runner_1/runs/run_1/progress',
       'https://control.example/v1/runners/runner_1/runs/run_1/complete',
       'https://control.example/v1/runners/runner_1/runs/run_1/reject-start',
-      'https://control.example/v1/runners/runner_1/runs/run_1/cancel',
     ]);
     expect(fetchImpl.mock.calls.map(([, init]) => JSON.parse(String(init?.body))))
       .toEqual(requests);
-  });
-
-  it('builds a strict cancellation request without accepting free-form reasons', async () => {
-    const request = await requestFor('cancel');
-    expect(HostedCancelRequestV1Schema.parse(request)).toEqual(request);
-    expect(HostedCancelRequestV1Schema.safeParse({
-      ...request,
-      reasonCode: 'please cancel this run',
-    }).success).toBe(false);
-
-    const fetchImpl = vi.fn<typeof fetch>(async (url) =>
-      response(await receiptFor('cancel', request), 201, String(url)),
-    );
-    await expect(runtimeClient(fetchImpl).cancelHostedRunControlV1(input(request)))
-      .resolves.toMatchObject({ status: 201, replayed: false });
   });
 
   it('accepts caller-stable operation identity independent of the digest', async () => {
@@ -321,11 +286,11 @@ describe('hosted lifecycle Control V1 transports', () => {
       .resolves.toMatchObject({ status: 201, replayed: false });
   });
 
-  it('rejects legacy request fields and mismatched receipts before acceptance', async () => {
+  it('rejects unknown request fields and mismatched receipts before acceptance', async () => {
     const request = await requestFor('heartbeat');
     expect(HostedHeartbeatRequestV1Schema.safeParse({
       ...request,
-      idempotencyKey: 'legacy',
+      idempotencyKey: 'unexpected',
     }).success).toBe(false);
     const receipt = await receiptFor('heartbeat', request);
     const fetchImpl = vi.fn<typeof fetch>(async (url) =>

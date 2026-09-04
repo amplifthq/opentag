@@ -6,7 +6,6 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../control-protocol" },
-    { "path": "../core" }
+    { "path": "../control-protocol" }
   ]
 }

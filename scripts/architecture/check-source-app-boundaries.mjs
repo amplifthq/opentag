@@ -6,19 +6,13 @@ import ts from "typescript";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const providerPackages = new Set([
-  "@opentag/discord", "@opentag/github", "@opentag/gitlab", "@opentag/lark",
-  "@opentag/linear", "@opentag/slack", "@opentag/teams", "@opentag/telegram",
+  "@opentag/github", "@opentag/slack",
 ]);
 const sourceApps = [
-  ["packages/discord", "@opentag/discord"], ["packages/github", "@opentag/github"],
-  ["packages/gitlab", "@opentag/gitlab"], ["packages/lark", "@opentag/lark"],
-  ["packages/linear", "@opentag/linear"], ["packages/slack", "@opentag/slack"],
-  ["packages/teams", "@opentag/teams"], ["packages/telegram", "@opentag/telegram"],
-  ["apps/github-probot", "@opentag/github"], ["apps/lark-events", "@opentag/lark"],
-  ["apps/slack-events", "@opentag/slack"], ["apps/telegram-events", "@opentag/telegram"],
+  ["packages/slack", "@opentag/slack"],
 ];
 const forbiddenImplementations = new Set([
-  "@opentag/dispatcher", "@opentag/governance", "@opentag/local-runtime",
+  "@opentag/governance", "@opentag/local-runtime",
   "@opentag/runner", "@opentag/store",
 ]);
 const runtimeAllowed = new Map([
@@ -148,11 +142,11 @@ for (const [packageDir, allowed] of runtimeAllowed) {
 }
 
 const controlPlaneForbidden = new Set([
-  "@opentag/dispatcher", "@opentag/store", "better-sqlite3",
+  "@opentag/store", "better-sqlite3",
   ...[...providerPackages].filter((name) => name !== "@opentag/slack" && name !== "@opentag/github"),
 ]);
 const allowedControlPlaneGitHubHelpers = new Set([
-  "assessExactPullRequestReadiness", "normalizeGitHubIssueComment",
+  "assessExactPullRequestReadiness",
 ]);
 const observedControlPlaneGitHubHelpers = new Set();
 for (const path of sourceFiles(join(root, "apps/control-plane/src"))) {
@@ -163,7 +157,7 @@ for (const path of sourceFiles(join(root, "apps/control-plane/src"))) {
         || declaration.namedImports.length === 0
         || declaration.namedImports.some((name) => !allowedControlPlaneGitHubHelpers.has(name));
       if (invalid) report(path, "@opentag/github",
-        "Control Plane may import only the two explicitly classified pure GitHub helpers by name");
+        "Control Plane may import only the explicitly classified pure GitHub publication helper by name");
       for (const name of declaration.namedImports) observedControlPlaneGitHubHelpers.add(name);
     }
   }
@@ -179,7 +173,7 @@ for (const path of sourceFiles(join(root, "apps/control-plane/src"))) {
 }
 if ([...allowedControlPlaneGitHubHelpers].some((name) => !observedControlPlaneGitHubHelpers.has(name))) {
   report(join(root, "apps/control-plane/src"), "@opentag/github",
-    "Control Plane GitHub helper allowlist drifted; both classified named helpers must remain explicit");
+    "Control Plane GitHub helper allowlist drifted; the classified publication helper must remain explicit");
 }
 const visited = new Set();
 function inspectControlPlaneGraph(packageDir) {

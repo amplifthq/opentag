@@ -26,7 +26,6 @@ export type SlackAppMentionInput = {
   appId?: string;
   agentId?: string;
   botUserId?: string;
-  callbackUri?: string;
   signatureVerified?: boolean;
   binding: SlackChannelBinding;
 };
@@ -105,7 +104,6 @@ export function normalizeSlackChannelMessage(input: SlackAppMentionInput): OpenT
 const UNKNOWN_WRITE_VERB_PATTERN = /\b(add|append|apply|change|commit|create|delete|edit|fix|modify|open\s+a?\s*pr|pull\s+request|remove|update|write)\b/i;
 const REPO_WRITE_TARGET_PATTERN =
   /\b(repo|repository|code|file|files|branch|commit|diff|patch|readme|pr|pull\s+request|package\.json|pnpm|npm|test|build)\b|(?:^|\s)[./\w-]+\.(?:cjs|css|gitignore|go|html|js|json|jsx|lock|md|mjs|py|rb|rs|sh|toml|ts|tsx|txt|yaml|yml)\b|(?:^|[\s`'"(])(?:[./\w-]+\/)?(?:Dockerfile|Makefile|Procfile|Rakefile|Gemfile|Brewfile|Justfile|Taskfile|\.dockerignore|\.env(?:\.[\w-]+)?|\.gitignore|\.npmrc)(?=$|[\s`'",.):])/i;
-const LINEAR_ISSUE_CREATE_PATTERN = /(?=.*\blinear\b)(?=.*\b(?:issue|task|ticket)\b)(?=.*\b(?:add|create|file|open)\b)/i;
 function repositoryMetadataFromBinding(
   binding: SlackChannelBinding
 ): { repoProvider: string; owner: string; repo: string } | undefined {
@@ -120,7 +118,6 @@ function repositoryMetadataFromBinding(
 function ownerContainerUri(repository: { repoProvider: string; owner: string; repo: string }): string | undefined {
   const id = `${repository.owner}/${repository.repo}`;
   if (repository.repoProvider === "github") return `https://github.com/${id}`;
-  if (repository.repoProvider === "gitlab") return `https://gitlab.com/${id}`;
   return undefined;
 }
 
@@ -148,10 +145,6 @@ function workItemFromBoundSlackThread(input: {
 
 function commandLooksRepoWriteCapable(command: OpenTagCommand): boolean {
   return UNKNOWN_WRITE_VERB_PATTERN.test(command.rawText) && REPO_WRITE_TARGET_PATTERN.test(command.rawText);
-}
-
-function commandLooksLinearIssueCreateCapable(command: OpenTagCommand): boolean {
-  return LINEAR_ISSUE_CREATE_PATTERN.test(command.rawText);
 }
 
 function addPermissionGrant(permissions: PermissionGrant[], grant: PermissionGrant): void {
@@ -189,13 +182,6 @@ function permissionsForCommand(command: OpenTagCommand, hasRepositoryTarget: boo
     addPermissionGrant(permissions, {
       scope: "pr:create",
       reason: "open a pull request for completed code changes"
-    });
-  }
-
-  if (commandLooksLinearIssueCreateCapable(command)) {
-    addPermissionGrant(permissions, {
-      scope: "issue:create",
-      reason: "create a Linear issue after explicit source-thread approval"
     });
   }
 
@@ -316,7 +302,7 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
     permissions: permissionsForCommand(command, repositoryMetadata !== undefined),
     callback: {
       provider: "slack",
-      uri: input.callbackUri ?? "https://slack.com/api/chat.postMessage",
+      uri: "https://slack.com/api/chat.postMessage",
       threadKey
     },
     metadata: {

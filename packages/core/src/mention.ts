@@ -32,8 +32,6 @@ const EXECUTOR_HINTS = new Set<AgentTarget["executorHint"]>(["claude-code", "cod
 const PERMISSION_SCOPES = new Set<PermissionGrant["scope"]>([
   "repo:read",
   "repo:write",
-  "issue:comment",
-  "issue:create",
   "chat:postMessage",
   "reactions:write",
   "pr:create",

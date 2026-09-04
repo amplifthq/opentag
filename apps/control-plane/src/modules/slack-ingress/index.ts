@@ -313,7 +313,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         : { teamId, channelId },
     });
     if (!normalizedEvent) throw new Error("slack_source_context_invalid");
-    return { executionBearingCommentBody: event.text, event: normalizedEvent };
+    return { executionBearingMessageBody: event.text, event: normalizedEvent };
   };
   const resolveRoute = async (routeIdentity: string) => {
     const resolution = await resolveInstallation(input.pool, { routeIdentity });

@@ -46,9 +46,8 @@ export async function classifyAttemptMaterialActionCancellationTruth(
     values?: readonly unknown[]): Promise<{ rows: Row[] }> },
   input: { organizationId: string; runId: string; attemptId: string },
 ): Promise<AttemptCancellationMaterialTruth> {
-  const attempt = await client.query<{ material_start_state: string;
-    fencing_token_digest: string }>(
-    `SELECT material_start_state,fencing_token_digest FROM cp_hosted_attempt
+  const attempt = await client.query<{ material_start_state: string }>(
+    `SELECT material_start_state FROM cp_hosted_attempt
      WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3`,
     [input.organizationId, input.runId, input.attemptId],
   );
@@ -82,16 +81,6 @@ export async function classifyAttemptMaterialActionCancellationTruth(
   if (orphanReceipt.rows[0]) return unknown(orphanReceipt.rows[0].receipt_id);
   if (begins.rows.length === 0 && current.rows.length === 0) {
     if (attemptRow.material_start_state === "open") return { kind: "proven_not_started" };
-    if (attemptRow.material_start_state === "proven_not_started") {
-      const proof = await client.query<{ proof_id: string }>(
-        `SELECT proof_id FROM cp_material_action_non_start_proof
-         WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3
-           AND fencing_token_digest=$4`,
-        [input.organizationId, input.runId, input.attemptId,
-          attemptRow.fencing_token_digest],
-      );
-      if (proof.rows[0]) return { kind: "proven_not_started" };
-    }
     return unknown(`${input.attemptId}:material_start_unknown`);
   }
   const begunActions = new Set(begins.rows.map((row) => row.action_id));
@@ -116,9 +105,8 @@ export async function classifyAttemptMaterialActionTruth(
     values?: readonly unknown[]): Promise<{ rows: Row[] }> },
   input: { organizationId: string; runId: string; attemptId: string },
 ): Promise<AttemptMaterialActionTruth> {
-  const attempt = await client.query<{ material_start_state: string; state: string;
-    fencing_token_digest: string }>(
-    `SELECT material_start_state, state, fencing_token_digest FROM cp_hosted_attempt
+  const attempt = await client.query<{ material_start_state: string; state: string }>(
+    `SELECT material_start_state, state FROM cp_hosted_attempt
      WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
     [input.organizationId, input.runId, input.attemptId],
   );
@@ -151,16 +139,8 @@ export async function classifyAttemptMaterialActionTruth(
     kind: "started_or_ambiguous",
     reconciliationIdentity: `${input.organizationId}:${input.runId}:${input.attemptId}:material_start_unknown`,
   };
-  const proof = await client.query<{ proof_id: string }>(
-    `SELECT proof_id FROM cp_material_action_non_start_proof
-     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-       AND fencing_token_digest = $4`,
-    [input.organizationId, input.runId, input.attemptId, attemptRow.fencing_token_digest],
-  );
-  return proof.rows[0]
-    ? { kind: "proven_not_started" }
-    : { kind: "started_or_ambiguous",
-        reconciliationIdentity: `${input.organizationId}:${input.runId}:${input.attemptId}:material_start_unknown` };
+  return { kind: "started_or_ambiguous",
+    reconciliationIdentity: `${input.organizationId}:${input.runId}:${input.attemptId}:material_start_unknown` };
 }
 type CurrentReceipt = {
   receipt_id: string;
@@ -185,16 +165,6 @@ export type MaterialActionCoordinator = {
     idempotencyKey: string }): Promise<
       { kind: "begun" | "replayed" } | { kind: "stale_fence" | "conflict" }
     >;
-  recordNotStarted(input: {
-    principal: RuntimePrincipal;
-    fencingToken: string;
-    fencingTokenDigest?: string;
-    runId: string;
-    attemptId: string;
-    attemptNumber: number;
-    proofId: string;
-    proofDigest: string;
-  }): Promise<{ kind: "recorded" | "replayed" } | { kind: "stale_fence" | "conflict" }>;
   record(input: {
     principal: RuntimePrincipal;
     fencingToken: string;
@@ -271,50 +241,6 @@ const publicationCapabilities = new Set<string>(
   HOSTED_PUBLICATION_ACTION_CAPABILITIES_V1,
 );
 
-async function closeProvenNotStartedAuthority(
-  client: { query(text: string, values?: readonly unknown[]): Promise<unknown> },
-  command: { organizationId: string; runId: string; attemptId: string;
-    attemptNumber: number; fencingTokenDigest: string },
-  recordedAt: Date,
-) {
-  await client.query(
-    `UPDATE cp_hosted_attempt SET material_start_state = 'proven_not_started',
-       state = 'expired', lease_expires_at = LEAST(lease_expires_at, $6),
-       blocked_permission_request_id = NULL, blocked_action_descriptor_digest = NULL,
-       blocked_policy_snapshot_digest = NULL, updated_at = $6
-     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-       AND attempt_number = $4 AND fencing_token_digest = $5
-       AND material_start_state IN ('open','proven_not_started')`,
-    [command.organizationId, command.runId, command.attemptId,
-      command.attemptNumber, command.fencingTokenDigest, recordedAt],
-  );
-  await client.query(
-    `UPDATE cp_hosted_run SET state = 'assigned', updated_at = $4
-     WHERE organization_id = $1 AND run_id = $2 AND current_attempt_number = $3
-       AND terminal_kind IS NULL
-       AND EXISTS (SELECT 1 FROM cp_hosted_attempt attempt
-         WHERE attempt.organization_id = cp_hosted_run.organization_id
-           AND attempt.run_id = cp_hosted_run.run_id
-           AND attempt.attempt_number = cp_hosted_run.current_attempt_number
-           AND attempt.attempt_id = $5
-           AND attempt.material_start_state = 'proven_not_started')`,
-    [command.organizationId, command.runId, command.attemptNumber,
-      recordedAt, command.attemptId],
-  );
-  await client.query(
-    `UPDATE cp_source_content_read_grant SET revoked_at = COALESCE(revoked_at, $4)
-     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-       AND consumed_at IS NULL`,
-    [command.organizationId, command.runId, command.attemptId, recordedAt],
-  );
-  await client.query(
-    `UPDATE cp_permission_request SET state = 'revoked', updated_at = $4
-     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-       AND state = 'waiting'`,
-    [command.organizationId, command.runId, command.attemptId, recordedAt],
-  );
-}
-
 function exactPredecessor(
   receipt: MaterialActionReceiptEnvelopeV1,
   current: CurrentReceipt | undefined,
@@ -330,87 +256,6 @@ export function createMaterialActionCoordinator(input: {
   clock: Clock;
 }): MaterialActionCoordinator {
   return {
-    async recordNotStarted(command) {
-      if (!command.proofId || !/^sha256:[a-f0-9]{64}$/u.test(command.proofDigest)) {
-        return { kind: "conflict" };
-      }
-      const fencingTokenDigest = await computeMaterialActionFencingTokenDigestV1(
-        command.fencingToken,
-      );
-      if (command.fencingTokenDigest !== undefined
-        && command.fencingTokenDigest !== fencingTokenDigest) return { kind: "conflict" };
-      try {
-        return await withPostgresTransaction(input.pool, async (client) => {
-        const existing = await client.query<{ fencing_token_digest: string;
-          proof_id: string; proof_digest: string; material_start_state: string;
-          has_evidence: boolean }>(
-          `SELECT proof.fencing_token_digest, proof.proof_id, proof.proof_digest,
-                  attempt.material_start_state,
-                  (EXISTS (SELECT 1 FROM cp_material_action_receipt receipt
-                    WHERE receipt.organization_id = proof.organization_id
-                      AND receipt.run_id = proof.run_id AND receipt.attempt_id = proof.attempt_id)
-                   OR EXISTS (SELECT 1 FROM cp_material_action_begin_intent begin_intent
-                    WHERE begin_intent.organization_id = proof.organization_id
-                      AND begin_intent.run_id = proof.run_id
-                      AND begin_intent.attempt_id = proof.attempt_id)) AS has_evidence
-           FROM cp_material_action_non_start_proof proof
-           JOIN cp_hosted_attempt attempt
-             ON attempt.organization_id = proof.organization_id
-            AND attempt.run_id = proof.run_id AND attempt.attempt_id = proof.attempt_id
-           WHERE proof.organization_id = $1 AND proof.run_id = $2 AND proof.attempt_id = $3
-           FOR UPDATE OF attempt`,
-          [command.principal.organizationId, command.runId, command.attemptId],
-        );
-        if (existing.rows[0]) {
-          const replay = existing.rows[0];
-          if (replay.fencing_token_digest !== fencingTokenDigest
-            || replay.proof_id !== command.proofId || replay.proof_digest !== command.proofDigest
-            || replay.has_evidence || replay.material_start_state === "started_or_ambiguous") {
-            return { kind: "conflict" as const };
-          }
-          await closeProvenNotStartedAuthority(client, {
-            organizationId: command.principal.organizationId,
-            runId: command.runId,
-            attemptId: command.attemptId,
-            attemptNumber: command.attemptNumber,
-            fencingTokenDigest,
-          }, input.clock.now());
-          return { kind: "replayed" as const };
-        }
-        if (!(await currentAttemptMatches(client, {
-          principal: command.principal, runId: command.runId,
-          attemptId: command.attemptId, attemptNumber: command.attemptNumber,
-          fencingTokenDigest, now: input.clock.now(),
-          materialStartState: "open",
-          allowNeedsApproval: true,
-        }))) return { kind: "stale_fence" as const };
-        await client.query(
-          `INSERT INTO cp_material_action_non_start_proof(
-             organization_id, run_id, attempt_id, attempt_number,
-             fencing_token_digest, proof_id, proof_digest, recorded_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-          [command.principal.organizationId, command.runId, command.attemptId,
-            command.attemptNumber, fencingTokenDigest, command.proofId,
-            command.proofDigest, input.clock.now()],
-        );
-        await closeProvenNotStartedAuthority(client, {
-          organizationId: command.principal.organizationId,
-          runId: command.runId,
-          attemptId: command.attemptId,
-          attemptNumber: command.attemptNumber,
-          fencingTokenDigest,
-        }, input.clock.now());
-          return { kind: "recorded" as const };
-        });
-      } catch (error) {
-        if (error instanceof Error
-          && error.message.includes("material_non_start_proof_conflict")) {
-          return { kind: "stale_fence" as const };
-        }
-        throw error;
-      }
-    },
-
     async begin(command) {
       if (command.actionDescriptorDigest
         !== await computeControlPayloadDigestV1(command.actionDescriptor)
@@ -655,12 +500,10 @@ export function createMaterialActionCoordinator(input: {
               }
             : { kind: "conflict" as const };
         }
-        const authority = await client.query<{ material_start_state: string;
-          credential_id: string; fencing_token_digest: string;
+        const authority = await client.query<{ credential_id: string; fencing_token_digest: string;
           current_attempt_number: number; terminal_kind: string | null;
           outcome_state: string | null; reconciliation_identity: string | null }>(
-          `SELECT attempt.material_start_state, attempt.credential_id,
-                  attempt.fencing_token_digest,run.current_attempt_number,
+          `SELECT attempt.credential_id, attempt.fencing_token_digest,run.current_attempt_number,
                   run.terminal_kind,run.outcome_state,run.reconciliation_identity
            FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
              ON attempt.organization_id = run.organization_id
@@ -689,10 +532,7 @@ export function createMaterialActionCoordinator(input: {
         const lateAfterCancellation = cancellationTruth?.kind === "outcome_unknown"
           && cancellationTruth.reconciliationIdentity
             === attemptAuthority.reconciliation_identity;
-        const lateAfterProof = attemptAuthority.terminal_kind === null
-          && attemptAuthority.material_start_state === "proven_not_started";
-        if (!lateAfterProof) {
-          const begin = await client.query<{ target_fingerprint: string }>(
+        const begin = await client.query<{ target_fingerprint: string }>(
             `SELECT target_fingerprint FROM cp_material_action_begin_intent
              WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
                AND action_id = $4 AND fencing_token_digest = $5
@@ -704,17 +544,16 @@ export function createMaterialActionCoordinator(input: {
               receipt.payload.actionDescriptor, receipt.payload.actionDescriptorDigest,
               receipt.payload.idempotencyKey],
           );
-          if (begin.rows.length !== 1) return { kind: "stale_fence" as const };
-          if (!lateAfterCancellation && !(await currentAttemptMatches(client, {
+        if (begin.rows.length !== 1) return { kind: "stale_fence" as const };
+        if (!lateAfterCancellation && !(await currentAttemptMatches(client, {
               principal: command.principal, runId: receipt.runId,
               attemptId: receipt.attempt.attemptId,
               attemptNumber: receipt.attempt.attemptNumber,
               fencingTokenDigest: receipt.attempt.fencingTokenDigest,
               now: input.clock.now(), materialStartState: "material_allowed",
-            }))) return { kind: "stale_fence" as const };
-          if (begin.rows[0]?.target_fingerprint !== receipt.payload.targetFingerprint) {
-            return { kind: "conflict" as const };
-          }
+          }))) return { kind: "stale_fence" as const };
+        if (begin.rows[0]?.target_fingerprint !== receipt.payload.targetFingerprint) {
+          return { kind: "conflict" as const };
         }
 
         const currentResult = await client.query(
@@ -758,25 +597,6 @@ export function createMaterialActionCoordinator(input: {
             createdAt,
           ],
         );
-        if (lateAfterProof) {
-          const reconciliationIdentity = `${command.principal.organizationId}:${receipt.runId}:${receipt.receiptId}:late_material_evidence`;
-          await client.query(
-            `UPDATE cp_hosted_attempt SET material_start_state = 'started_or_ambiguous',
-               state = 'interrupted', updated_at = $4
-             WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
-            [command.principal.organizationId, receipt.runId,
-              receipt.attempt.attemptId, createdAt],
-          );
-          await client.query(
-            `UPDATE cp_hosted_run SET state = 'interrupted', terminal_kind = 'interrupted',
-               terminal_reason = 'late_material_evidence_after_non_start_proof',
-               outcome_state = 'outcome_unknown', reconciliation_identity = $3,
-               terminal_receipt = $4::jsonb, updated_at = $5
-             WHERE organization_id = $1 AND run_id = $2 AND terminal_kind IS NULL`,
-            [command.principal.organizationId, receipt.runId, reconciliationIdentity,
-              JSON.stringify(receipt), createdAt],
-          );
-        }
         await client.query(
           `INSERT INTO cp_material_action_current(
              organization_id, run_id, attempt_id, attempt_number, action_id,

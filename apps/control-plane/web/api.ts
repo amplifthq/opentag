@@ -24,6 +24,53 @@ export type ConsoleOverview = {
   pendingJobCount: number;
 };
 
+export type ConsolePresenceState =
+  | "setup_required"
+  | "offline"
+  | "available"
+  | "queued"
+  | "working"
+  | "needs_attention";
+
+export type ConsoleAgentPresence = {
+  presenceId: string;
+  state: ConsolePresenceState;
+  reason: string;
+  slack: {
+    installationId: string;
+    bindingId: string;
+    teamId: string;
+    channelId: string;
+    appId: string;
+    botUserId: string;
+  };
+  projectTarget: {
+    projectTargetId: string;
+    provider: string;
+    owner: string;
+    repo: string;
+    defaultExecutor: string;
+  } | null;
+  runner: {
+    runnerId: string;
+    displayName: string | null;
+    readinessObservedAt: string | null;
+    readinessExpiresAt: string | null;
+  } | null;
+  activeRun: {
+    runId: string;
+    state: string;
+    outcomeState: string | null;
+    updatedAt: string;
+  } | null;
+};
+
+export type ConsolePresence = {
+  state: ConsolePresenceState;
+  reason: string;
+  agents: ConsoleAgentPresence[];
+};
+
 export type ConsoleRunner = {
   runnerId: string;
   displayName: string | null;
@@ -84,20 +131,6 @@ export type ConsoleProjectTarget = {
   repo: string;
   defaultExecutor: string;
   defaultBranch: string | null;
-  version: number;
-  updatedAt: string;
-};
-
-export type ConsoleGithubBinding = {
-  bindingId: string;
-  providerRepositoryId: string;
-  owner: string;
-  repo: string;
-  runnerId: string;
-  projectTargetId: string;
-  secretVersion: string;
-  allowedActorIds: string[];
-  enabled: boolean;
   updatedAt: string;
 };
 
@@ -154,6 +187,9 @@ export function createConsoleApi(fetchImplementation: FetchImplementation = fetc
     overview: async () =>
       (await request<{ overview: ConsoleOverview }>("/api/console/overview"))
         .overview,
+    presence: async () =>
+      (await request<{ presence: ConsolePresence }>("/api/console/presence"))
+        .presence,
     runners: async () =>
       (await request<{ runners: ConsoleRunner[] }>("/api/console/runners"))
         .runners,
@@ -168,43 +204,8 @@ export function createConsoleApi(fetchImplementation: FetchImplementation = fetc
     }>("/api/console/evidence"),
     projectTargets: () =>
       request<{
-        bindings: ConsoleGithubBinding[];
         targets: ConsoleProjectTarget[];
       }>("/api/console/project-targets"),
-    createProjectTarget: (input: {
-      projectTargetId: string;
-      runnerId: string;
-      bindingDigest: string;
-      provider: string;
-      owner: string;
-      repo: string;
-      defaultExecutor: string;
-      defaultBranch: string | null;
-      version: number;
-    }) => request<{
-      outcome: "created" | "updated";
-      projectTargetId: string;
-    }>("/api/console/project-targets", {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
-    createGithubBinding: (input: {
-      bindingId: string;
-      providerRepositoryId: string;
-      owner: string;
-      repo: string;
-      runnerId: string;
-      projectTargetId: string;
-      allowedActorIds: string[];
-      enabled: boolean;
-    }) => request<{
-      kind: "created" | "replayed";
-      bindingId: string;
-      secret?: string;
-    }>("/api/console/github-bindings", {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
     apiKeys: async () =>
       (await request<{ apiKeys: ConsoleApiKey[] }>("/api/console/api-keys"))
         .apiKeys,

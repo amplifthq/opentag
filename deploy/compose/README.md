@@ -39,10 +39,11 @@ in the deployment runbook. Its availability declaration is always
    `OPENTAG_SLACK_PROJECT_TARGET_ID` to the Project Target ID the paired Runner
    will register.
 5. Run `docker compose --env-file .env config` and inspect the rendered secret
-   mounts. For an upgrade, stop the old `control-plane` and `jobs` services,
-   run the one-shot `migrate` service, then start the reviewed image. Do not
-   migrate while an old jobs worker still owns a live projection lease. For a
-   new installation, run `docker compose --env-file .env up --build`.
+   mounts. This Agent Presence reset requires a new empty PostgreSQL database
+   or Compose volume; it does not upgrade a pre-reset migration ledger. Back up
+   any existing recovery set, provision the new database explicitly, then run
+   `docker compose --env-file .env up --build`. OpenTag never deletes the old
+   volume for you.
 6. `bootstrap-slack` creates the generic installation, binding, and Slack
    projection in one transaction. Re-running the exact configuration is a
    recorded replay. Partial pre-existing state or any changed identity, role,
@@ -51,10 +52,12 @@ in the deployment runbook. Its availability declaration is always
 7. Wait for `control-plane` to become healthy, then open the configured
    `OPENTAG_PUBLIC_URL`.
 8. Sign in with the bootstrapped owner and pair a local OpenTag runner with
-   `OPENTAG_BOOTSTRAP_PAIRING_TOKEN`. Register the Project Target using the
-   exact ID from `OPENTAG_SLACK_PROJECT_TARGET_ID`; mentions received before
-   that target and Runner readiness exist settle as setup-required or
-   temporarily unavailable rather than becoming executable work.
+   `OPENTAG_BOOTSTRAP_PAIRING_TOKEN`, passing the value configured as
+   `OPENTAG_SLACK_PROJECT_TARGET_ID` to CLI `--project-target-id`. Setup/pair
+   registers the target through the runtime credential and verifies exact
+   Control Context readback. Mentions received before that target and Runner
+   readiness exist settle as setup-required or temporarily unavailable rather
+   than becoming executable work.
 
 Useful checks:
 
@@ -66,7 +69,7 @@ docker compose --env-file .env logs --no-log-prefix migrate bootstrap-admin boot
 ```
 
 From the repository root, the bounded end-to-end smoke validates the public
-Control V1 client, signed GitHub ingress, permission and material receipts,
+Control V1 client, signed Slack ingress, permission and material receipts,
 canonical cancellation, credential reprovisioning, and console projections
 against the running Compose stack:
 
@@ -79,7 +82,7 @@ corepack pnpm --filter @opentag/cli exec tsx \
 
 The smoke creates uniquely named test records in the configured database. It
 prints only identifiers and bounded outcomes, never the issued credentials or
-webhook secret.
+Slack signing secret.
 
 For the real browser journey, install Chromium once and run the isolated E2E
 from the repository root:
@@ -98,7 +101,7 @@ file. See the checked-in journey catalog at
 
 The default profile is intentionally PostgreSQL-only. It does not require
 Cloudflare, Redis, object storage, a broker, or a platform scheduler. Put a TLS
-reverse proxy in front before exposing the service or GitHub webhook publicly.
+reverse proxy in front before exposing the service or Slack webhook publicly.
 
 Treat the PostgreSQL backup, the exact KEK file, and key version `v1` as one
 recovery set. Losing PostgreSQL loses the authority and ciphertext records;
@@ -114,7 +117,7 @@ The application uses the same checked-in migrations and image commands in
 self-hosted and future managed installations. This profile does not claim a
 managed environment exists. See the full
 [deployment runbook](../../docs/control-plane-deployment.md) for TLS, image
-pinning, pool sizing, upgrade, backup/restore, graceful shutdown, and recovery.
+pinning, pool sizing, reset boundaries, backup/restore, graceful shutdown, and recovery.
 
 The default `OPENTAG_LOGIN_NETWORK_THROTTLE_MODE=direct-peer` is appropriate
 when the Node service observes distinct client peers. If a reverse proxy makes

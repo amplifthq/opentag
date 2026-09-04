@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased — Agent Presence reset
+
+This is an intentionally breaking pre-1.0 reset. OpenTag now has one product
+path: a persistent Slack teammate backed by the self-hosted Control Plane, one
+paired user-controlled Runner, an ACP coding agent, and optional GitHub draft-PR
+publication and exact-head evidence.
+
+### Added
+
+- A read-only Agent Presence projection derived from the active Slack binding,
+  Project Target, fresh Runner readiness, and the binding's canonical Run.
+- A teammate-first Control Plane home that reports `available`, `queued`,
+  `working`, `needs_attention`, `offline`, or `setup_required` without creating
+  another mutable lifecycle.
+- A fresh-only paired Runner SQLite schema that creates only current execution,
+  lifecycle, readiness, publication, and source-lineage authority. Earlier
+  unmarked databases are rejected without being altered.
+
+### Removed
+
+- GitLab, Linear, Lark/Feishu, Telegram, Discord, and Microsoft Teams products,
+  packages, configuration, tests, guides, and setup surfaces.
+- GitHub as a Source App, including Probot and Control Plane webhook ingress;
+  GitHub remains a Project Target and publication/evidence provider.
+- The `local_direct` runtime and its embedded SQLite dispatcher, local provider
+  listeners, app wrappers, port probes, and fallback configuration.
+- Software-factory recipes, workstreams, admission batches, automatic
+  continuation, and their client/store/CLI contracts.
+- Completion/callback projection receipts with no Control Plane receiver,
+  external API-key approval transports, and the unused Runner cancellation
+  transport. Slack interactions remain the human authority surface.
+- Hosted claim v1 containment, Target pseudo-versioning, target mutation
+  operation IDs without replay semantics, setup defaults from unreachable old
+  configs, and the duplicate runtime/dispatcher URL configuration.
+- Historical migration proofs, superseded implementation plans, stale examples,
+  and unused media that described paths no longer present in the product.
+
+### Changed
+
+- Slack durable receipt no longer claims “Working on it.” before a paired Runner
+  starts a fenced Attempt.
+- `working` now requires a current, unexpired Attempt lease under the Runner's
+  current credential; terminal `outcome_unknown` remains visible as
+  `needs_attention`.
+- One organization owns exactly one paired Runner. A Runner may still register
+  multiple GitHub Project Targets.
+- The only persisted endpoint is `daemon.relayUrl`; the client option is
+  `controlPlaneUrl`.
+- Pre-reset configuration and APIs are rejected rather than translated through
+  aliases, fallback fields, compatibility endpoints, or dual-write migrations.
+
+Earlier entries below describe historical releases and are not a statement of
+the current supported surface.
+
 ## v0.11.0 - 2026-08-17
 
 OpenTag 0.11.0 fixes a fail-open edge in zero-config governed completion. A

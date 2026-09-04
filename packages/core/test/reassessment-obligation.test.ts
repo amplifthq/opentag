@@ -30,8 +30,7 @@ describe("ReassessmentObligationSchema", () => {
     "material_action_receipt_recorded",
     "material_action_reconciled",
     "human_escalation_changed",
-    "completion_waiver_changed",
-    "continuation_not_before"
+    "completion_waiver_changed"
   ] as const)("accepts the supported source kind %s", (sourceKind) => {
     expect(ReassessmentObligationSourceKindSchema.parse(sourceKind)).toBe(sourceKind);
     expect(ReassessmentObligationSchema.parse({ ...pendingObligation(), sourceKind })).toMatchObject({ sourceKind });
@@ -92,14 +91,6 @@ describe("ReassessmentObligationSchema", () => {
     })).toThrow(/assessment-backed satisfaction/u);
   });
 
-  it("allows a terminal continuation outcome without fabricating an assessment id", () => {
-    expect(ReassessmentObligationSchema.parse({
-      ...pendingObligation(),
-      state: "satisfied",
-      lastReasonCode: "continuation_terminal"
-    })).not.toHaveProperty("satisfiedAssessmentId");
-  });
-
   it("constrains reasons to the transition that persisted them", () => {
     expect(ReassessmentObligationSchema.parse({
       ...pendingObligation(),
@@ -114,7 +105,7 @@ describe("ReassessmentObligationSchema", () => {
     expect(() => ReassessmentObligationSchema.parse({
       ...pendingObligation(),
       state: "blocked",
-      lastReasonCode: "continuation_dispatched"
+      lastReasonCode: "reassessment_failed"
     })).toThrow(/blocked obligation reason/u);
   });
 

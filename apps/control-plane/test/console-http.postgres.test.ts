@@ -46,7 +46,7 @@ describe.skipIf(!TEST_DATABASE_URL)("same-origin console HTTP identity", () => {
       idFactory: () => "credential_console_http",
       tokenFactory: () => "runtime_console_http_secret",
     });
-    await runnerDirectory.register({
+    const registered = await runnerDirectory.register({
       organizationId: "org_console_http",
       organizationName: "Console HTTP",
       request: {
@@ -59,6 +59,9 @@ describe.skipIf(!TEST_DATABASE_URL)("same-origin console HTTP identity", () => {
         capabilities: ["relay.readiness.v1"],
       },
     });
+    if (registered.kind !== "created") throw new Error("runner registration failed");
+    const authenticated = await runnerDirectory.authenticate(registered.response.runnerToken);
+    if (authenticated.kind !== "authenticated") throw new Error("runner authentication failed");
     const application = createControlPlaneApplication({
       capabilities: {
         schemaVersion: 1,
@@ -73,7 +76,6 @@ describe.skipIf(!TEST_DATABASE_URL)("same-origin console HTTP identity", () => {
         identity,
         reads: createConsoleReadModel({ pool: fixture.pool }),
         publicOrigin: "http://control.test",
-        targets: runnerDirectory,
       },
     });
 
@@ -129,13 +131,56 @@ describe.skipIf(!TEST_DATABASE_URL)("same-origin console HTTP identity", () => {
       runners: [{ runnerId: "runner_console_http" }],
     });
 
+    const presence = await application.fetch(
+      new Request("http://control.test/api/console/presence", {
+        headers: { cookie: cookie?.split(";")[0] ?? "" },
+      }),
+    );
+    expect(presence.status).toBe(200);
+    expect(await presence.json()).toEqual({
+      presence: {
+        state: "setup_required",
+        reason: "No active Slack installation and binding are configured.",
+        agents: [],
+      },
+    });
+
     const targets = await application.fetch(
       new Request("http://control.test/api/console/project-targets", {
         headers: { cookie: cookie?.split(";")[0] ?? "" },
       }),
     );
     expect(targets.status).toBe(200);
-    expect(await targets.json()).toEqual({ bindings: [], targets: [] });
+    expect(await targets.json()).toEqual({ targets: [] });
+
+    const slackBindingDigest = `sha256:${"a".repeat(64)}`;
+    const installedAt = new Date("2026-08-15T11:00:00.000Z");
+    await fixture.pool.query(
+      `INSERT INTO cp_source_app_installation(
+         organization_id,installation_id,source_app_id,app_instance_id,binding_digest,
+         credential_generation,credential_generation_digest,state,created_at,updated_at)
+       VALUES('org_console_http','installation_console_http','slack','A_CONSOLE',$1,1,$2,
+         'active',$3,$3)`,
+      [slackBindingDigest, `sha256:${"b".repeat(64)}`, installedAt],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_source_binding(
+         organization_id,binding_id,installation_id,binding_digest,state,created_at,updated_at)
+       VALUES('org_console_http','binding_console_http','installation_console_http',$1,
+         'active',$2,$2)`,
+      [slackBindingDigest, installedAt],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_slack_installation(
+         organization_id,installation_id,binding_id,project_target_id,publication_mode,
+         team_id,app_id,channel_id,bot_user_id,signing_secret_ref,member_user_ids,
+         operator_user_ids,admin_user_ids,bot_token_ref,route_identity,created_at,updated_at)
+       VALUES('org_console_http','installation_console_http','binding_console_http',
+         'target_console_http','proposal_only','T_CONSOLE','A_CONSOLE','C_CONSOLE',
+         'U_APP','env:SLACK_SIGNING_SECRET',ARRAY['U1'],ARRAY['U1'],ARRAY['U1'],
+         'env:SLACK_BOT_TOKEN','route_console_http',$1,$1)`,
+      [installedAt],
+    );
 
     const evidence = await application.fetch(
       new Request("http://control.test/api/console/evidence", {
@@ -148,28 +193,29 @@ describe.skipIf(!TEST_DATABASE_URL)("same-origin console HTTP identity", () => {
       permissions: [],
     });
 
-    const createdTarget = await application.fetch(
-      new Request("http://control.test/api/console/project-targets", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          cookie: cookie?.split(";")[0] ?? "",
-          origin: "http://control.test",
+    const target = {
+      projectTargetId: "target_console_http",
+      provider: "github" as const,
+      owner: "amplifthq",
+      repo: "opentag",
+      defaultExecutor: "codex",
+      defaultBranch: "main",
+    };
+    await expect(runnerDirectory.upsertProjectTarget({
+      principal: authenticated.principal,
+      request: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        requiredCapabilities: ["relay.repository-binding.v1"],
+        requestId: "request_target_console_http",
+        expectedAuthority: {
+          credentialId: authenticated.principal.credentialId,
+          registrationGeneration: authenticated.principal.registrationGeneration,
+          credentialGeneration: authenticated.principal.credentialGeneration,
         },
-        body: JSON.stringify({
-          projectTargetId: "target_console_http",
-          runnerId: "runner_console_http",
-          bindingDigest: `sha256:${"a".repeat(64)}`,
-          provider: "github",
-          owner: "amplifthq",
-          repo: "opentag",
-          defaultExecutor: "codex",
-          defaultBranch: "main",
-          version: 1,
-        }),
-      }),
-    );
-    expect(createdTarget.status).toBe(201);
+        target,
+      },
+    })).resolves.toMatchObject({ kind: "upserted" });
 
     const targetsAfterCreate = await application.fetch(
       new Request("http://control.test/api/console/project-targets", {

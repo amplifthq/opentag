@@ -1,7 +1,7 @@
 {
   "name": "@opentag/slack",
   "version": "0.11.0",
-  "description": "Slack app mention normalization and callback helpers for OpenTag.",
+  "description": "Slack Source App, signature, presentation, and delivery helpers for OpenTag.",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -25,9 +25,9 @@
   "keywords": [
     "opentag",
     "slack",
-    "events",
+    "source-app",
     "agents",
-    "webhooks"
+    "delivery"
   ],
   "license": "MIT",
   "scripts": {
@@ -35,16 +35,11 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@hono/node-server": "^2.0.11",
-    "@opentag/client": "workspace:*",
     "@opentag/core": "workspace:*",
     "@opentag/delivery-contract": "workspace:*",
-    "@opentag/source-app-runtime": "workspace:*",
-    "hono": "^4.6.15",
-    "ws": "^8.21.0"
+    "@opentag/source-app-runtime": "workspace:*"
   },
   "devDependencies": {
-    "@types/ws": "^8.18.1",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3"
   }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { observeDraftPullRequest, runPublicationControlV1Iteration } from "../src/control-v1.js";
-import { executePublicationControlV1, executePublicationOperation } from "../src/pr.js";
+import { executePublicationControlV1 } from "../src/pr.js";
 
 const capability = {
   schemaVersion: 1 as const, protocolVersion: "1.0" as const,
@@ -287,57 +287,6 @@ describe("publication Control V1 local execution", () => {
     expect(push).toHaveBeenCalledTimes(1);
     expect(createDraftPullRequest).toHaveBeenCalledTimes(1);
     expect(complete).toHaveBeenCalledTimes(1);
-  });
-
-  it("durably begins before the local provider call and records the receipt before returning", async () => {
-    const order: string[] = [];
-    const result = await executePublicationOperation({ capability,
-      localAuthority: { organizationId: "org_1", runId: "run_1", attemptId: "attempt_1",
-        attemptNumber: 1, epoch: 1, fencingTokenDigest: capability.fencingTokenDigest,
-        candidateId: "candidate_1", candidateDigest: capability.candidateDigest,
-        runnerId: "runner_1", runnerGeneration: 3, now: "2026-08-10T00:00:30.000Z" },
-      credential: { githubToken: "ghs_never_transport" },
-      begin: async () => { order.push("begin"); return { kind: "begun" }; },
-      createDraftPullRequest: async () => { order.push("provider"); return {
-        kind: "present", pullRequestNumber: 7,
-        pullRequestUrl: "https://github.com/acme/widget/pull/7",
-        headSha: "a".repeat(40), draft: true,
-      }; },
-      record: async (receipt) => { order.push("record"); return receipt; },
-    });
-    expect(order).toEqual(["begin", "provider", "record"]);
-    expect(result.outcome).toBe("succeeded");
-    expect(JSON.stringify(result)).not.toContain("ghs_never_transport");
-  });
-
-  it.each([
-    ["candidateDigest", `sha256:${"3".repeat(64)}`], ["runnerGeneration", 4],
-    ["attemptId", "attempt_2"], ["fencingTokenDigest", `sha256:${"4".repeat(64)}`],
-  ] as const)("rejects mismatched exact %s before begin", async (key, value) => {
-    const begin = vi.fn();
-    await expect(executePublicationOperation({ capability,
-      localAuthority: { organizationId: "org_1", runId: "run_1", attemptId: "attempt_1",
-        attemptNumber: 1, epoch: 1, fencingTokenDigest: capability.fencingTokenDigest,
-        candidateId: "candidate_1", candidateDigest: capability.candidateDigest,
-        runnerId: "runner_1", runnerGeneration: 3, now: "2026-08-10T00:00:30.000Z",
-        [key]: value }, credential: { githubToken: "secret" }, begin,
-      createDraftPullRequest: vi.fn(), record: vi.fn(),
-    })).rejects.toThrow("publication_capability_identity_mismatch");
-    expect(begin).not.toHaveBeenCalled();
-  });
-
-  it("keeps an ambiguous operation outcome_unknown without a blind retry", async () => {
-    const provider = vi.fn(async () => ({ kind: "ambiguous" as const }));
-    const receipt = await executePublicationOperation({ capability,
-      localAuthority: { organizationId: "org_1", runId: "run_1", attemptId: "attempt_1",
-        attemptNumber: 1, epoch: 1, fencingTokenDigest: capability.fencingTokenDigest,
-        candidateId: "candidate_1", candidateDigest: capability.candidateDigest,
-        runnerId: "runner_1", runnerGeneration: 3, now: "2026-08-10T00:00:30.000Z" },
-      credential: { githubToken: "secret" }, begin: async () => ({ kind: "begun" }),
-      createDraftPullRequest: provider, record: async (value) => value,
-    });
-    expect(receipt.outcome).toBe("outcome_unknown");
-    expect(provider).toHaveBeenCalledTimes(1);
   });
 
   it("uses the Control V1 begin → local push → receipt order without putting its token in a relay payload", async () => {

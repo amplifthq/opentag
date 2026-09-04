@@ -10,141 +10,163 @@
 
 # OpenTag
 
-**提及任意编码智能体。拿到证据，而不是承诺。**
+**常驻 Slack、运行在你自己电脑上的 AI teammate。**
 
-把 OpenTag relay 部署在你选择的基础设施上，配对一个本地 Runner，就能把 Slack
-工程讨论串变成可治理、可核验的本地智能体工作。代码仓库、编码智能体凭据、worktree
-与实际执行始终留在你控制的 Runner 上。
+[![CI](https://github.com/amplifthq/opentag/actions/workflows/ci.yml/badge.svg)](https://github.com/amplifthq/opentag/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 
-OpenTag 是自托管协调边界，不是托管编码服务。它接收讨论串请求，记录受治理的 Run
-和 Attempt 状态，配对明确的 Runner，并把已核验状态投影回原 Slack 讨论串。Provider
-delivery 是独立证据，不能取代 canonical Run 或 Attempt 的事实来源。
+OpenTag 让工程频道拥有一个长期可找到的 teammate。自托管 Control Plane 保持在线，
+即使配对电脑暂时离线，也能接收 Slack 请求并明确显示等待状态。Runner 就绪后，它通过
+ACP 在本地 checkout 调用你的 coding agent，再把状态、决策和证据送回同一条讨论串。
 
-## 工作路径
+源代码、本地 checkout 与 worktree、coding-agent 登录态/会话，以及 GitHub 凭据都留在
+Runner。Slack 凭据和 Control Plane 自身的服务凭据留在 Control Plane。Control Plane
+保存的是协调事实，而不是开发电脑的副本。
 
-1. 工程师在 Slack 工程讨论串中提及已配置的 OpenTag App。
-2. 自托管 Control Plane 准入唯一的 **Run**，记录源讨论串、Project Target、授权与证据谱系。
-3. 已配对本地 Runner 领取带 fence 的 **Attempt**，以本地 checkout 运行配置的 ACP executor。
-4. Runner 回报有边界的证据；OpenTag 在原讨论串呈现状态、需关注状态或审批请求。
-5. 创建 draft PR 等实质性 provider 动作必须满足精确策略与单独显式审批；智能体报告本身不会执行真实 provider 动作。
+## 快速开始
 
-## 如实说明运行模式
+### 1. 启动自托管 presence
 
-| 模式 | 适用场景 | 可用性说明 |
-| --- | --- | --- |
-| `local_direct` | 试用、单机使用 | `offlineSafe=false`。只有该机器和本地 OpenTag 进程在线时才能工作。 |
-| `paired_relay` | 自托管团队配置 | 独立运行的 relay 接收 Slack ingress，一个出站本地 Runner 执行已批准工作；精确安装认证另行进行。 |
-
-参考单节点 Compose 配置只有在确定性与安装认证 gate 均通过后才可以显示
-`Runner-offline-safe`。它始终是 `Relay-not-HA`；本仓库不作高可用声明。
-
-## 快速开始：自托管 paired relay
-
-团队配置使用 Slack Events API 与 Slack interactivity 的公网 HTTPS ingress、GitHub
-Project Target、一个已配对本地 Runner 和 ACP executor。Socket Mode 仍适合
-`local_direct` 本地开发，但**不属于**已认证的 paired relay ingress。
-
-### 1. 启动你自行运维的 relay
-
-需要 Docker Compose、Slack 可访问的公网 HTTPS origin，以及与配对 Runner 机器不同
-的 relay 主机。
+需要 Docker Compose、内置 Compose 配置所使用的 PostgreSQL，以及 Slack 可访问的公网
+HTTPS origin。
 
 ```bash
-cd deploy/compose
+git clone https://github.com/amplifthq/opentag.git
+cd opentag/deploy/compose
 cp .env.example .env
-```
-
-替换 `.env` 的每一个占位值。另建 mode `0600` 的 relay-content KEK 主机文件，内容必须
-是恰好 32 个原始字节、64 个十六进制字符，或能解码为 32 字节的 base64。把路径写入
-`OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE`。不要把 KEK 写进 `.env`：Compose 会将其挂载为
-`/run/secrets/opentag_relay_content_kek`，key version 固定为 `v1`。
-
-先渲染配置，再启动：
-
-```bash
-docker compose --env-file .env config
 docker compose --env-file .env up --build
 ```
 
-等待 `control-plane` 健康后使用 `OPENTAG_PUBLIC_URL`。恢复、readiness 和安装认证边界见
-[Compose 指南](deploy/compose/README.md) 与 [部署运行手册](docs/control-plane-deployment.md)。
+执行最后一条命令前，替换 `.env` 中的全部占位值，并按
+[Compose 指南](deploy/compose/README.md) 创建 Slack 与 relay-content 的文件型 secret。
 
-### 2. 配置 Slack Source App
-
-为 workspace 和私有工程 channel 创建一个 Slack App。把 **Event Subscriptions** 与
-**Interactivity & Shortcuts** 都指向 relay 的公网 HTTPS Slack endpoint，并在自托管安装
-中配置 signing secret 和 bot token。订阅文档规定的 app-mention 与 private-channel 事件，
-然后将 App 邀请进 channel。
-
-请按 [Slack 指南](docs/platforms/slack.zh-CN.md) 配置精确事件、权限、URL 和验签流程。
-不要将 Socket Mode 配置为认证后的 paired relay ingress。
-
-### 3. 配对一个本地 Runner 与 Project Target
-
-在持有 checkout 和 executor 的机器上：
+### 2. 配对真正执行工作的电脑
 
 ```bash
 npm install -g @opentag/cli@0.11.0
 opentag setup --relay https://relay.example.com
-opentag pair --relay https://relay.example.com \
-  --trust-relay-origin https://relay.example.com
 opentag start
 ```
 
-`paired_relay` 会拒绝 loopback 和同进程 relay URL。setup 时注册本地 GitHub Project
-Target，并选择机器可用的 ACP executor（例如 Codex 或 Claude Code）。配对 Runner 保留
-checkout、编码智能体凭据与 worktree。
+Setup 会配置并配对一个 Runner、GitHub Project Target 和 ACP executor。paired-only
+runtime 必须使用可信的自托管 Control Plane URL 和 bootstrap pairing credential；它
+没有可独立运行的本地模式。提示 Project Target ID 时，必须输入 active Slack binding 使用的
+`OPENTAG_SLACK_PROJECT_TARGET_ID`；setup 会用 Runner credential 注册，并在 Control
+Plane readback 精确一致后才完成 pairing。如果这台机器运行过 reset 之前的 OpenTag，
+请把 `OPENTAG_CONFIG_HOME` 和 `OPENTAG_STATE_DIR` 指向新的空目录；paired Runner
+不会解释或改写旧配置与 SQLite 数据库。只有 pairing 被中断，或已有配置仍未配对时，
+才需要单独运行 `opentag pair`。第一条真实请求前，先核验这次安装：
 
 ```bash
 opentag doctor
 opentag status
 ```
 
-### 4. 从受治理的 Slack 请求开始
+### 3. 在 Slack 与 teammate 一起工作
 
 ```text
-@OpenTag 调查失败的检查并提出修复方案
+@OpenTag 调查失败的 check，并提出修复方案
 ```
 
-确认消息只证明 ingress 已记录请求，不能证明 Runner 在线或工作完成。可在 Slack 查看
-投影状态，或用 `opentag status --run <run_id>` 查本地审计详情。只审批策略呈现的精确
-实质性动作。OpenTag 不自动合并、不盲目重试 `outcome_unknown` provider outcome，也不会
-把完成证据变成 provider 动作。
+Runner 离线时，请求会保持可见的排队状态；需要决策时，Slack 会显示需要关注的精确
+动作。Provider 超时或外部副作用不明确时，结果保持 `outcome_unknown`；OpenTag 不会
+虚构成功，也不会盲目重放。
 
-## 当前支持的 profile
+## 为什么是 teammate，而不是又一个 agent dashboard
 
-- Slack 是 Source App，负责讨论串 ingress、状态与审批呈现。
-- GitHub 是 Project Target 与可选发布 provider，不是此 profile 的第二个 source ingress。
-- 一个用户控制的配对 Runner 使用一个已配置 ACP executor。
-- relay 负责持久协调和审计元数据；provider delivery 与 Run/Attempt 生命周期独立。
+- **长期在频道里** — 自托管 relay 接收 Slack 请求；电脑离线时，它会解释等待原因，
+  而不是跟着笔记本一起消失。
+- **在代码真正所在的地方工作** — coding agent 运行于配对、由用户控制的电脑，只能
+  访问批准过的本地 Project Target。
+- **保持一条对话** — 请求、排队、审批、阻塞和最终证据都回到原 Slack 讨论串。
+- **报告事实，不表演“正在工作”** — executor 输出、Run 状态、GitHub 发布和 provider
+  delivery 是不同事实，各自需要证据。
+- **只有明确授权才能写外部系统** — draft PR 发布是独立受治理阶段；OpenTag 不会自动
+  merge，也不会让聊天文本扩大权限。
 
-托管服务、高可用、ambient memory、scheduled work、多 Runner fallback、自动合并和未支持
-的 Source App 均不在此 profile 的声明范围。详见 [team-relay 架构](docs/architecture/team-relay.md)
-及需要单独授权的 [真实 canary 运行手册](docs/testing/team-relay-canary.md)。
+## 工作原理
 
-## 验证本地实现
+```mermaid
+flowchart LR
+  S[Slack channel] --> C[自托管 Control Plane]
+  C --> P[(PostgreSQL)]
+  C --> R[配对 Runner]
+  R --> A[ACP coding agent]
+  A --> W[本地 checkout]
+  R --> G[GitHub draft PR 与 readback]
+  C --> S
+```
 
-下列命令只验证已检入本地软件；不会部署 relay、联系 Slack/GitHub，也不构成安装认证：
+当前团队配置只有 Slack 是 Source App。GitHub 是 Project Target，以及可选的发布与证据
+provider，不是第二个请求入口。一个配对 Runner 拥有执行权；Control Plane 拥有唯一的
+Run、Attempt、lease、审批、delivery journal 与终态判断。
+
+控制台中的 Agent Presence 只是现有事实的只读投影：active Slack binding、Project
+Target、最新 Runner readiness，以及该 binding 的当前 Run。它没有新增第二套生命周期，
+也没有可变 presence 状态。
+
+## Presence 状态
+
+| 状态 | 含义 |
+| --- | --- |
+| `available` | Slack binding、Project Target、Runner 与最新 readiness 都存在。 |
+| `queued` | 请求已持久接收，正在等待配对 Runner。 |
+| `working` | 当前 fenced Attempt 已分配或正在 ready Runner 上执行。 |
+| `needs_attention` | 决策、reconciliation 或冲突中的 active work 需要人工处理。 |
+| `offline` | binding 存在，但 Runner 没有有效的 readiness receipt。 |
+| `setup_required` | Slack binding、Project Target 或 Runner 尚未配完整。 |
+
+这些状态只是投影，不能 claim、retry、cancel 或 settle 任何工作。
+
+## 刻意收窄的产品边界
+
+当前唯一产品主路径是：
+
+```text
+Slack presence → 自托管 Control Plane → 一个配对 Runner
+→ 一个 ACP coding agent → 可选 GitHub draft PR/证据 → Slack
+```
+
+本仓库当前不宣称 managed hosting、高可用、其他 Source App、GitHub webhook ingress、
+多 Runner 调度、ambient memory、自动 merge 或通用 software-factory planner。系统不再
+提供 `local_direct` 兼容模式；当前产品始终把 Runner 配对到自托管 Control Plane。
+
+## AI agent 集成
+
+OpenTag Runner 通过 ACP 启动配置的 coding agent，并阻止原始 tool output 淹没团队讨论串。
+仓库提供 agent-readable 安装指南和 OpenTag skill，让 Codex、Claude Code 等 coding agent
+可以协助本地安装，而不要求用户把 secret 粘贴进聊天。
+
+- [Agent-readable 安装指南](docs/agent-install.md)
+- [ACP 集成](docs/acp-agent-integration.md)
+- [OpenTag skill](skills/opentag/SKILL.md)
+
+## 验证仓库
 
 ```bash
-corepack pnpm smoke:control-plane-compose:typecheck
+corepack pnpm install --frozen-lockfile
+corepack pnpm typecheck
 corepack pnpm test
+corepack pnpm build
 ```
 
-一次性的浏览器/Compose 验证边界见 [Control Plane README](apps/control-plane/README.md)。真实
-Slack 或 GitHub canary 必须另行获得显式授权。
+这些命令只证明本地源码行为，不证明已部署 relay、真实 Slack delivery、GitHub 发布或
+安装级可用性。
 
 ## 文档
 
-- [Team relay 架构](docs/architecture/team-relay.md)
-- [自托管 Compose 指南](deploy/compose/README.md)
-- [Control Plane 部署运行手册](docs/control-plane-deployment.md)
-- [Slack Source App 指南](docs/platforms/slack.zh-CN.md)
-- [Team-relay canary 运行手册](docs/testing/team-relay-canary.md)
+- [Compose 安装](deploy/compose/README.md)
+- [Slack Source App 配置](docs/platforms/slack.zh-CN.md)
+- [GitHub Project Target 与发布](docs/platforms/github.zh-CN.md)
+- [Control Plane 部署](docs/control-plane-deployment.md)
+- [Always-on ingress 与本地执行](docs/adr/0004-always-on-channel-ingress-local-execution.md)
 - [配置参考](docs/configuration.md)
-- [面向智能体的安装指南](docs/agent-install.md)
-- [npm prerelease 候选发布指南](docs/npm-prerelease.md)
+- [Team-relay canary](docs/testing/team-relay-canary.md)
 
-## 许可证
+## 参与贡献
+
+欢迎贡献。请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 了解本地开发流程与 PR 检查。
+
+## License
 
 [MIT](./LICENSE)
