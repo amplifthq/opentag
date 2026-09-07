@@ -899,12 +899,10 @@ function permissionResolutionFromReceipt(input: {
 
 export async function buildHostedProgressMetadataForControlV1(input: {
   at: string;
-  dispatchedAt?: string;
 }): Promise<{ progressId: string; progressDigest: string }> {
   const progressDigest = await computeControlPayloadDigestV1({
     type: "status",
     occurredAt: input.at,
-    ...(input.dispatchedAt ? { dispatchedAt: input.dispatchedAt } : {}),
   });
   return {
     progressId: `progress_${progressDigest.slice("sha256:".length)}`,
@@ -1076,8 +1074,8 @@ async function createHostedExecutionClient(input: {
   const buildLifecycleRequest = input.buildHostedLifecycleRequestImpl
     ?? buildHostedLifecycleRequestV1;
   const executionOccurredAt = clock().toISOString();
-  // Sequence time follows serialized dispatch. Original executor observation
-  // time remains bound into progressDigest; journal retries keep sealed bytes.
+  // Sequence time follows serialized dispatch. The progress digest uses that
+  // same protocol timestamp; journal retries keep sealed bytes.
   let lastSignalAt = Date.parse(authority.runningOccurredAt);
   const nextSignalTime = (observedAt: string) => {
     lastSignalAt = Math.max(lastSignalAt + 1, Date.parse(observedAt), clock().getTime());
@@ -1286,7 +1284,7 @@ async function createHostedExecutionClient(input: {
         const workspaceAttestation = await currentWorkspaceAttestation(runId, progress.workspaceAttestation);
         const occurredAt = nextSignalTime(progress.at);
         const progressMetadata = await buildHostedProgressMetadataForControlV1(
-          { at: progress.at, dispatchedAt: occurredAt },
+          { at: occurredAt },
         );
         assertNotCancelled();
         const request = HostedProgressRequestV1Schema.parse(

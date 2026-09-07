@@ -5,14 +5,15 @@ import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistra
 
 const now = new Date("2026-08-09T00:00:00.000Z");
 
-it("binds progress identity to source time and serialized dispatch time", async () => {
-  const first = { at: now.toISOString(), dispatchedAt: "2026-08-09T00:00:01.000Z" };
+it("binds progress identity to the protocol timestamp checked by the journal", async () => {
+  const first = { at: "2026-08-09T00:00:01.000Z" };
   const receipt = await buildHostedProgressMetadataForControlV1(first);
   expect(await buildHostedProgressMetadataForControlV1(first)).toEqual(receipt);
+  expect(receipt.progressDigest).toBe(await computeControlPayloadDigestV1({
+    type: "status", occurredAt: first.at,
+  }));
   expect(await buildHostedProgressMetadataForControlV1({ ...first,
-    dispatchedAt: "2026-08-09T00:00:01.001Z" })).not.toEqual(receipt);
-  expect(await buildHostedProgressMetadataForControlV1({ ...first,
-    at: "2026-08-09T00:00:00.001Z" })).not.toEqual(receipt);
+    at: "2026-08-09T00:00:01.001Z" })).not.toEqual(receipt);
 });
 
 function readinessEntry(): ControlPlaneProjectionOutboxEntry {
@@ -2321,7 +2322,14 @@ describe("Control V1 projection pump", () => {
       return "acknowledged" as const;
     });
     const recordRenewedProgress = vi.fn(async ({ request }) => {
-      expect(request.workspaceAttestation.leaseExpiresAt).toBe(acceptedLeaseExpiresAt);
+      const expectedDigest = await computeControlPayloadDigestV1({
+        type: "status", occurredAt: request.occurredAt,
+      });
+      expect(request.progressDigest).toBe(expectedDigest);
+      expect(request.progressId).toBe(`progress_${expectedDigest.slice("sha256:".length)}`);
+      if (request.workspaceAttestation) {
+        expect(request.workspaceAttestation.leaseExpiresAt).toBe(acceptedLeaseExpiresAt);
+      }
       return { outcome: "recorded", operation: { state: "acknowledged" } };
     });
     const repo = {
