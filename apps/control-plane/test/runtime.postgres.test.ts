@@ -78,6 +78,9 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     const before = await runtime.application.fetch(
       new Request("http://control.test/readyz"),
     );
+    await expect(runtime.jobHandlers["provider-delivery-observation"]({
+      payload: { windowStart: "2000-01-01T00:00:00.000Z" },
+    })).resolves.toEqual({ kind: "stale_window" });
     expect(before.status).toBe(503);
     expect(await before.json()).toEqual({
       status: "not_ready",

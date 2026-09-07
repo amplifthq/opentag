@@ -608,7 +608,13 @@ export function createControlPlaneRuntime(input: {
     },
     "runner-readiness-retention": async (job: { organizationId: string | null }) =>
       runners.pruneExpiredReadiness(job.organizationId),
-    "provider-delivery-observation": async () => {
+    "provider-delivery-observation": async (job: { payload: unknown }) => {
+      const window = z.object({ windowStart: z.iso.datetime({ offset: true }) }).parse(job.payload);
+      // After downtime, old minute ticks must not burst Slack reads. Durable
+      // per-intent obligations are picked up by the next current window instead.
+      if (Date.parse(window.windowStart) !== Math.floor(clock.now().getTime() / 60_000) * 60_000) {
+        return { kind: "stale_window" } as const;
+      }
       await slackDeliveryReconciler.schedule();
       return slackDeliveryReconciler.processNext();
     },
