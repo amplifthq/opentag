@@ -103,13 +103,18 @@ export async function observeSlackMessage(input: {
       if (operation.kind === 'create_message' && (body.has_more === true
         || record(body.response_metadata)?.next_cursor)) return unknown('incomplete_observation');
       const expected = record(input.payload)!;
+      // Slack can flatten newlines in the accessibility fallback for Block Kit
+      // messages. The blocks and marker must still match the frozen originals.
+      const textMatches = (text: unknown) => text === expected.text
+        || (Array.isArray(expected.blocks) && expected.blocks.length > 0
+          && typeof expected.text === 'string' && text === expected.text.replace(/\n/gu, ' '));
       const matches = body.messages.map(record).filter(message => message
         && typeof message.ts === 'string' && /^\d{1,20}\.\d{1,20}$/u.test(message.ts)
         && (operation.kind !== 'update_message' || message.ts === operation.messageTs)
         && (!threadTs || message.thread_ts === threadTs)
         && message.user === identity.user_id && message.bot_id === identity.bot_id
         && message.app_id === input.appId && contentMatches(message.metadata, marker)
-        && message.text === expected.text && contentMatches(message.blocks ?? [], expected.blocks ?? [])
+        && textMatches(message.text) && contentMatches(message.blocks ?? [], expected.blocks ?? [])
         && (!message.attachments || (Array.isArray(message.attachments) && message.attachments.length === 0)));
       if (matches.length !== 1) return unknown('message_version_or_content_mismatch');
       const ts = matches[0]!.ts as string;

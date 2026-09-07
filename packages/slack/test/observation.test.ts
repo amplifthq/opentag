@@ -40,6 +40,23 @@ function fixture() {
 }
 
 describe('Slack read-only message observation', () => {
+  it('recognizes Slack-flattened fallback newlines only with exact nonempty blocks', async () => {
+    const f = fixture();
+    f.input.presentation.text = 'OpenTag: Running\nRun: run_1';
+    f.input.presentation.blocks[0]!.text.text = f.input.presentation.text;
+    await f.adapter.deliver(f.input);
+    f.mutate(value => { value.text = 'OpenTag: Running Run: run_1'; });
+    await expect(f.adapter.reconcile(f.input)).resolves.toMatchObject({ outcome: 'accepted' });
+    f.mutate(value => { value.text = 'OpenTag: Running Run: run_other'; });
+    await expect(f.adapter.reconcile(f.input)).resolves.toMatchObject({ outcome: 'outcome_unknown' });
+    f.mutate(value => { value.text = 'OpenTag: Running Run: run_1'; value.blocks = []; });
+    await expect(f.adapter.reconcile(f.input)).resolves.toMatchObject({ outcome: 'outcome_unknown' });
+    f.input.presentation.blocks = [];
+    await f.adapter.deliver(f.input);
+    f.mutate(value => { value.text = 'OpenTag: Running Run: run_1'; });
+    await expect(f.adapter.reconcile(f.input)).resolves.toMatchObject({ outcome: 'outcome_unknown' });
+  });
+
   it('recognizes an exact sent version using only GET and authenticates the expected bot', async () => {
     const f = fixture(); await f.adapter.deliver(f.input);
     const posted = JSON.parse(String(f.fetchImpl.mock.calls[0]![1]!.body));
