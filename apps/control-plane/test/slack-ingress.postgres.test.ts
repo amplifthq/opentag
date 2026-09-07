@@ -82,8 +82,9 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
 
   function challengeRequest(challenge: unknown = "challenge_abc123",
     identity: { teamId?: string; appId?: string } = {}) {
-    const body = JSON.stringify({ type: "url_verification", team_id: identity.teamId ?? "T1",
-      api_app_id: identity.appId ?? "A1", challenge });
+    const body = JSON.stringify({ type: "url_verification", challenge,
+      ...(identity.teamId ? { team_id: identity.teamId } : {}),
+      ...(identity.appId ? { api_app_id: identity.appId } : {}) });
     const timestamp = String(Math.floor(now.getTime() / 1000));
     return { rawBody: new TextEncoder().encode(body), headers: new Headers({
       "content-type": "application/json", "x-slack-request-timestamp": timestamp,

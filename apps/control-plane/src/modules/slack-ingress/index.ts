@@ -674,17 +674,24 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         if (resolved.kind === "ambiguous") return { status: 409, body: { error: "slack_installation_ambiguous" } };
         const trusted = await resolved.sourceApp.ingress.verify(request);
         const payload = payloadRecord(trusted);
-        const identity = payloadIdentity(payload ?? {});
-        if (!identity) return { status: 400, body: { error: "invalid_slack_envelope" } };
-        if (!identityMatches(resolved.installation, identity)) {
-          return { status: 404, body: { error: "slack_installation_not_found" } };
-        }
-        const urlVerification = urlVerificationResult(payload!);
+        const urlVerification = urlVerificationResult(payload ?? {});
         if (urlVerification.kind === "malformed") {
           return { status: 400, body: { error: "invalid_slack_challenge" } };
         }
         if (urlVerification.kind === "accepted") {
+          // Slack's URL challenge has no team/app envelope. The resolved route
+          // and verified signing secret authenticate it; reject conflicting
+          // identity fields if supplied, without admitting any Work.
+          if ((payload!.team_id !== undefined && payload!.team_id !== resolved.installation.teamId)
+            || (payload!.api_app_id !== undefined && payload!.api_app_id !== resolved.installation.appId)) {
+            return { status: 404, body: { error: "slack_installation_not_found" } };
+          }
           return { status: 200, body: urlVerification.challenge };
+        }
+        const identity = payloadIdentity(payload ?? {});
+        if (!identity) return { status: 400, body: { error: "invalid_slack_envelope" } };
+        if (!identityMatches(resolved.installation, identity)) {
+          return { status: 404, body: { error: "slack_installation_not_found" } };
         }
         const bound = createBoundIngress({ sourceApp: resolved.sourceApp,
           installation: resolved.installation, sourceIngress,
