@@ -17,6 +17,8 @@ const sha256Digest = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const closedCode = z.string().regex(/^[a-z][a-z0-9_.-]{0,127}$/u);
 const opaqueIdentifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
 
+export const SOURCE_INGRESS_WAIT_LIMIT_MS = 8 * 60 * 60 * 1_000;
+
 const SourceIngressCommandSchema = z.object({
   organizationId: identity,
   installationId: identity,
@@ -298,6 +300,28 @@ export function createSourceIngressService(input: {
            AND payload->>'reservationId' = $5`,
         [command.jobId, command.reservation.organizationId, command.leaseToken,
           input.clock.now(), command.reservation.reservationId],
+      );
+      if (!result.rows[0]) throw new Error("source_ingress_stale_lease");
+    },
+
+    // Readiness is an expected dependency wait, not a failed processing attempt.
+    // Keep the original custody obligation and release only this worker's lease.
+    async deferUntilReadiness(command: { reservation: IngressReservation;
+      jobId: string; leaseToken: string; retryAt: Date }) {
+      const result = await input.pool.query(
+        `UPDATE cp_job job
+         SET state='pending', available_at=$4, attempt_count=attempt_count-1,
+             lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
+             last_error_code='runner_not_ready', updated_at=$5
+         WHERE job_id=$1 AND organization_id=$2 AND job_kind='source_ingress.process'
+           AND state='claimed' AND lease_token=$3 AND lease_expires_at>$5
+           AND payload->>'reservationId'=$6
+           AND EXISTS (SELECT 1 FROM cp_ingress_reservation reservation
+             WHERE reservation.organization_id=job.organization_id
+               AND reservation.reservation_id=$6 AND reservation.state='pending')
+         RETURNING job_id`,
+        [command.jobId, command.reservation.organizationId, command.leaseToken,
+          command.retryAt, input.clock.now(), command.reservation.reservationId],
       );
       if (!result.rows[0]) throw new Error("source_ingress_stale_lease");
     },

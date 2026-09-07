@@ -212,6 +212,75 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
     expect(row.rows).toEqual([{ state: "succeeded", attempt_count: 2 }]);
   });
 
+  it("persists readiness waiting across worker replacement without consuming the failure budget", async () => {
+    let current = now;
+    const clock = { now: () => current };
+    const { ingress, jobs } = components(clock);
+    await ingress.reserve(command());
+    // A real processing failure remains counted even after successful dependency waits.
+    const failed = await jobs.claim("failed", ["source_ingress.process"]);
+    if (failed.kind !== "claimed") throw new Error("claim missing");
+    await jobs.fail({ jobId: failed.job.jobId, leaseToken: failed.job.leaseToken,
+      errorCode: "transient_failure", retryAt: current });
+    for (let cycle = 0; cycle < 7; cycle += 1) {
+      const worker = createSourceIngressWorker({ ingress, queue: jobs,
+        workerId: `replacement-${cycle}`, retryDelayMs: 10_000, clock,
+        resolver: { resolve: async () => ({ kind: "waiting_for_readiness", code: "runner_not_ready" }) } });
+      await expect(worker.processNext()).resolves.toMatchObject({ kind: "waiting_for_readiness" });
+      await expect(worker.processNext()).resolves.toEqual({ kind: "empty" });
+      expect((await fixture.pool.query("SELECT state, attempt_count FROM cp_job")).rows)
+        .toEqual([{ state: "pending", attempt_count: 1 }]);
+      current = new Date(current.getTime() + 10_000);
+    }
+    const recovered = createSourceIngressWorker({ ingress, queue: jobs,
+      workerId: "online", retryDelayMs: 10_000, clock,
+      resolver: { resolve: async ({ sourceContext }) => {
+        expect(sourceContext).toEqual(command().normalizedContent);
+        return { kind: "accepted", runId: "run_recovered" };
+      } } });
+    await expect(recovered.processNext()).resolves.toMatchObject({
+      kind: "settled", resolution: { kind: "accepted", runId: "run_recovered" },
+    });
+    await expect(recovered.processNext()).resolves.toEqual({ kind: "empty" });
+    expect((await fixture.pool.query("SELECT state, attempt_count FROM cp_job")).rows)
+      .toEqual([{ state: "succeeded", attempt_count: 2 }]);
+  });
+
+  it("closes a readiness wait at its original deadline without invoking admission", async () => {
+    let current = now;
+    const clock = { now: () => current };
+    const { ingress, jobs } = components(clock);
+    await ingress.reserve(command());
+    const worker = createSourceIngressWorker({ ingress, queue: jobs,
+      workerId: "offline", retryDelayMs: 10_000, clock,
+      resolver: { resolve: async () => ({ kind: "waiting_for_readiness", code: "runner_not_ready" }) } });
+    await expect(worker.processNext()).resolves.toMatchObject({ kind: "waiting_for_readiness" });
+    current = new Date(now.getTime() + 8 * 60 * 60 * 1_000);
+    const recovered = createSourceIngressWorker({ ingress, queue: jobs,
+      workerId: "too-late", retryDelayMs: 10_000, clock,
+      resolver: { resolve: async () => { throw new Error("must_not_admit"); } } });
+    await expect(recovered.processNext()).resolves.toMatchObject({ kind: "settled",
+      resolution: { kind: "invalid_request", code: "queue_claim_deadline_expired" } });
+  });
+
+  it("does not let an expired worker defer the current processing obligation", async () => {
+    let current = now;
+    const clock = { now: () => current };
+    const { ingress, jobs } = components(clock);
+    const reserved = await ingress.reserve(command());
+    if (reserved.outcome !== "reserved") throw new Error("reservation missing");
+    const old = await jobs.claim("old", ["source_ingress.process"]);
+    if (old.kind !== "claimed") throw new Error("claim missing");
+    current = new Date(now.getTime() + 30_001);
+    const next = await jobs.claim("next", ["source_ingress.process"]);
+    expect(next.kind).toBe("claimed");
+    await expect(ingress.deferUntilReadiness({ reservation: reserved.reservation,
+      jobId: old.job.jobId, leaseToken: old.job.leaseToken, retryAt: current }))
+      .rejects.toThrow("source_ingress_stale_lease");
+    expect((await fixture.pool.query("SELECT state, lease_owner, attempt_count FROM cp_job")).rows)
+      .toEqual([{ state: "claimed", lease_owner: "next", attempt_count: 2 }]);
+  });
+
   it("domain-finalizes an expired final attempt before a generic worker can reap it", async () => {
     let current = now;
     const clock = { now: () => current };

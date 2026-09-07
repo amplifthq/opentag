@@ -104,7 +104,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     expect(closes).toBe(1);
   });
 
-  it("composes canonical Slack ingress through raw runtime HTTP routes", async () => {
+  it.each([false, true])("composes canonical Slack ingress through raw runtime HTTP routes (offline=%s)", async (offline) => {
     const slackFixture = await createIsolatedPostgres();
     const directory = await mkdtemp(join(tmpdir(), "opentag-slack-key-"));
     const keyFile = join(directory, "relay.key"); await writeFile(keyFile, Buffer.alloc(32, 9), { mode: 0o600 });
@@ -207,6 +207,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     const readiness = RunnerReadinessReceiptEnvelopeV1Schema.parse({ ...readinessSeed,
       receiptDigest: await computeControlReceiptDigestV1(readinessDigestInput) });
     await runtime.runners.recordReadiness({ principal: authenticated.principal, receipt: readiness });
+    if (offline) await slackFixture.pool.query("DELETE FROM cp_runner_readiness");
     await expect(runtime.providerDeliveryWorker.processNext()).resolves.toEqual({ kind: "empty", recovered: 0,
       failures: [] });
     const send = (teamId: string) => { const timestamp = String(Math.floor(Date.now() / 1000));
@@ -238,6 +239,22 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     try {
       expect((await send("T_RUNTIME")).status).toBe(200);
       expect((await send("T_WRONG")).status).toBe(404);
+      if (offline) {
+        for (let cycle = 0; cycle < 7; cycle += 1) {
+          await expect(runtime.sourceIngressWorker!.processNext()).resolves.toMatchObject({
+            kind: "waiting_for_readiness",
+          });
+          expect((await slackFixture.pool.query(
+            "SELECT state, resolution FROM cp_ingress_reservation",
+          )).rows).toEqual([{ state: "pending", resolution: null }]);
+          expect((await slackFixture.pool.query("SELECT count(*)::int AS count FROM cp_hosted_run"))
+            .rows).toEqual([{ count: 0 }]);
+          await slackFixture.pool.query(
+            "UPDATE cp_job SET available_at=clock_timestamp() WHERE job_kind='source_ingress.process'",
+          );
+        }
+        await runtime.runners.recordReadiness({ principal: authenticated.principal, receipt: readiness });
+      }
       await expect(runtime.sourceIngressWorker!.processNext()).resolves.toMatchObject({
         kind: "settled", resolution: { kind: "waiting_for_runner" },
       });
@@ -841,7 +858,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         },
       });
       expect(resolution).toEqual({
-        kind: "temporarily_unavailable",
+        kind: "waiting_for_readiness",
         code: "runner_not_ready",
       });
       await expect(authorityFixture.pool.query(

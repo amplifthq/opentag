@@ -54,6 +54,28 @@ from a Slack projection or process log.
 
 ## Procedure
 
+### A0. Prove durable waiting before admission
+
+1. Establish real readiness, stop the Runner, and let the receipt expire (or be
+   pruned). Do not use a still-fresh receipt to claim offline recovery coverage.
+2. Post one bounded request. Its ingress reservation must remain `pending` with
+   no terminal resolution; its `source_ingress.process` job must remain pending
+   between checks, with `runner_not_ready` as its wait reason. At this point the
+   request is in custody, not an admitted Run or a promise of execution.
+3. Observe more readiness checks than the job's failure-attempt limit. Expected
+   dependency waits must not consume that budget or extend the original eight-hour
+   deadline. Actual processing failures still consume the budget.
+4. Restart the relay while the Runner remains offline. Confirm the same
+   reservation and job survive; do not resend or manually reset the source event.
+5. Start the Runner. Fresh current-generation readiness, the exact target binding
+   generation, and current source authorization must be checked before admission.
+   Confirm one Run is admitted from the original request, then continue with A.
+
+Expired waits close without execution. Deleted source content must not be
+redeemed after recovery. A previously terminally resolved request is not reopened
+by this fix: retain the failed canary record and use a new explicitly requested
+test message. This change adds no tables and requires no schema migration.
+
 ### A. Prove signed ingress and local execution
 
 1. Post a bounded engineering request in the private Slack test channel and

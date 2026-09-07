@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SOURCE_INGRESS_WAIT_LIMIT_MS } from "./index.js";
 import type { DurableJobQueue } from "../jobs/index.js";
 import type {
   SourceIngressService,
@@ -34,7 +35,7 @@ export interface SourceResolutionPort {
       attemptNumber: number;
       maxAttempts: number;
     };
-  }): Promise<SourceResolution>;
+  }): Promise<SourceResolution | { kind: "waiting_for_readiness"; code: "runner_not_ready" }>;
 }
 
 const poisonResolution = (error: unknown): SourceResolution => ({
@@ -79,6 +80,12 @@ export function createSourceIngressWorker(input: {
         }
         const existing = await input.ingress.readResolution(reservation);
         const resolution = existing ?? await (async () => {
+          if (input.clock.now().getTime() >= Date.parse(reservation!.createdAt)
+            + SOURCE_INGRESS_WAIT_LIMIT_MS) {
+            return input.ingress.recordResolution({ reservation: reservation!,
+              resolution: { kind: "invalid_request", code: "queue_claim_deadline_expired" },
+              jobId: job.jobId, leaseToken: job.leaseToken });
+          }
           const sourceContext = await input.ingress.readSourceContext({
             reservation: reservation!, jobId: job.jobId, leaseToken: job.leaseToken,
             expiresAt: new Date(job.leaseExpiresAt),
@@ -99,9 +106,21 @@ export function createSourceIngressWorker(input: {
               maxAttempts: job.maxAttempts,
             },
           });
+          if (resolved.kind === "waiting_for_readiness") {
+            await input.ingress.deferUntilReadiness({ reservation: reservation!,
+              jobId: job.jobId, leaseToken: job.leaseToken,
+              retryAt: new Date(Math.min(
+                input.clock.now().getTime() + Math.max(1_000, input.retryDelayMs),
+                Date.parse(reservation!.createdAt) + SOURCE_INGRESS_WAIT_LIMIT_MS,
+              )) });
+            return resolved;
+          }
           return input.ingress.recordResolution({ reservation: reservation!, resolution: resolved,
             jobId: job.jobId, leaseToken: job.leaseToken });
         })();
+        if (resolution.kind === "waiting_for_readiness") {
+          return { kind: "waiting_for_readiness", jobId: job.jobId } as const;
+        }
         const settlement = await input.queue.succeed({
           jobId: job.jobId, leaseToken: job.leaseToken, outcome: resolution,
         });

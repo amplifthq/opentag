@@ -39,7 +39,7 @@ import {
 } from "./modules/source-content/index.js";
 import { loadRelayContentKey } from "./modules/source-content/crypto.js";
 import { createSourceContentJobHandlers } from "./modules/source-content/worker.js";
-import { createSourceIngressService } from "./modules/source-ingress/index.js";
+import { createSourceIngressService, SOURCE_INGRESS_WAIT_LIMIT_MS } from "./modules/source-ingress/index.js";
 import { createPostgresSlackIngress, type SlackSecretResolver } from "./modules/slack-ingress/index.js";
 import { createPostgresDeliveryRepository } from "./modules/provider-delivery/repository.js";
 import { createProviderDeliveryWorker } from "./modules/provider-delivery/worker.js";
@@ -264,6 +264,7 @@ export function createControlPlaneRuntime(input: {
         runner_id: string | null; target_binding_digest: string | null;
         repository_provider: string | null; owner: string | null; repo: string | null;
         default_executor: string | null; default_branch: string | null;
+        binding_generation: number | null;
       }>(`SELECT slack.installation_id,slack.binding_id,slack.project_target_id,
           slack.publication_mode,slack.team_id,slack.app_id,slack.channel_id,
           slack.bot_user_id,slack.member_user_ids,
@@ -271,7 +272,7 @@ export function createControlPlaneRuntime(input: {
           slack.credential_generation,slack.credential_generation_digest,
           target.runner_id,target.binding_digest AS target_binding_digest,
           target.provider AS repository_provider,target.owner,target.repo,
-          target.default_executor,target.default_branch
+          target.default_executor,target.default_branch,target.binding_generation
         FROM cp_slack_binding slack
         LEFT JOIN cp_project_target target
           ON target.organization_id=slack.organization_id
@@ -335,6 +336,7 @@ export function createControlPlaneRuntime(input: {
       const readyTarget = readiness?.success ? readiness.data.payload.targets.find((candidate) =>
         candidate.projectTargetId === installation.project_target_id
           && candidate.bindingDigest === installation.target_binding_digest
+          && candidate.bindingGeneration === installation.binding_generation
           && candidate.state === "ready") : null;
       const readyExecutor = readiness?.success ? readiness.data.payload.executors.find((candidate) =>
         candidate.executorId === installation.default_executor && candidate.state === "ready") : null;
@@ -342,7 +344,7 @@ export function createControlPlaneRuntime(input: {
         || readiness.data.organizationId !== command.reservation.organizationId
         || readiness.data.producer.id !== installation.runner_id
         || !readyTarget || !readyExecutor) {
-        return { kind: "temporarily_unavailable", code: "runner_not_ready" } as const;
+        return { kind: "waiting_for_readiness", code: "runner_not_ready" } as const;
       }
       const repository = { provider: "github" as const,
         providerRepositoryId: installation.project_target_id,
@@ -362,7 +364,8 @@ export function createControlPlaneRuntime(input: {
       const operationId = `operation_admit_${identitySuffix}`;
       const snapshotId = `policy_${identitySuffix}`;
       const receivedAt = event.receivedAt;
-      const queueClaimDeadline = new Date(Date.parse(receivedAt) + 8 * 60 * 60 * 1_000).toISOString();
+      const queueClaimDeadline = new Date(Date.parse(command.reservation.createdAt)
+        + SOURCE_INGRESS_WAIT_LIMIT_MS).toISOString();
       const authorizationRef = `slack_${installation.binding_id}_${actor.providerUserId}`;
       const policyPayload = {
         snapshotId, capturedAt: receivedAt,
