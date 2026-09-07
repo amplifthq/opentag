@@ -8,6 +8,7 @@ import type {
   OpenTagEvent,
   OpenTagRunResult,
 } from "@opentag/core";
+import { AttemptWorkspaceAttestationV1Schema, AttemptInterruptionEvidenceV1Schema } from "@opentag/core";
 import type { ExecutorAdapter, ExecutorRunInput } from "@opentag/runner";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -90,6 +91,64 @@ function action(status: "waiting_approval" | "authorized" | "executing" = "autho
 }
 
 describe("claimed ACP execution", () => {
+  it("preserves typed lifecycle evidence while redacting executor presentation", async () => {
+    const digest = `sha256:${"a".repeat(64)}`;
+    const attestation = AttemptWorkspaceAttestationV1Schema.parse({
+      workspaceId: "workspace_acp", workspacePathDigest: digest,
+      repositoryPathDigest: digest, worktreeIdentityDigest: digest,
+      baseRevision: "a".repeat(40), currentRevision: "a".repeat(40),
+      currentTree: "b".repeat(40), workspaceStateDigest: digest,
+      attemptId: "attempt_acp", attemptNumber: 1,
+      fencingTokenDigest: digest, credentialId: "credential_acp",
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    const interruption = AttemptInterruptionEvidenceV1Schema.parse({
+      state: "interrupted_evidence", runId: "run_acp", attemptId: "attempt_acp",
+      attemptNumber: 1, workspaceId: attestation.workspaceId,
+      workspacePathDigest: digest, fencingTokenDigest: digest,
+      reason: "cancelled", observedAt: new Date().toISOString(),
+      processStop: "observed", materialOutcome: "outcome_unknown",
+    });
+    const progress = vi.fn<ClaimedRunExecutionClient["progress"]>(async (_run, _lease, item) => {
+      expect(AttemptWorkspaceAttestationV1Schema.parse(item.workspaceAttestation)).toEqual(attestation);
+      expect(AttemptInterruptionEvidenceV1Schema.parse(item.interruptionEvidence)).toEqual(interruption);
+      expect(item.message).not.toContain("fence_acp");
+    });
+    const complete = vi.fn<ClaimedRunExecutionClient["complete"]>(async (_run, _lease, result, evidence) => {
+      expect(result.conclusion).toBe("success");
+      expect(AttemptWorkspaceAttestationV1Schema.parse(evidence?.workspaceAttestation)).toEqual(attestation);
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await executeClaimedRun({ runnerId: "runner_local",
+        claimed: claimed(event({ id: "evt_attestation" })), repositories: [],
+        scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-acp-attestation-")), "scratch"),
+        client: lifecycle({ progress, complete }).client,
+        executors: { reviewer: { id: "reviewer", displayName: "Reviewer",
+          canRun: async () => ({ ready: true }), cancel: async () => {},
+          run: async (_input, sink) => {
+            await sink.emit({ type: "executor.progress", message: "private fence_acp",
+              at: new Date().toISOString(), workspaceAttestation: attestation,
+              interruptionEvidence: interruption });
+            const injectedWorkspace = { ...attestation, token: "untrusted_extra_secret" };
+            const injectedInterruption = { ...interruption, credentialId: "untrusted_extra_secret" };
+            await expect(sink.emit({ type: "executor.progress", message: "must not forward",
+              at: new Date().toISOString(), workspaceAttestation: injectedWorkspace }))
+              .rejects.toThrow("executor_lifecycle_evidence_invalid");
+            await expect(sink.emit({ type: "executor.progress", message: "must not forward",
+              at: new Date().toISOString(), interruptionEvidence: injectedInterruption }))
+              .rejects.toThrow("executor_lifecycle_evidence_invalid");
+            return { conclusion: "success", summary: "done" };
+          } } },
+      });
+      expect(progress).toHaveBeenCalledOnce();
+      expect(complete).toHaveBeenCalledOnce();
+      expect(JSON.stringify(log.mock.calls)).not.toContain("fence_acp");
+      expect(JSON.stringify(log.mock.calls)).not.toContain("credential_acp");
+      expect(JSON.stringify(log.mock.calls)).not.toContain("untrusted_extra_secret");
+    } finally { log.mockRestore(); }
+  });
+
   it("preserves the external Attempt fence across lifecycle calls without claiming", async () => {
     const sourceEvent = event({ id: "evt_fence" });
     const authoritativeClaim = {

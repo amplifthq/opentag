@@ -6,6 +6,8 @@ import {
   projectTargetRefFromEvent,
   sanitizeCredentialLikeValue,
   computeControlPayloadDigestV1,
+  AttemptWorkspaceAttestationV1Schema,
+  AttemptInterruptionEvidenceV1Schema,
   type OpenTagEvent,
   type OpenTagRun,
   type OpenTagRunResult,
@@ -659,12 +661,22 @@ export async function executeClaimedRun(
       },
       {
         emit: async (event) => {
-          const safeEvent = sanitizeCredentialLikeValue(event, { secrets: [lease.fencingToken] });
-          if (safeEvent.workspaceAttestation) {
+          // Protocol evidence is validated, not rewritten by display redaction.
+          // Strict schemas reject arbitrary fields; the coordinator still checks authority.
+          const { workspaceAttestation, interruptionEvidence, ...presentation } = event;
+          const workspace = workspaceAttestation === undefined ? undefined
+            : AttemptWorkspaceAttestationV1Schema.safeParse(workspaceAttestation);
+          const interruption = interruptionEvidence === undefined ? undefined
+            : AttemptInterruptionEvidenceV1Schema.safeParse(interruptionEvidence);
+          if (workspace?.success === false || interruption?.success === false) {
+            throw new Error("executor_lifecycle_evidence_invalid");
+          }
+          const safeEvent = sanitizeCredentialLikeValue(presentation, { secrets: [lease.fencingToken] });
+          if (workspace?.success) {
             latestWorkspaceAttestation = {
-              ...safeEvent.workspaceAttestation,
+              ...workspace.data,
               leaseExpiresAt: latestWorkspaceAttestation?.leaseExpiresAt
-                ?? safeEvent.workspaceAttestation.leaseExpiresAt,
+                ?? workspace.data.leaseExpiresAt,
             };
           }
           const progressMessage = hostedAuthority
@@ -677,8 +689,8 @@ export async function executeClaimedRun(
               message: progressMessage,
               at: safeEvent.at,
               ...(latestWorkspaceAttestation ? { workspaceAttestation: latestWorkspaceAttestation } : {}),
-              ...(safeEvent.interruptionEvidence
-                ? { interruptionEvidence: safeEvent.interruptionEvidence } : {}),
+              ...(interruption?.success
+                ? { interruptionEvidence: interruption.data } : {}),
             });
           } catch (error) {
             if (runNoLongerClaimed(error)) {
