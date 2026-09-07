@@ -1136,8 +1136,12 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 ...(stderr ? [`stderr=${stderr}`] : [])
               ].join("; "),
               at: new Date().toISOString()
+            }).catch(() => {
+              console.warn("ACP failure diagnostic delivery failed; original failure retained.");
             });
-            throw new AcpPublicFailure(`ACP agent ${manifest.id} protocol or exit failure.`);
+            throw new AcpPublicFailure(`ACP agent ${manifest.id} protocol or exit failure.`, {
+              cause: new Error(cause || reason),
+            });
           }
         }
 
@@ -1243,6 +1247,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
             type: "executor.failed",
             message: `ACP agent ${manifest.id} failed`,
             at: new Date().toISOString()
+          }).catch(() => {
+            console.warn("ACP failure diagnostic delivery failed; original failure retained.");
           });
         }
         throw error;

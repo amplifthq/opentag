@@ -838,6 +838,21 @@ describe("ACP executor", () => {
     expect(() => process.kill(pid, 0)).toThrow();
   }, 15_000);
 
+  it("preserves protocol failure when reporting that failure also fails", async () => {
+    const scratch = tempDir("diagnostic-sink-failure");
+    const executor = createAcpExecutor({ manifest: manifest("malformed-live"), cancelGraceMs: 100 });
+    await expect(executor.run(input({ kind: "scratch", path: scratch }, "run_diagnostic_sink_failure"), {
+      emit: async (event) => {
+        if (event.type === "executor.failed") throw new Error("secondary_sink_failure");
+      },
+    })).rejects.toMatchObject({
+      message: "ACP agent fixture-agent protocol or exit failure.",
+      cause: { message: expect.stringMatching(/invalid NDJSON/iu) },
+    });
+    const pid = Number(readFileSync(join(scratch, "acp-child-pid.txt"), "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 15_000);
+
   it("rejects an oversized complete ACP frame by UTF-8 bytes through protocol cleanup", async () => {
     const scratch = tempDir("oversized-complete");
     const executor = createAcpExecutor({ manifest: manifest("oversized-complete"), cancelGraceMs: 100 });

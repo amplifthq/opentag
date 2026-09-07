@@ -2900,13 +2900,14 @@ export type HostedLifecycleActionV1 =
   | "progress"
   | "complete";
 
-export async function computeHostedLifecycleRequestDigestV1(input: {
+/** Canonical digest input, excluding the raw fence; shared with transactional verification. */
+export function hostedLifecycleRequestDigestInputV1(input: {
   organizationId: string;
   runnerId: string;
   runId: string;
   action: HostedLifecycleActionV1;
   request: HostedLifecycleRequestV1;
-}): Promise<string> {
+}) {
   const { request } = input;
   const common = {
     operation: input.action,
@@ -2970,7 +2971,13 @@ export async function computeHostedLifecycleRequestDigestV1(input: {
                     ? { blockedPermission: complete.blockedPermission } : {}),
                 };
               })();
-  return sha256Utf8V1(canonicalJsonStringify({ ...common, ...actionFields }));
+  return { ...common, ...actionFields };
+}
+
+export async function computeHostedLifecycleRequestDigestV1(
+  input: Parameters<typeof hostedLifecycleRequestDigestInputV1>[0],
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(hostedLifecycleRequestDigestInputV1(input)));
 }
 
 export function computeHostedLifecycleOperationIdV1(
@@ -3104,35 +3111,20 @@ function hostedLifecycleReceiptOperationV1(
   return action;
 }
 
-export async function verifyHostedLifecycleReceiptV1(input: {
-  receipt: HostedLifecycleReceiptEnvelopeV1;
-  request: HostedLifecycleRequestV1;
+/** Canonical receipt payload shared by asynchronous and transactional verification. */
+export function hostedLifecycleReceiptPayloadV1(input: {
   action: HostedLifecycleActionV1;
-  organizationId: string;
-  runnerId: string;
-  runId: string;
-  credentialId: string;
-}): Promise<boolean> {
-  const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(input.receipt);
-  const request = HostedLifecycleRequestV1Schema.parse(input.request);
+  request: HostedLifecycleRequestV1;
+  heartbeatLeaseExpiresAt?: string;
+}) {
+  const { request } = input;
   const operation = hostedLifecycleReceiptOperationV1(input.action);
-  const expectedRequestDigest = await computeHostedLifecycleRequestDigestV1({
-    organizationId: input.organizationId,
-    runnerId: input.runnerId,
-    runId: input.runId,
-    action: input.action,
-    request,
-  });
-  const expectedRequestId = await computeHostedLifecycleRequestIdV1({
-    operationId: request.operationId,
-    requestDigest: request.requestDigest,
-  });
   const expectedPayload = input.action === "heartbeat"
-    ? receipt.payload.operation === "heartbeat"
+    ? input.heartbeatLeaseExpiresAt !== undefined
       ? {
           operation,
           occurredAt: request.occurredAt,
-          leaseExpiresAt: receipt.payload.leaseExpiresAt,
+          leaseExpiresAt: input.heartbeatLeaseExpiresAt,
         }
       : null
     : input.action === "running"
@@ -3180,14 +3172,45 @@ export async function verifyHostedLifecycleReceiptV1(input: {
                     ? { blockedPermission: value.blockedPermission } : {}),
                 };
               })();
-  if (!expectedPayload) return false;
-  const expectedPayloadWithEvidence = {
+  if (!expectedPayload) return null;
+  return {
     ...expectedPayload,
     ...(request.workspaceAttestation
       ? { workspaceAttestation: request.workspaceAttestation } : {}),
     ...(request.interruptionEvidence
       ? { interruptionEvidence: request.interruptionEvidence } : {}),
   };
+}
+
+export async function verifyHostedLifecycleReceiptV1(input: {
+  receipt: HostedLifecycleReceiptEnvelopeV1;
+  request: HostedLifecycleRequestV1;
+  action: HostedLifecycleActionV1;
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  credentialId: string;
+}): Promise<boolean> {
+  const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(input.receipt);
+  const request = HostedLifecycleRequestV1Schema.parse(input.request);
+  const operation = hostedLifecycleReceiptOperationV1(input.action);
+  const expectedRequestDigest = await computeHostedLifecycleRequestDigestV1({
+    organizationId: input.organizationId,
+    runnerId: input.runnerId,
+    runId: input.runId,
+    action: input.action,
+    request,
+  });
+  const expectedRequestId = await computeHostedLifecycleRequestIdV1({
+    operationId: request.operationId,
+    requestDigest: request.requestDigest,
+  });
+  const expectedPayloadWithEvidence = hostedLifecycleReceiptPayloadV1({
+    action: input.action, request,
+    ...(receipt.payload.operation === "heartbeat"
+      ? { heartbeatLeaseExpiresAt: receipt.payload.leaseExpiresAt } : {}),
+  });
+  if (!expectedPayloadWithEvidence) return false;
   const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
   return request.requestDigest === expectedRequestDigest
     && request.requestId === expectedRequestId

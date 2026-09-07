@@ -490,6 +490,7 @@ async function runningRequest(claim: HostedClaimV1): Promise<HostedRunningReques
 async function progressRequest(
     claim: HostedClaimV1,
     occurredAt = observedAt,
+    evidence: Pick<HostedProgressRequestV1, "workspaceAttestation" | "interruptionEvidence"> = {},
 ): Promise<HostedProgressRequestV1> {
     const progressDigest = await computeControlPayloadDigestV1({ type: "status", occurredAt });
     return await buildHostedLifecycleRequestV1({
@@ -506,7 +507,8 @@ async function progressRequest(
         },
         occurredAt,
         progressId: `progress_${progressDigest.slice("sha256:".length)}`,
-        progressDigest
+        progressDigest,
+        ...evidence,
     }) as HostedProgressRequestV1;
 }
 async function progressReceipt(input: {
@@ -518,6 +520,8 @@ async function progressReceipt(input: {
         occurredAt: input.request.occurredAt,
         progressId: input.request.progressId,
         progressDigest: input.request.progressDigest,
+        ...(input.request.workspaceAttestation ? { workspaceAttestation: input.request.workspaceAttestation } : {}),
+        ...(input.request.interruptionEvidence ? { interruptionEvidence: input.request.interruptionEvidence } : {}),
     };
     const base = {
         schemaVersion: 1 as const,
@@ -2048,7 +2052,7 @@ describe("hosted heartbeat lease authority", () => {
         await expect(repo.completeHostedRunLocally({
             ...completion,
             request: alternateRequest,
-        })).rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_OPERATION_CONFLICT" });
+        })).rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_IDEMPOTENCY_CONFLICT" });
         expect(sqlite.prepare("SELECT status FROM runs WHERE id = ?").get(value.claim.runId))
             .toEqual({ status: "succeeded" });
         expect(sqlite.prepare("SELECT action, state FROM hosted_lifecycle_operations WHERE action = 'complete'").get())
@@ -2373,7 +2377,7 @@ describe("hosted heartbeat lease authority", () => {
         expect(sqlite.prepare("SELECT state FROM hosted_lifecycle_operations WHERE operation_id = ?")
             .get(nextRequest.operationId)).toEqual({ state: "leased" });
     });
-    it("bounds acknowledged heartbeat and progress history while preserving sequence across restart", async () => {
+    it.each([false, true])("bounds acknowledged heartbeat and progress history across restart (evidence=%s)", async (withEvidence) => {
         vi.useFakeTimers();
         const directory = await mkdtemp(join(tmpdir(), "opentag-lifecycle-retention-"));
         tempDirs.push(directory);
@@ -2430,7 +2434,25 @@ describe("hosted heartbeat lease authority", () => {
             attemptId: value.claim.attempt.id,
             fencingToken: value.claim.attempt.fencingToken,
         })).resolves.toEqual({ leaseExpiresAt: acceptedLease });
-        const request = await progressRequest(value.claim, progressAt.toISOString());
+        const request = await progressRequest(value.claim, progressAt.toISOString(), withEvidence ? {
+            workspaceAttestation: {
+                workspaceId: "workspace-1", workspacePathDigest: digestA,
+                repositoryPathDigest: digestA, worktreeIdentityDigest: digestA,
+                baseRevision: "a".repeat(40), currentRevision: "a".repeat(40),
+                currentTree: "b".repeat(40), workspaceStateDigest: digestB,
+                attemptId: value.claim.attempt.id, attemptNumber: value.claim.attempt.number,
+                fencingTokenDigest: value.claim.attempt.fencingTokenDigest,
+                credentialId: value.claim.authority.credentialId, leaseExpiresAt: acceptedLease,
+            },
+            interruptionEvidence: {
+                state: "interrupted_evidence", runId: value.claim.runId,
+                attemptId: value.claim.attempt.id, attemptNumber: value.claim.attempt.number,
+                workspaceId: "workspace-1", workspacePathDigest: digestA,
+                fencingTokenDigest: value.claim.attempt.fencingTokenDigest,
+                reason: "cancelled", observedAt: progressAt.toISOString(),
+                processStop: "unconfirmed", materialOutcome: "outcome_unknown",
+            },
+        } : {});
         const progressInput = {
             ...heartbeatAuthority,
             runId: value.claim.runId,
@@ -2473,6 +2495,18 @@ describe("hosted heartbeat lease authority", () => {
             operation: { operationId: request.operationId, state: "acknowledged", sequence: 130 },
         });
         const heartbeatAfterProgressAt = new Date(initialNow.getTime() + 130_000);
+        if (request.workspaceAttestation) {
+            const tampered = structuredClone(request);
+            tampered.workspaceAttestation!.workspaceStateDigest = digestA;
+            await expect(third.recordHostedProgressLocally({ ...progressInput, request: tampered }))
+                .rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_OPERATION_INVALID" });
+            const changedRequest = await buildHostedLifecycleRequestV1({
+                organizationId: value.claim.organizationId, runnerId: value.claim.runnerId,
+                runId: value.claim.runId, action: "progress", ...tampered,
+            }) as HostedProgressRequestV1;
+            await expect(third.recordHostedProgressLocally({ ...progressInput, request: changedRequest }))
+                .rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_IDEMPOTENCY_CONFLICT" });
+        }
         const latestHeartbeat = await acknowledgeHeartbeat({
             repo: third,
             claim: value.claim,
@@ -2486,7 +2520,7 @@ describe("hosted heartbeat lease authority", () => {
             attemptId: value.claim.attempt.id,
             fencingToken: value.claim.attempt.fencingToken,
             request,
-        })).rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_OPERATION_CONFLICT" });
+        })).rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_SIGNAL_ORDER_CONFLICT" });
         expect(thirdSqlite.prepare(`
       SELECT action, state, sequence
       FROM hosted_lifecycle_operations
@@ -2498,6 +2532,13 @@ describe("hosted heartbeat lease authority", () => {
         expect(() => thirdSqlite.prepare(`
       DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
     `).run(latestHeartbeat.request.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
+        const nextProgressAt = new Date(heartbeatAfterProgressAt.getTime() + 1_000);
+        vi.setSystemTime(nextProgressAt);
+        const nextProgress = await progressRequest(value.claim, nextProgressAt.toISOString());
+        await expect(third.recordHostedProgressLocally({
+            ...progressInput, request: nextProgress,
+        })).resolves.toMatchObject({ outcome: "recorded",
+            operation: { sequence: 132, state: "pending" } });
         thirdSqlite.close();
     });
     it("rolls successor acknowledgement and retention back together, then replays after restart", async () => {

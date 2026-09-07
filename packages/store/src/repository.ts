@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { AgentAccessProfileSnapshotSchema, AttemptSchema, ActionHintSchema, canonicalJsonStringify, computeControlPayloadDigestV1, computeHostedLifecycleRequestDigestV1, computeHostedLifecycleRequestIdV1, computeHostedLifecycleOperationIdV1, computeHostedLifecycleReceiptIdV1, computeHostedClaimFencingTokenDigestV1, ContextPacketSchema, conversationKeyFromEvent, OpenTagEventSchema, OpenTagRunResultSchema, PolicySnapshotProvenanceSchema, containsCredentialLikeData, isCredentialFieldName, sanitizeCredentialLikeValue, projectTargetRefFromEvent, protocolRunFieldsFromEvent, RunnerReadinessReceiptEnvelopeV1Schema, HostedClaimRequestV1Schema, HostedClaimV1Schema, HostedHeartbeatRequestV1Schema, HostedProgressRequestV1Schema, HostedRejectStartRequestV1Schema, HostedRunningRequestV1Schema, HostedCompleteRequestV1Schema, HostedLifecycleRequestV1Schema, HostedLifecycleReceiptEnvelopeV1Schema, WorkThreadSchema, verifyHostedAdmissionEnvelopeDigestV1, verifyHostedClaimFencingTokenDigestV1, verifyHostedLifecycleReceiptV1, type HostedClaimRequestV1, type HostedClaimV1, type HostedCompleteRequestV1, type HostedHeartbeatRequestV1, type HostedProgressRequestV1, type HostedRejectStartRequestV1, type HostedRunningRequestV1, type HostedLifecycleActionV1, type HostedLifecycleRequestV1, type HostedLifecycleReceiptEnvelopeV1, type OpenTagEvent, type OpenTagRun, type OpenTagRunResult, type RunnerReadinessReceiptEnvelopeV1, type WorkThread } from "@opentag/core";
+import { AgentAccessProfileSnapshotSchema, AttemptSchema, ActionHintSchema, canonicalJsonStringify, computeControlPayloadDigestV1, computeHostedLifecycleRequestDigestV1, hostedLifecycleRequestDigestInputV1, hostedLifecycleReceiptPayloadV1, computeHostedLifecycleRequestIdV1, computeHostedLifecycleOperationIdV1, computeHostedLifecycleReceiptIdV1, computeHostedClaimFencingTokenDigestV1, ContextPacketSchema, conversationKeyFromEvent, OpenTagEventSchema, OpenTagRunResultSchema, PolicySnapshotProvenanceSchema, containsCredentialLikeData, isCredentialFieldName, sanitizeCredentialLikeValue, projectTargetRefFromEvent, protocolRunFieldsFromEvent, RunnerReadinessReceiptEnvelopeV1Schema, HostedClaimRequestV1Schema, HostedClaimV1Schema, HostedHeartbeatRequestV1Schema, HostedProgressRequestV1Schema, HostedRejectStartRequestV1Schema, HostedRunningRequestV1Schema, HostedCompleteRequestV1Schema, HostedLifecycleRequestV1Schema, HostedLifecycleReceiptEnvelopeV1Schema, WorkThreadSchema, verifyHostedAdmissionEnvelopeDigestV1, verifyHostedClaimFencingTokenDigestV1, verifyHostedLifecycleReceiptV1, type HostedClaimRequestV1, type HostedClaimV1, type HostedCompleteRequestV1, type HostedHeartbeatRequestV1, type HostedProgressRequestV1, type HostedRejectStartRequestV1, type HostedRunningRequestV1, type HostedLifecycleActionV1, type HostedLifecycleRequestV1, type HostedLifecycleReceiptEnvelopeV1, type OpenTagEvent, type OpenTagRun, type OpenTagRunResult, type RunnerReadinessReceiptEnvelopeV1, type WorkThread } from "@opentag/core";
 
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, ne, notExists, or, sql } from "drizzle-orm";
 
@@ -117,7 +117,7 @@ export class HostedImportConflictError extends Error {
 
 export class HostedLifecycleOperationConflictError extends Error {
     override readonly name = "HostedLifecycleOperationConflictError";
-    constructor(readonly code: "HOSTED_LIFECYCLE_OPERATION_INVALID" | "HOSTED_LIFECYCLE_OPERATION_CONFLICT" | "HOSTED_LIFECYCLE_PREDECESSOR_NOT_ACKNOWLEDGED" | "HOSTED_LIFECYCLE_ATOMIC_API_REQUIRED") {
+    constructor(readonly code: "HOSTED_LIFECYCLE_OPERATION_INVALID" | "HOSTED_LIFECYCLE_OPERATION_CONFLICT" | "HOSTED_LIFECYCLE_IDEMPOTENCY_CONFLICT" | "HOSTED_LIFECYCLE_DEPENDENCY_INVALID" | "HOSTED_LIFECYCLE_SIGNAL_ORDER_CONFLICT" | "HOSTED_LIFECYCLE_PREDECESSOR_NOT_ACKNOWLEDGED" | "HOSTED_LIFECYCLE_ATOMIC_API_REQUIRED") {
         super(code);
     }
 }
@@ -612,72 +612,6 @@ function hostedLifecycleOperationFromRow(row: typeof hostedLifecycleOperations.$
     };
 }
 
-function hostedLifecycleRequestDigestSync(input: {
-    organizationId: string;
-    runnerId: string;
-    runId: string;
-    action: HostedLifecycleActionV1;
-    request: HostedLifecycleRequestV1;
-}): string {
-    const { request } = input;
-    const common = {
-        operation: input.action,
-        organizationId: input.organizationId,
-        runnerId: input.runnerId,
-        runId: input.runId,
-        schemaVersion: request.schemaVersion,
-        protocolVersion: request.protocolVersion,
-        requiredCapabilities: request.requiredCapabilities,
-        attempt: {
-            attemptId: request.attempt.attemptId,
-            attemptNumber: request.attempt.attemptNumber,
-            epoch: request.attempt.epoch,
-            fencingTokenDigest: request.attempt.fencingTokenDigest,
-        },
-        occurredAt: request.occurredAt,
-    };
-    const actionFields = input.action === "heartbeat"
-        ? {
-            expectedLeaseExpiresAt: HostedHeartbeatRequestV1Schema.parse(request).expectedLeaseExpiresAt,
-        }
-        : input.action === "running"
-            ? (() => {
-                const value = request as Extract<HostedLifecycleRequestV1, {
-                    executorCapabilityDigest: string;
-                }>;
-                return {
-                    executorId: value.executorId,
-                    executorCapabilityDigest: value.executorCapabilityDigest,
-                    ...(value.runTimeoutMs ? { runTimeoutMs: value.runTimeoutMs } : {}),
-                };
-            })()
-            : input.action === "reject-start"
-                ? (() => {
-                    const value = request as Extract<HostedLifecycleRequestV1, {
-                        reasonCode: string;
-                        executorId: string;
-                    }>;
-                    return { executorId: value.executorId, reasonCode: value.reasonCode };
-                })()
-                : input.action === "progress"
-                    ? (() => {
-                        const value = request as Extract<HostedLifecycleRequestV1, {
-                            progressId: string;
-                        }>;
-                        return { progressId: value.progressId, progressDigest: value.progressDigest };
-                    })()
-                    : (() => {
-                        const value = HostedCompleteRequestV1Schema.parse(request);
-                        return {
-                            conclusion: value.conclusion,
-                            reasonCode: value.reasonCode,
-                            resultDigest: value.resultDigest,
-                            artifactDigests: value.artifactDigests,
-                            evidenceDigests: value.evidenceDigests,
-                        };
-                    })();
-    return canonicalSha256Json({ ...common, ...actionFields });
-}
 
 function validAcknowledgedLifecycleDependency(row: typeof hostedLifecycleOperations.$inferSelect): boolean {
     try {
@@ -691,13 +625,13 @@ function validAcknowledgedLifecycleDependency(row: typeof hostedLifecycleOperati
             : action === "complete"
                 ? "executor_result"
                 : action;
-        const expectedRequestDigest = hostedLifecycleRequestDigestSync({
+        const expectedRequestDigest = canonicalSha256Json(hostedLifecycleRequestDigestInputV1({
             organizationId: row.organizationId,
             runnerId: row.runnerId,
             runId: row.runId,
             action,
             request,
-        });
+        }));
         const expectedOperationId = computeHostedLifecycleOperationIdV1(expectedRequestDigest);
         const expectedRequestId = `req_${canonicalSha256Json({
             purpose: "opentag-hosted-lifecycle-request-id-v1",
@@ -708,64 +642,12 @@ function validAcknowledgedLifecycleDependency(row: typeof hostedLifecycleOperati
             organizationId: row.organizationId,
             operationId: expectedOperationId,
         }).slice("sha256:".length)}`;
-        const expectedPayload = action === "heartbeat"
-            ? {
-                operation: expectedOperation,
-                occurredAt: request.occurredAt,
-                leaseExpiresAt: (receipt.payload as {
-                    leaseExpiresAt: string;
-                }).leaseExpiresAt,
-            }
-            : action === "running"
-                ? (() => {
-                    const value = request as Extract<HostedLifecycleRequestV1, {
-                        executorCapabilityDigest: string;
-                    }>;
-                    return {
-                        operation: expectedOperation,
-                        occurredAt: value.occurredAt,
-                        executorId: value.executorId,
-                        executorCapabilityDigest: value.executorCapabilityDigest,
-                        ...(value.runTimeoutMs ? { runTimeoutMs: value.runTimeoutMs } : {}),
-                    };
-                })()
-                : action === "reject-start"
-                    ? (() => {
-                        const value = request as Extract<HostedLifecycleRequestV1, {
-                            reasonCode: string;
-                            executorId: string;
-                        }>;
-                        return {
-                            operation: expectedOperation,
-                            occurredAt: value.occurredAt,
-                            executorId: value.executorId,
-                            reasonCode: value.reasonCode,
-                        };
-                    })()
-                    : action === "progress"
-                        ? (() => {
-                            const value = request as Extract<HostedLifecycleRequestV1, {
-                                progressId: string;
-                            }>;
-                            return {
-                                operation: expectedOperation,
-                                occurredAt: value.occurredAt,
-                                progressId: value.progressId,
-                                progressDigest: value.progressDigest,
-                            };
-                        })()
-                        : (() => {
-                            const value = HostedCompleteRequestV1Schema.parse(request);
-                            return {
-                                operation: expectedOperation,
-                                occurredAt: value.occurredAt,
-                                conclusion: value.conclusion,
-                                reasonCode: value.reasonCode,
-                                resultDigest: value.resultDigest,
-                                artifactDigests: value.artifactDigests,
-                                evidenceDigests: value.evidenceDigests,
-                            };
-                        })();
+        const expectedPayload = hostedLifecycleReceiptPayloadV1({
+            action, request,
+            ...(receipt.payload.operation === "heartbeat"
+                ? { heartbeatLeaseExpiresAt: receipt.payload.leaseExpiresAt } : {}),
+        });
+        if (!expectedPayload) return false;
         const { receiptDigest: _receiptDigest, ...receiptWithoutDigest } = receipt;
         return row.requestJson === canonicalJsonStringify(request)
             && row.receiptJson === canonicalJsonStringify(receipt)
@@ -1071,7 +953,7 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 && existing.businessKeyDigest === input.businessKeyDigest
                 && existing.requestJson === input.requestJson;
             if (!exact)
-                throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+                throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_IDEMPOTENCY_CONFLICT");
             return { outcome: "replayed", operation: hostedLifecycleOperationFromRow(existing) };
         }
         if (input.action === "heartbeat" || input.action === "progress") {
@@ -1085,12 +967,14 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 inArray(hostedLifecycleOperations.action, ["heartbeat", "progress"])
             )).orderBy(desc(hostedLifecycleOperations.sequence)).limit(1).get();
             if (highWater) {
+                if (!validAcknowledgedLifecycleDependency(highWater)) {
+                    throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_DEPENDENCY_INVALID");
+                }
                 const highWaterRequest = HostedLifecycleRequestV1Schema.parse(
                     JSON.parse(highWater.requestJson)
                 );
-                if (!validAcknowledgedLifecycleDependency(highWater)
-                    || input.request.occurredAt <= highWaterRequest.occurredAt) {
-                    throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+                if (input.request.occurredAt <= highWaterRequest.occurredAt) {
+                    throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_SIGNAL_ORDER_CONFLICT");
                 }
             }
         }
