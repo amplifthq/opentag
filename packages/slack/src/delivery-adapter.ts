@@ -1,8 +1,9 @@
 import { EstablishedProviderBindingV1Schema, type DeliveryIntentV2,
   type EstablishedProviderBindingV1, type ProviderDeliveryResult } from '@opentag/delivery-contract';
 import { createSlackPostMessagePayload, createSlackReactionPayload, createSlackUpdateMessagePayload, type SlackBlock } from './render.js';
+import { observeSlackMessage, slackObservationMarker } from './observation.js';
 
-export type SlackDeliveryOperation = { kind: 'create_message'; channelId: string; threadTs?: string } | { kind: 'update_message' | 'add_reaction'; channelId: string; messageTs: string };
+export type SlackDeliveryOperation = { kind: 'create_message'; channelId: string; threadTs?: string } | { kind: 'update_message' | 'add_reaction'; channelId: string; messageTs: string; threadTs?: string };
 export type SlackDeliveryPresentation = { kind: 'message'; text: string; textFormat?: 'markdown' | 'mrkdwn'; blocks?: SlackBlock[] }
   | { kind: 'reaction'; name: string };
 const BINDING_FIELDS = ['providerId', 'providerInstanceId', 'bindingDigest',
@@ -11,8 +12,10 @@ type BindingDescriptor = Pick<EstablishedProviderBindingV1, typeof BINDING_FIELD
 type SlackDescriptor = Readonly<{ providerId: 'slack' } & Omit<BindingDescriptor, 'providerId'>>;
 type SlackDeliveryResult = ProviderDeliveryResult;
 export type SlackDeliveryAdapter = SlackDescriptor & {
+  reconcile(input: { intent: DeliveryIntentV2; operation: SlackDeliveryOperation; presentation: SlackDeliveryPresentation }): Promise<SlackDeliveryResult>;
   deliver(input: { intent: DeliveryIntentV2; operation: SlackDeliveryOperation; presentation: SlackDeliveryPresentation; signal?: AbortSignal }): Promise<SlackDeliveryResult> };
 type SlackDeliveryAdapterOptions = Omit<SlackDescriptor, 'providerId'> & {
+  teamId?: string; appId?: string;
   resolveCredential(input: SlackDescriptor & { signal: AbortSignal }): Promise<string>; fetchImpl?: typeof fetch; deadlineMs?: number };
 
 const API = 'https://slack.com/api/'; const SLACK_TS = /^\d{1,20}\.\d{1,20}$/u;
@@ -52,11 +55,22 @@ function intentMatches(intent: DeliveryIntentV2, operation: SlackDeliveryOperati
 }
 
 export function createSlackDeliveryAdapter(options: SlackDeliveryAdapterOptions): SlackDeliveryAdapter {
-  const { resolveCredential, fetchImpl = fetch, deadlineMs = 10_000, ...bindingFields } = options;
+  const { resolveCredential, fetchImpl = fetch, deadlineMs = 10_000, teamId, appId, ...bindingFields } = options;
   const descriptor = Object.freeze({ providerId: 'slack' as const, ...bindingFields });
   EstablishedProviderBindingV1Schema.parse({ bindingKind: 'established', ...descriptor, principalAssurance: 'configured_declared', lifecycle: 'active' });
   return Object.freeze({
     ...descriptor,
+    async reconcile(input) {
+      const binding = input.intent.providerBinding;
+      const request = requestFor(input.operation, input.presentation);
+      if (!teamId || !appId || !request || !intentMatches(input.intent, input.operation)
+        || binding.bindingKind !== 'established' || binding.lifecycle !== 'active'
+        || !bindingMatches(binding, descriptor)) return failed('outcome_unknown',
+          'provider_binding_mismatch', { code: 'observation_binding_unavailable' });
+      return observeSlackMessage({ ...input, payload: request.payload, teamId, appId,
+        principalDigest: descriptor.providerPrincipalDigest, fetchImpl, deadlineMs,
+        resolveCredential: signal => resolveCredential({ ...descriptor, signal }) });
+    },
     async deliver(input) {
       const binding = input.intent.providerBinding; if (binding.bindingKind !== 'established' || binding.lifecycle !== 'active' || !bindingMatches(binding, descriptor)) {
         return failed('attention', 'provider_binding_mismatch', { code: 'provider_binding_mismatch' });
@@ -65,6 +79,8 @@ export function createSlackDeliveryAdapter(options: SlackDeliveryAdapterOptions)
         return failed('attention', 'invalid_delivery_shape', { code: 'invalid_delivery_shape' });
       }
 
+      const metadata = await slackObservationMarker(input.intent, request.payload);
+      const wirePayload = metadata ? { ...request.payload, metadata } : request.payload;
       const controller = new AbortController(); let deadlineExceeded = false; let timer!: ReturnType<typeof setTimeout>;
       const onAbort = () => controller.abort(input.signal?.reason);
       input.signal?.addEventListener('abort', onAbort, { once: true });
@@ -76,7 +92,7 @@ export function createSlackDeliveryAdapter(options: SlackDeliveryAdapterOptions)
         const token = await Promise.race([credential, deadline]);
         const response = await Promise.race([fetchImpl(`${API}${request.method}`, {
           method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json; charset=utf-8' },
-          body: JSON.stringify(request.payload), signal: controller.signal,
+          body: JSON.stringify(wirePayload), signal: controller.signal,
         }), deadline]);
         const responseEvidence = { method: request.method, status: response.status }; if (response.status >= 500) return failed('outcome_unknown', 'provider_5xx', responseEvidence);
         let body: unknown; try { body = await response.json(); } catch { return failed('outcome_unknown', 'malformed_response', responseEvidence); }

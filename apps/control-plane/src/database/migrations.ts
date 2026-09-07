@@ -720,6 +720,13 @@ export async function checkProjectionSchemaReadiness(
         AND attname='projection_purpose' AND attnotnull AND NOT attisdropped)
       AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_provider_delivery_intent'::regclass
         AND attname='projection_event_sequence' AND attnotnull AND NOT attisdropped)
+      AND EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_provider_delivery_intent' AND column_name='reconciliation_receipt'
+        AND data_type='jsonb' AND is_nullable='YES')
+      AND EXISTS(SELECT 1 FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+        AND proname='cp_provider_delivery_guard'
+        AND prosrc LIKE '%delivery_observation_authority_invalid%'
+        AND prosrc LIKE '%delivery_observation_immutable%')
       AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_provider_delivery_intent' AND (
           (ordinal_position=44 AND column_name='projection_revision' AND data_type='integer'
@@ -1002,7 +1009,7 @@ export async function checkProjectionSchemaReadiness(
       cp_delivery_projection_after:"6b6728815b61052622498226f1942cd74be0917267a07377b4fefa915f0c7ae7",
       cp_insert_team_relay_v2_job:"a16b6ab0f3a0b730e46d866edabf1f2e354546f609ac7b96c8c682af2f28d0b2",
       cp_project_effect_change:"e85e2d9679ffcc665f2d125d3787d0cbb88425c9a708bda625c8fb9184eb5a0f",
-      cp_provider_delivery_guard:"5c12474059a64ee2cbc07c94f317e59667a69cd31b52dcea817bc4feacc82477",
+      cp_provider_delivery_guard:"7e774b0cc2f63a3e17bd66cf6dffc9feef8db31bae6b54aed4d35bdd78bc7a54",
       cp_provider_delivery_delete_guard:"e81aff8787906c110cdb1f222824bbec8ba939b8d4d6b4448a5e3e48c8909e7a"};
     const exactBodies=row?.function_bodies!==null&&row?.function_bodies!==undefined
       &&Object.keys(row.function_bodies).length===Object.keys(expectedBodies).length

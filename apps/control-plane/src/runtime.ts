@@ -43,6 +43,7 @@ import { createSourceIngressService, SOURCE_INGRESS_WAIT_LIMIT_MS } from "./modu
 import { createPostgresSlackIngress, type SlackSecretResolver } from "./modules/slack-ingress/index.js";
 import { createPostgresDeliveryRepository } from "./modules/provider-delivery/repository.js";
 import { createProviderDeliveryWorker } from "./modules/provider-delivery/worker.js";
+import { createSlackDeliveryReconciler } from "./modules/provider-delivery/reconciliation.js";
 import { createTeamRelayProjectionJobHandler,
   createTeamRelayProjectionService } from "./modules/provider-delivery/team-relay-projection.js";
 import { createControlPlaneSourceThreadAuthority } from "./modules/slack-ingress/authority.js";
@@ -555,9 +556,10 @@ export function createControlPlaneRuntime(input: {
         effectAuthority: { approve: (command) => effects.approve(command) },
         ...(input.slackFetchImpl ? { fetchImpl: input.slackFetchImpl } : {}) })
     : null;
+  const providerAdapters = new ProviderAdapterRegistry<object>(sourceApps);
   const providerDeliveryKernel = new ProviderSideEffectKernel<object>({
     repository: providerDeliveryRepository,
-    registry: new ProviderAdapterRegistry<object>(sourceApps),
+    registry: providerAdapters,
     prepareRequest(intent, stored) {
       const payload = stored as DeliveryPayloadEnvelope<object>;
       return { request: payload.providerRequest, operation: intent.operation,
@@ -590,6 +592,14 @@ export function createControlPlaneRuntime(input: {
       return { registered: sourceApps.deliveryAuthorities().length,
         healthy: sourceApps.deliveryAuthorities(), failures: preload?.failures ?? [] };
     }, clock });
+  const slackDeliveryReconciler = createSlackDeliveryReconciler({ pool: postgres.pool, jobs,
+    owner: deliveryRuntimeOwner, clock, async observe(intent, request) {
+      await slack?.preloadSourceApps();
+      const adapter = providerAdapters.resolve({ organizationId: intent.organizationId,
+        binding: intent.providerBinding });
+      if (!adapter) throw new Error("slack_observation_binding_unavailable");
+      return adapter.reconcile({ intent, request });
+    } });
   const jobHandlers = {
     "hosted-attempt-reconciliation": async (job: { organizationId: string | null }) => {
       const queued = await hosted.expireQueued(job.organizationId);
@@ -598,6 +608,10 @@ export function createControlPlaneRuntime(input: {
     },
     "runner-readiness-retention": async (job: { organizationId: string | null }) =>
       runners.pruneExpiredReadiness(job.organizationId),
+    "provider-delivery-observation": async () => {
+      await slackDeliveryReconciler.schedule();
+      return slackDeliveryReconciler.processNext();
+    },
     "provider-delivery": async () => {
       let delivered = 0;
       for (; delivered < 100; delivered += 1) {
@@ -723,6 +737,7 @@ export function createControlPlaneRuntime(input: {
     providerDeliveryProducer,
     providerDeliveryRepository,
     providerDeliveryWorker,
+    slackDeliveryReconciler,
     teamRelayProjection,
     reads,
     runners,

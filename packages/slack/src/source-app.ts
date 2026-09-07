@@ -98,6 +98,7 @@ function normalizeResult(payloadInput: unknown, botUserId: string,
 
 export function createSlackSourceApp(options: { installation: SourceAppInstallation;
   signingSecret: string; botUserId: string; resolveCredential(): Promise<string>;
+  teamId?: string; appId?: string;
   fetchImpl?: typeof fetch; clock?: () => number;
 }): SourceAppDefinition<unknown, SlackDeliveryPresentation, SlackNativeRequest> {
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -105,7 +106,9 @@ export function createSlackSourceApp(options: { installation: SourceAppInstallat
     bindingDigest: options.installation.bindingDigest, providerPrincipalDigest: digest(options.botUserId),
     providerConfigGeneration: options.installation.credentialGeneration,
     providerConfigGenerationDigest: options.installation.credentialGenerationDigest,
-    resolveCredential: async () => options.resolveCredential(), fetchImpl });
+    resolveCredential: async () => options.resolveCredential(), fetchImpl,
+    ...(options.teamId ? { teamId: options.teamId } : {}),
+    ...(options.appId ? { appId: options.appId } : {}) });
   const normalizePort = (input: unknown) => { const verified = input && typeof input === "object" && "payload" in input
     ? input as VerifiedSlackInput : undefined;
     return normalizeResult(verified?.payload ?? input, options.botUserId, verified); };
@@ -148,7 +151,6 @@ export function createSlackSourceApp(options: { installation: SourceAppInstallat
         return { operation: { kind: "create_message", channelId, ...(threadTs ? { threadTs } : {}) }, presentation: render(command) }; },
       deliver: ({ request, intent, signal }) => adapter.deliver({ ...request, intent,
         ...(signal ? { signal } : {}) }) as Promise<ProviderDeliveryResult>,
-      async reconcile() { return { outcome: "outcome_unknown",
-        evidenceDigest: digest("slack_reconciliation_requires_observation") } as ProviderDeliveryResult; }
+      reconcile: ({ request, intent }) => adapter.reconcile({ ...request, intent })
     } };
 }

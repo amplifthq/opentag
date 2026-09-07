@@ -250,7 +250,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
           expect((await slackFixture.pool.query("SELECT count(*)::int AS count FROM cp_hosted_run"))
             .rows).toEqual([{ count: 0 }]);
           await slackFixture.pool.query(
-            "UPDATE cp_job SET available_at=clock_timestamp() WHERE job_kind='source_ingress.process'",
+            "UPDATE cp_job SET available_at=clock_timestamp()-interval '1 second' WHERE job_kind='source_ingress.process'",
           );
         }
         await runtime.runners.recordReadiness({ principal: authenticated.principal, receipt: readiness });

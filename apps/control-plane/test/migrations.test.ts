@@ -49,7 +49,9 @@ const migration = (name: string, sql: string): SqlMigration => ({
 describe("fresh PostgreSQL baseline", () => {
   it("ships one direct 38-table baseline without retired schema history", async () => {
     const migrations = await loadSqlMigrations(join(process.cwd(), "apps/control-plane/migrations"));
-    expect(migrations.map(({ name }) => name)).toEqual(["0000_control_plane.sql"]);
+    expect(migrations.map(({ name }) => name)).toEqual([
+      "0000_control_plane.sql", "0001_slack_delivery_observation.sql",
+    ]);
     const sql = migrations[0]!.sql;
     expect(sql.match(/^CREATE TABLE cp_/gmu)).toHaveLength(38);
     expect(sql).toContain("CREATE TABLE cp_effect (");

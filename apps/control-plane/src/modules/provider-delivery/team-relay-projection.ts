@@ -129,7 +129,8 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     const priorOperation = priorRequest.operation ?? {};
     const providerRequest = { ...priorRequest,
       operation: acceptedAnchor ? { kind: "update_message",
-        channelId: priorOperation.channelId, messageTs: acceptedAnchor.externalResourceId }
+        channelId: priorOperation.channelId, messageTs: acceptedAnchor.externalResourceId,
+        ...(priorOperation.threadTs ? { threadTs: priorOperation.threadTs } : {}) }
         : priorOperation,
       presentation: { kind: "message", text, textFormat: "mrkdwn", blocks } };
     const terminal = ["proposal_ready", "ready_for_review", "failed", "cancelled",

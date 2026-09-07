@@ -208,7 +208,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0].intent.operation).toBe("update");
     expect(requests[0].providerRequest.operation).toEqual({ kind: "update_message",
-      channelId: "C1", messageTs: "171.001" });
+      channelId: "C1", messageTs: "171.001", threadTs: "1700000000.1" });
     const external=DeliveryIntentV2Schema.parse({...baseline,sideEffectIntentId:"external_rejected",
       idempotencyKey:"external_rejected",projectionPurpose:"external",
       presentationDigest:digest("external-rejected"),createdAt:new Date(now.getTime()+1).toISOString()});

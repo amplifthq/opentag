@@ -9,6 +9,7 @@ const TERMINAL_RETENTION_JOB_KINDS = [
   "hosted-attempt-reconciliation",
   "runner-readiness-retention",
   "provider-delivery",
+  "provider-delivery-observation",
   "source-content-purge",
   "job-retention",
 ] as const;
@@ -320,6 +321,13 @@ export async function scheduleControlPlaneMaintenance(input: {
       jobId: `provider-delivery:${windowStart}`,
       organizationId: null,
       kind: "provider-delivery",
+      payload: { windowStart },
+      maxAttempts: 1,
+    },
+    {
+      jobId: `provider-delivery-observation:${windowStart}`,
+      organizationId: null,
+      kind: "provider-delivery-observation",
       payload: { windowStart },
       maxAttempts: 1,
     },

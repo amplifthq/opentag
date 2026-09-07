@@ -193,6 +193,7 @@ function buildInstallationApp(input: { installation: SlackInstallation; signingS
     credentialGeneration: input.installation.credentialGeneration,
     credentialGenerationDigest: input.installation.credentialGenerationDigest,
   }, signingSecret: input.signingSecret, botUserId: input.installation.botUserId,
+  teamId: input.installation.teamId, appId: input.installation.appId,
   resolveCredential: () => input.secrets.resolve(input.installation.botTokenRef),
   ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
   clock: () => input.clock.now().getTime() });

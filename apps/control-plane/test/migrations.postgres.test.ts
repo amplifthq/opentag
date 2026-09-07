@@ -63,7 +63,9 @@ describe.skipIf(!TEST_DATABASE_URL)("fresh PostgreSQL baseline", () => {
 
   it("creates exactly the current 38-table schema and is idempotently ready", async () => {
     const fixture = await fresh();
-    expect(fixture.migrations.map(({ name }) => name)).toEqual(["0000_control_plane.sql"]);
+    expect(fixture.migrations.map(({ name }) => name)).toEqual([
+      "0000_control_plane.sql", "0001_slack_delivery_observation.sql",
+    ]);
     await expect(fixture.migrate()).resolves.toBeUndefined();
     await expect(fixture.migrate()).resolves.toBeUndefined();
     await expect(checkMigrationReadiness(fixture.pool,fixture.migrations))

@@ -54,6 +54,51 @@ from a Slack projection or process log.
 
 ## Procedure
 
+### Read-only recovery of an uncertain Slack projection
+
+Apply `0001_slack_delivery_observation.sql` after the current fresh baseline.
+It adds one nullable `reconciliation_receipt` field, no tables, and a narrowly
+guarded unknown-to-accepted transition. The retired pre-reset migration history
+still has no upgrade path. Take the usual database backup before migration.
+
+New versioned Slack messages carry `opentag_projection_v1` metadata with an
+opaque digest binding the frozen intent, revision/event sequence, target,
+provider binding and rendered request. The metadata contains no command text or
+raw credentials. Recovery requires Slack to return it via `include_all_metadata`;
+missing metadata, missing read permission or unsupported readback remains unknown.
+
+The minute-window observation job schedules durable per-intent jobs and runs at
+most one observation each minute across the installation. It uses only GET:
+`auth.test`, then the specific thread/message. Update lookups use exact timestamp
+bounds; creation lookups require a complete, unique bounded thread observation.
+The adapter verifies the workspace, bot and app, thread/message target, marker,
+text and blocks. Only Slack-added block IDs and default text flags are ignored.
+Extra attachments, altered controls, another version, absent/deleted messages,
+incomplete pagination, malformed or oversized responses never imply success or
+permission to resend. Reads time out after 10 seconds and are bounded to 2 MB.
+
+On an exact observation, the worker rechecks its job lease and the current source
+binding, locks the delivery truth key, and atomically records the observation,
+marks the delivery accepted, and settles the observation job. The immutable
+receipt retains the original unknown evidence, error and timestamp. A stale
+worker, disabled/rotated binding or changed payload cannot settle. Database
+triggers require the active observation lease and forbid receipt rewrites.
+Existing projection dispatch then resumes; an observed anchor also wakes its
+deferred projection. Neither observation nor recovery calls a Slack write API.
+
+Unconfirmed reads retain unknown and retry with bounded backoff (one minute to
+15 minutes, respecting a longer valid `Retry-After`). After 100 attempts the job
+fails visibly and requires operator review; it never clears or retries the
+uncertain delivery. Prior messages without the marker cannot be retroactively
+certified from matching text alone. This path does not recover reactions or
+unthreaded creates, does not revive a Run/Attempt, and does not grant approval.
+
+For acceptance, simulate a provider-accepted write whose response is lost, then
+verify: exactly one write, a matching read observation and immutable receipt,
+and only then a claimable newer projection. Repeat with wrong version/content,
+binding rotation, expired lease, restart, and a settlement rollback. Keep real
+provider canary evidence separate from these deterministic tests.
+
 ### A0. Prove durable waiting before admission
 
 1. Establish real readiness, stop the Runner, and let the receipt expire (or be
