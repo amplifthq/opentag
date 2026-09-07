@@ -194,6 +194,7 @@ describe("Runner-local Effect journal", () => {
       acquireRequestId: "acquire_2",
       permit: wrongBinding,
       leaseToken: secondLease.leaseToken,
+      now: T1,
     })).rejects.toMatchObject({ code: "LOCAL_EFFECT_PERMIT_INVALID" });
 
     await expect(repo.acceptLocalEffectPermit({
