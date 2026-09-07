@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import {
   AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
+  AttemptWorkspaceAttestationV1Schema,
   EffectAcquireRequestV1Schema,
   EffectEvidenceEnvelopeV1Schema,
   EffectPermitV1Schema,
   EffectRequestV1Schema,
   EffectViewV1Schema,
   GitHubDraftPullRequestEffectTargetV1Schema,
+  HostedAdmissionEnvelopeV1Schema,
   computeEffectEvidencePayloadDigestV1,
   computeEffectPermitDigestV1,
   computeEffectRequestDigestV1,
@@ -14,11 +16,14 @@ import {
   verifyEffectEvidenceEnvelopeV1,
   verifyEffectPermitV1,
   verifyEffectRequestV1,
+  type AdmissionPolicySnapshotReceiptEnvelopeV1,
+  type AttemptWorkspaceAttestationV1,
   type EffectAcquireRequestV1,
   type EffectEvidenceEnvelopeV1,
   type EffectPermitV1,
   type EffectRequestV1,
   type EffectViewV1,
+  type HostedAdmissionEnvelopeV1,
 } from "@opentag/control-protocol";
 import { canonicalJsonStringify } from "@opentag/control-protocol/canonical-json";
 import { assessExactPullRequestReadiness } from "@opentag/github";
@@ -91,14 +96,113 @@ type AttemptRow = {
   created_at: Date;
 };
 
-type LockedAuthority = {
-  effect: EffectRow;
-  run: Record<string, any>;
-  attempt: Record<string, any>;
-  runner: Record<string, any>;
-  candidate: Record<string, any>;
-  target: Record<string, any>;
+type RunAuthorityRow = {
+  organization_id: string;
+  run_id: string;
+  runner_id: string;
+  current_attempt_number: number;
+  publication_mode: string;
+  completion_mode: string;
+  terminal_kind: string | null;
+  publication_policy_digest: string;
+  hosted_admission: unknown;
+  admission_policy_snapshot: unknown;
 };
+
+type RunAttemptAuthorityRow = {
+  organization_id: string;
+  run_id: string;
+  attempt_id: string;
+  attempt_number: number;
+  runner_id: string;
+  state: string;
+  fencing_token_digest: string;
+  workspace_attestation: unknown | null;
+};
+
+type RunnerAuthorityRow = {
+  organization_id: string;
+  runner_id: string;
+  registration_generation: number;
+  credential_generation: number;
+  current_credential_id: string;
+};
+
+type CandidateAuthorityRow = {
+  organization_id: string;
+  candidate_id: string;
+  run_id: string;
+  attempt_id: string;
+  attempt_number: number;
+  project_target_id: string;
+  frozen_base_revision: string;
+  workspace_tree_digest: string;
+  publication_policy_digest: string;
+  candidate: unknown;
+};
+
+type ProjectTargetAuthorityRow = {
+  organization_id: string;
+  project_target_id: string;
+  runner_id: string;
+  binding_digest: string;
+  binding_generation: number;
+  provider: string;
+  owner: string;
+  repo: string;
+  default_branch: string;
+};
+
+type AuthorityRows = {
+  run: RunAuthorityRow;
+  attempt: RunAttemptAuthorityRow;
+  runner: RunnerAuthorityRow;
+  candidate: CandidateAuthorityRow;
+  target: ProjectTargetAuthorityRow;
+};
+
+type LockedAuthority = AuthorityRows & {
+  effect: EffectRow;
+};
+
+type EffectAuthorityExpectation = {
+  organizationId: string;
+  runnerId: string;
+  runnerGeneration: number;
+  runId: string;
+  runAttemptId: string;
+  runAttemptNumber: number;
+  fencingTokenDigest: string;
+  candidateId: string;
+  candidateDigest: string;
+  projectTargetId: string;
+  targetBindingDigest: string;
+  targetBindingGeneration: number;
+  target: EffectRequestV1["target"];
+  policySnapshotId: string;
+  policySnapshotDigest: string;
+};
+
+type StoredAuthorityDocuments = {
+  admission: HostedAdmissionEnvelopeV1;
+  workspace: AttemptWorkspaceAttestationV1;
+  policy: AdmissionPolicySnapshotReceiptEnvelopeV1;
+};
+
+export type EffectAuthorityStoredStateErrorCode =
+  | "EFFECT_AUTHORITY_STORED_ADMISSION_INVALID"
+  | "EFFECT_AUTHORITY_STORED_WORKSPACE_INVALID"
+  | "EFFECT_AUTHORITY_STORED_POLICY_INVALID"
+  | "EFFECT_AUTHORITY_STORED_TARGET_INVALID"
+  | "EFFECT_AUTHORITY_STORED_TARGET_DIGEST_INVALID";
+
+export class EffectAuthorityStoredStateError extends Error {
+  override readonly name = "EffectAuthorityStoredStateError";
+
+  constructor(readonly code: EffectAuthorityStoredStateErrorCode) {
+    super(code);
+  }
+}
 
 export type EffectApproval = {
   organizationId: string;
@@ -233,6 +337,60 @@ function projectEffect(row: EffectRow): EffectViewV1 {
   }
 }
 
+type AuthorityIdentity = {
+  organizationId: string;
+  runId: string;
+  runAttemptId: string;
+  runAttemptNumber: number;
+  runnerId: string;
+  candidateId: string;
+  projectTargetId: string;
+};
+
+async function lockAuthorityRows(
+  client: PostgresTransactionClient,
+  identity: AuthorityIdentity,
+): Promise<AuthorityRows | null> {
+  const run = await client.query<RunAuthorityRow>(
+    `SELECT organization_id,run_id,runner_id,current_attempt_number,publication_mode,
+       completion_mode,terminal_kind,publication_policy_digest,hosted_admission,
+       admission_policy_snapshot
+     FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2 FOR UPDATE`,
+    [identity.organizationId, identity.runId],
+  );
+  const attempt = await client.query<RunAttemptAuthorityRow>(
+    `SELECT organization_id,run_id,attempt_id,attempt_number,runner_id,state,
+       fencing_token_digest,workspace_attestation
+     FROM cp_hosted_attempt
+     WHERE organization_id=$1 AND run_id=$2 AND attempt_number=$3 AND attempt_id=$4 FOR UPDATE`,
+    [identity.organizationId, identity.runId, identity.runAttemptNumber, identity.runAttemptId],
+  );
+  const runner = await client.query<RunnerAuthorityRow>(
+    `SELECT organization_id,runner_id,registration_generation,credential_generation,
+       current_credential_id
+     FROM cp_runner WHERE organization_id=$1 AND runner_id=$2 FOR UPDATE`,
+    [identity.organizationId, identity.runnerId],
+  );
+  const candidate = await client.query<CandidateAuthorityRow>(
+    `SELECT organization_id,candidate_id,run_id,attempt_id,attempt_number,project_target_id,
+       frozen_base_revision,workspace_tree_digest,publication_policy_digest,candidate
+     FROM cp_publication_candidate
+     WHERE organization_id=$1 AND candidate_id=$2 FOR UPDATE`,
+    [identity.organizationId, identity.candidateId],
+  );
+  const target = await client.query<ProjectTargetAuthorityRow>(
+    `SELECT organization_id,project_target_id,runner_id,binding_digest,binding_generation,
+       provider,owner,repo,default_branch
+     FROM cp_project_target
+     WHERE organization_id=$1 AND project_target_id=$2 FOR UPDATE`,
+    [identity.organizationId, identity.projectTargetId],
+  );
+  if (!run.rows[0] || !attempt.rows[0] || !runner.rows[0]
+    || !candidate.rows[0] || !target.rows[0]) return null;
+  return { run: run.rows[0], attempt: attempt.rows[0], runner: runner.rows[0],
+    candidate: candidate.rows[0], target: target.rows[0] };
+}
+
 async function lockAuthority(client: PostgresTransactionClient, input: {
   organizationId: string;
   effectId: string;
@@ -245,168 +403,196 @@ async function lockAuthority(client: PostgresTransactionClient, input: {
   );
   const identity = discovered.rows[0];
   if (!identity) return null;
-  const run = await client.query<Record<string, any>>(
-    `SELECT * FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2 FOR UPDATE`,
-    [input.organizationId, identity.run_id],
-  );
-  const attempt = await client.query<Record<string, any>>(
-    `SELECT * FROM cp_hosted_attempt
-     WHERE organization_id=$1 AND run_id=$2 AND attempt_number=$3 AND attempt_id=$4 FOR UPDATE`,
-    [input.organizationId, identity.run_id, identity.run_attempt_number,
-      identity.run_attempt_id],
-  );
-  const runner = await client.query<Record<string, any>>(
-    `SELECT * FROM cp_runner WHERE organization_id=$1 AND runner_id=$2 FOR UPDATE`,
-    [input.organizationId, identity.runner_id],
-  );
-  const candidate = await client.query<Record<string, any>>(
-    `SELECT * FROM cp_publication_candidate
-     WHERE organization_id=$1 AND candidate_id=$2 FOR UPDATE`,
-    [input.organizationId, identity.candidate_id],
-  );
-  const target = await client.query<Record<string, any>>(
-    `SELECT * FROM cp_project_target
-     WHERE organization_id=$1 AND project_target_id=$2 FOR UPDATE`,
-    [input.organizationId, identity.project_target_id],
-  );
+  const rows = await lockAuthorityRows(client, {
+    organizationId: input.organizationId,
+    runId: identity.run_id,
+    runAttemptId: identity.run_attempt_id,
+    runAttemptNumber: identity.run_attempt_number,
+    runnerId: identity.runner_id,
+    candidateId: identity.candidate_id,
+    projectTargetId: identity.project_target_id,
+  });
   const effect = await client.query<EffectRow>(
     `SELECT * FROM cp_effect WHERE organization_id=$1 AND effect_id=$2 FOR UPDATE`,
     [input.organizationId, input.effectId],
   );
-  if (!run.rows[0] || !attempt.rows[0] || !runner.rows[0]
-    || !candidate.rows[0] || !target.rows[0] || !effect.rows[0]) return null;
-  return { effect: effect.rows[0], run: run.rows[0], attempt: attempt.rows[0],
-    runner: runner.rows[0], candidate: candidate.rows[0], target: target.rows[0] };
+  return rows && effect.rows[0] ? { ...rows, effect: effect.rows[0] } : null;
 }
 
-function exactFrozenAuthority(locked: LockedAuthority, request: EffectRequestV1): boolean {
-  const { run, attempt, runner, candidate, target } = locked;
-  const admission = run.hosted_admission as Record<string, any> | null;
-  const workspace = attempt.workspace_attestation as Record<string, any> | null;
-  let policy;
+function parseStoredAuthorityValue<T>(
+  schema: { parse(value: unknown): T },
+  value: unknown,
+  code: EffectAuthorityStoredStateErrorCode,
+): T {
   try {
-    policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(run.admission_policy_snapshot);
+    return schema.parse(value);
   } catch {
-    return false;
+    throw new EffectAuthorityStoredStateError(code);
   }
-  return run.publication_mode === "pull_request"
-    && run.completion_mode === "pull_request_ready"
-    && run.terminal_kind === null
-    && run.runner_id === request.runnerId
-    && run.current_attempt_number === request.work.attemptNumber
-    && attempt.attempt_id === request.work.attemptId
-    && attempt.attempt_number === request.work.attemptNumber
-    && attempt.runner_id === request.runnerId
-    && attempt.state === "succeeded"
-    && attempt.fencing_token_digest === request.work.fencingTokenDigest
-    && runner.credential_generation === request.runnerGeneration
-    && candidate.run_id === request.work.runId
-    && candidate.attempt_id === request.work.attemptId
-    && candidate.attempt_number === request.work.attemptNumber
-    && candidate.project_target_id === request.target.projectTargetId
-    && digest(candidate.candidate) === request.candidate.candidateDigest
-    && candidate.candidate_id === request.candidate.candidateId
-    && candidate.frozen_base_revision === request.target.frozenBaseRevision
-    && candidate.workspace_tree_digest === request.target.workspaceTreeDigest
-    && candidate.publication_policy_digest === run.publication_policy_digest
-    && target.runner_id === request.runnerId
-    && target.binding_digest === request.target.targetBindingDigest
-    && target.binding_generation === request.target.targetBindingGeneration
-    && String(target.provider).toLowerCase() === request.target.provider
-    && String(target.owner).toLowerCase() === request.target.owner.toLowerCase()
-    && String(target.repo).toLowerCase() === request.target.repo.toLowerCase()
-    && target.default_branch === request.target.baseBranch
-    && workspace?.attemptId === request.work.attemptId
-    && workspace?.attemptNumber === request.work.attemptNumber
-    && workspace?.fencingTokenDigest === request.work.fencingTokenDigest
-    && workspace?.baseRevision === request.target.frozenBaseRevision
-    && workspace?.currentTree === request.target.workspaceTreeDigest
-    && workspace?.currentRevision === request.target.expectedHeadSha
-    && admission?.projectTarget?.projectTargetId === request.target.projectTargetId
-    && admission?.projectTarget?.digest === request.target.targetBindingDigest
-    && admission?.publicationPolicy?.mode === "pull_request"
-    && admission?.publicationPolicy?.digest === run.publication_policy_digest
-    && String(admission?.repository?.provider ?? admission?.provider ?? "").toLowerCase()
-      === request.target.provider
-    && String(admission?.repository?.owner ?? "").toLowerCase()
-      === request.target.owner.toLowerCase()
-    && String(admission?.repository?.repo ?? "").toLowerCase()
-      === request.target.repo.toLowerCase()
-    && policy.payload.snapshotId === request.authority.policySnapshotId
-    && policy.receiptDigest === request.authority.policySnapshotDigest
-    && policy.runId === request.work.runId
-    && policy.payload.tenant.organizationId === request.organizationId
-    && policy.payload.runner.runnerId === request.runnerId
-    && policy.payload.target.projectTargetId === request.target.projectTargetId
-    && policy.payload.target.repositoryProvider === request.target.provider
-    && policy.payload.target.defaultBranch === request.target.baseBranch
-    && policy.payload.target.authorizedPublicationModes.includes("pull_request");
 }
 
-async function exactStoredAuthority(locked: LockedAuthority): Promise<boolean> {
-  const { effect, run, attempt, runner, candidate, target } = locked;
-  let frozenTarget;
-  let policy;
-  try {
-    frozenTarget = GitHubDraftPullRequestEffectTargetV1Schema.parse(effect.target);
-    policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(run.admission_policy_snapshot);
-  } catch {
-    return false;
-  }
-  const admission = run.hosted_admission as Record<string, any> | null;
-  const workspace = attempt.workspace_attestation as Record<string, any> | null;
-  return effect.target_digest === await computeEffectTargetDigestV1(frozenTarget)
-    && effect.effect_kind === "github.create_draft_pull_request"
-    && effect.project_target_id === frozenTarget.projectTargetId
-    && effect.target_binding_digest === frozenTarget.targetBindingDigest
-    && effect.target_binding_generation === frozenTarget.targetBindingGeneration
+function parseStoredPolicy(run: RunAuthorityRow): AdmissionPolicySnapshotReceiptEnvelopeV1 {
+  return parseStoredAuthorityValue(
+    AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
+    run.admission_policy_snapshot,
+    "EFFECT_AUTHORITY_STORED_POLICY_INVALID",
+  );
+}
+
+function parseStoredEffectTarget(effect: EffectRow): EffectRequestV1["target"] {
+  return parseStoredAuthorityValue(
+    GitHubDraftPullRequestEffectTargetV1Schema,
+    effect.target,
+    "EFFECT_AUTHORITY_STORED_TARGET_INVALID",
+  );
+}
+
+function parseStoredAuthorityDocuments(rows: AuthorityRows): StoredAuthorityDocuments | null {
+  const admission = parseStoredAuthorityValue(
+    HostedAdmissionEnvelopeV1Schema,
+    rows.run.hosted_admission,
+    "EFFECT_AUTHORITY_STORED_ADMISSION_INVALID",
+  );
+  const policy = parseStoredPolicy(rows.run);
+  if (rows.attempt.workspace_attestation === null) return null;
+  const workspace = parseStoredAuthorityValue(
+    AttemptWorkspaceAttestationV1Schema,
+    rows.attempt.workspace_attestation,
+    "EFFECT_AUTHORITY_STORED_WORKSPACE_INVALID",
+  );
+  return { admission, workspace, policy };
+}
+
+function authorityExpectationFromRequest(request: EffectRequestV1): EffectAuthorityExpectation {
+  return {
+    organizationId: request.organizationId,
+    runnerId: request.runnerId,
+    runnerGeneration: request.runnerGeneration,
+    runId: request.work.runId,
+    runAttemptId: request.work.attemptId,
+    runAttemptNumber: request.work.attemptNumber,
+    fencingTokenDigest: request.work.fencingTokenDigest,
+    candidateId: request.candidate.candidateId,
+    candidateDigest: request.candidate.candidateDigest,
+    projectTargetId: request.target.projectTargetId,
+    targetBindingDigest: request.target.targetBindingDigest,
+    targetBindingGeneration: request.target.targetBindingGeneration,
+    target: request.target,
+    policySnapshotId: request.authority.policySnapshotId,
+    policySnapshotDigest: request.authority.policySnapshotDigest,
+  };
+}
+
+function authorityExpectationFromEffect(
+  effect: EffectRow,
+  target: EffectRequestV1["target"],
+): EffectAuthorityExpectation {
+  return {
+    organizationId: effect.organization_id,
+    runnerId: effect.runner_id,
+    runnerGeneration: effect.runner_generation,
+    runId: effect.run_id,
+    runAttemptId: effect.run_attempt_id,
+    runAttemptNumber: effect.run_attempt_number,
+    fencingTokenDigest: effect.fencing_token_digest,
+    candidateId: effect.candidate_id,
+    candidateDigest: effect.candidate_digest,
+    projectTargetId: effect.project_target_id,
+    targetBindingDigest: effect.target_binding_digest,
+    targetBindingGeneration: effect.target_binding_generation,
+    target,
+    policySnapshotId: effect.policy_snapshot_id,
+    policySnapshotDigest: effect.policy_snapshot_digest,
+  };
+}
+
+function exactAuthority(
+  rows: AuthorityRows,
+  expected: EffectAuthorityExpectation,
+): boolean {
+  const documents = parseStoredAuthorityDocuments(rows);
+  if (!documents) return false;
+  const { run, attempt, runner, candidate, target } = rows;
+  const { admission, workspace, policy } = documents;
+  return run.organization_id === expected.organizationId
+    && run.run_id === expected.runId
     && run.publication_mode === "pull_request"
     && run.completion_mode === "pull_request_ready"
     && run.terminal_kind === null
-    && run.runner_id === effect.runner_id
-    && run.current_attempt_number === effect.run_attempt_number
-    && attempt.attempt_id === effect.run_attempt_id
-    && attempt.attempt_number === effect.run_attempt_number
-    && attempt.runner_id === effect.runner_id
+    && run.runner_id === expected.runnerId
+    && run.current_attempt_number === expected.runAttemptNumber
+    && attempt.organization_id === expected.organizationId
+    && attempt.run_id === expected.runId
+    && attempt.attempt_id === expected.runAttemptId
+    && attempt.attempt_number === expected.runAttemptNumber
+    && attempt.runner_id === expected.runnerId
     && attempt.state === "succeeded"
-    && attempt.fencing_token_digest === effect.fencing_token_digest
-    && runner.credential_generation === effect.runner_generation
-    && candidate.run_id === effect.run_id
-    && candidate.attempt_id === effect.run_attempt_id
-    && candidate.attempt_number === effect.run_attempt_number
-    && candidate.candidate_id === effect.candidate_id
-    && digest(candidate.candidate) === effect.candidate_digest
-    && candidate.project_target_id === effect.project_target_id
-    && candidate.frozen_base_revision === frozenTarget.frozenBaseRevision
-    && candidate.workspace_tree_digest === frozenTarget.workspaceTreeDigest
+    && attempt.fencing_token_digest === expected.fencingTokenDigest
+    && runner.organization_id === expected.organizationId
+    && runner.runner_id === expected.runnerId
+    && runner.credential_generation === expected.runnerGeneration
+    && candidate.organization_id === expected.organizationId
+    && candidate.run_id === expected.runId
+    && candidate.attempt_id === expected.runAttemptId
+    && candidate.attempt_number === expected.runAttemptNumber
+    && candidate.candidate_id === expected.candidateId
+    && digest(candidate.candidate) === expected.candidateDigest
+    && candidate.project_target_id === expected.projectTargetId
+    && candidate.frozen_base_revision === expected.target.frozenBaseRevision
+    && candidate.workspace_tree_digest === expected.target.workspaceTreeDigest
     && candidate.publication_policy_digest === run.publication_policy_digest
-    && target.runner_id === effect.runner_id
-    && target.binding_digest === effect.target_binding_digest
-    && target.binding_generation === effect.target_binding_generation
-    && target.project_target_id === frozenTarget.projectTargetId
-    && String(target.provider).toLowerCase() === frozenTarget.provider
-    && String(target.owner).toLowerCase() === frozenTarget.owner.toLowerCase()
-    && String(target.repo).toLowerCase() === frozenTarget.repo.toLowerCase()
-    && target.default_branch === frozenTarget.baseBranch
-    && workspace?.attemptId === effect.run_attempt_id
-    && workspace?.attemptNumber === effect.run_attempt_number
-    && workspace?.fencingTokenDigest === effect.fencing_token_digest
-    && workspace?.baseRevision === frozenTarget.frozenBaseRevision
-    && workspace?.currentTree === frozenTarget.workspaceTreeDigest
-    && workspace?.currentRevision === frozenTarget.expectedHeadSha
-    && admission?.projectTarget?.projectTargetId === effect.project_target_id
-    && admission?.projectTarget?.digest === effect.target_binding_digest
-    && admission?.publicationPolicy?.mode === "pull_request"
-    && admission?.publicationPolicy?.digest === run.publication_policy_digest
-    && policy.payload.snapshotId === effect.policy_snapshot_id
-    && policy.receiptDigest === effect.policy_snapshot_digest
-    && policy.runId === effect.run_id
-    && policy.payload.tenant.organizationId === effect.organization_id
-    && policy.payload.runner.runnerId === effect.runner_id
-    && policy.payload.target.projectTargetId === effect.project_target_id
-    && policy.payload.target.repositoryProvider === frozenTarget.provider
-    && policy.payload.target.defaultBranch === frozenTarget.baseBranch
+    && target.organization_id === expected.organizationId
+    && target.project_target_id === expected.projectTargetId
+    && target.runner_id === expected.runnerId
+    && target.binding_digest === expected.targetBindingDigest
+    && target.binding_generation === expected.targetBindingGeneration
+    && target.provider.toLowerCase() === expected.target.provider
+    && target.owner.toLowerCase() === expected.target.owner.toLowerCase()
+    && target.repo.toLowerCase() === expected.target.repo.toLowerCase()
+    && target.default_branch === expected.target.baseBranch
+    && workspace.attemptId === expected.runAttemptId
+    && workspace.attemptNumber === expected.runAttemptNumber
+    && workspace.fencingTokenDigest === expected.fencingTokenDigest
+    && workspace.baseRevision === expected.target.frozenBaseRevision
+    && workspace.currentTree === expected.target.workspaceTreeDigest
+    && workspace.currentRevision === expected.target.expectedHeadSha
+    && admission.organizationId === expected.organizationId
+    && admission.runnerId === expected.runnerId
+    && admission.projectTarget.projectTargetId === expected.projectTargetId
+    && admission.projectTarget.digest === expected.targetBindingDigest
+    && admission.publicationPolicy.mode === "pull_request"
+    && admission.publicationPolicy.digest === run.publication_policy_digest
+    && admission.completionContract.mode === "pull_request_ready"
+    && admission.repository.provider === expected.target.provider
+    && admission.repository.owner.toLowerCase() === expected.target.owner.toLowerCase()
+    && admission.repository.repo.toLowerCase() === expected.target.repo.toLowerCase()
+    && admission.admissionPolicySnapshot.snapshotId === expected.policySnapshotId
+    && admission.admissionPolicySnapshot.digest === expected.policySnapshotDigest
+    && policy.payload.snapshotId === expected.policySnapshotId
+    && policy.receiptDigest === expected.policySnapshotDigest
+    && policy.runId === expected.runId
+    && policy.payload.tenant.organizationId === expected.organizationId
+    && policy.payload.runner.runnerId === expected.runnerId
+    && policy.payload.target.projectTargetId === expected.projectTargetId
+    && policy.payload.target.repositoryProvider === expected.target.provider
+    && policy.payload.target.defaultBranch === expected.target.baseBranch
     && policy.payload.target.authorizedPublicationModes.includes("pull_request");
+}
+
+function exactFrozenAuthority(rows: AuthorityRows, request: EffectRequestV1): boolean {
+  return exactAuthority(rows, authorityExpectationFromRequest(request));
+}
+
+async function exactStoredAuthority(locked: LockedAuthority): Promise<boolean> {
+  const target = parseStoredEffectTarget(locked.effect);
+  if (locked.effect.target_digest !== await computeEffectTargetDigestV1(target)) {
+    throw new EffectAuthorityStoredStateError("EFFECT_AUTHORITY_STORED_TARGET_DIGEST_INVALID");
+  }
+  return locked.effect.effect_kind === "github.create_draft_pull_request"
+    && locked.effect.project_target_id === target.projectTargetId
+    && locked.effect.target_binding_digest === target.targetBindingDigest
+    && locked.effect.target_binding_generation === target.targetBindingGeneration
+    && exactAuthority(locked, authorityExpectationFromEffect(locked.effect, target));
 }
 
 async function activeExecuteAuthority(locked: LockedAuthority, principal: RuntimePrincipal,
@@ -425,7 +611,7 @@ async function activeExecuteAuthority(locked: LockedAuthority, principal: Runtim
 
 function exactAbsenceScope(effect: EffectRow, evidence: EffectEvidenceEnvelopeV1): boolean {
   if (evidence.evidence.kind !== "absent") return false;
-  const target = GitHubDraftPullRequestEffectTargetV1Schema.parse(effect.target);
+  const target = parseStoredEffectTarget(effect);
   const scope = evidence.evidence.observationScope;
   return scope.provider === target.provider
     && scope.repository.owner.toLowerCase() === target.owner.toLowerCase()
@@ -440,7 +626,7 @@ function exactAbsenceScope(effect: EffectRow, evidence: EffectEvidenceEnvelopeV1
 
 function exactPresentObservation(effect: EffectRow, evidence: EffectEvidenceEnvelopeV1): boolean {
   if (evidence.evidence.kind !== "present") return false;
-  const target = GitHubDraftPullRequestEffectTargetV1Schema.parse(effect.target);
+  const target = parseStoredEffectTarget(effect);
   const observation = evidence.evidence.observation;
   return observation.provider === target.provider
     && observation.repository.owner.toLowerCase() === target.owner.toLowerCase()
@@ -532,39 +718,21 @@ export function createEffectAuthority(input: {
                 approvalRequestDigest: approvalRequest }
             : { kind: "conflict" as const, reason: "request_replay_conflict" };
         }
-        const run = await client.query<Record<string, any>>(
-          `SELECT * FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2 FOR UPDATE`,
-          [request.organizationId, request.work.runId],
-        );
-        const attempt = await client.query<Record<string, any>>(
-          `SELECT * FROM cp_hosted_attempt WHERE organization_id=$1 AND run_id=$2
-             AND attempt_number=$3 AND attempt_id=$4 FOR UPDATE`,
-          [request.organizationId, request.work.runId, request.work.attemptNumber,
-            request.work.attemptId],
-        );
-        const runner = await client.query<Record<string, any>>(
-          `SELECT * FROM cp_runner WHERE organization_id=$1 AND runner_id=$2 FOR UPDATE`,
-          [request.organizationId, request.runnerId],
-        );
-        const candidate = await client.query<Record<string, any>>(
-          `SELECT * FROM cp_publication_candidate WHERE organization_id=$1
-             AND candidate_id=$2 FOR UPDATE`,
-          [request.organizationId, request.candidate.candidateId],
-        );
-        const target = await client.query<Record<string, any>>(
-          `SELECT * FROM cp_project_target WHERE organization_id=$1
-             AND project_target_id=$2 FOR UPDATE`,
-          [request.organizationId, request.target.projectTargetId],
-        );
-        if (!run.rows[0] || !attempt.rows[0] || !runner.rows[0]
-          || !candidate.rows[0] || !target.rows[0]) {
+        const authorityRows = await lockAuthorityRows(client, {
+          organizationId: request.organizationId,
+          runId: request.work.runId,
+          runAttemptId: request.work.attemptId,
+          runAttemptNumber: request.work.attemptNumber,
+          runnerId: request.runnerId,
+          candidateId: request.candidate.candidateId,
+          projectTargetId: request.target.projectTargetId,
+        });
+        if (!authorityRows) {
           return { kind: "conflict" as const, reason: "stale_effect_authority" };
         }
-        const locked = { effect: null as never, run: run.rows[0], attempt: attempt.rows[0],
-          runner: runner.rows[0], candidate: candidate.rows[0], target: target.rows[0] };
-        if (runner.rows[0].current_credential_id !== command.principal.credentialId
-          || runner.rows[0].registration_generation !== command.principal.registrationGeneration
-          || !exactFrozenAuthority(locked, request)) {
+        if (authorityRows.runner.current_credential_id !== command.principal.credentialId
+          || authorityRows.runner.registration_generation !== command.principal.registrationGeneration
+          || !exactFrozenAuthority(authorityRows, request)) {
           return { kind: "conflict" as const, reason: "stale_effect_authority" };
         }
         await client.query(
@@ -851,7 +1019,7 @@ export function createEffectAuthority(input: {
             targetDigest: effect.target_digest,
             approvalDigest: effect.approval_digest!,
             candidate: { candidateId: effect.candidate_id, candidateDigest: effect.candidate_digest },
-            target: GitHubDraftPullRequestEffectTargetV1Schema.parse(effect.target),
+            target: parseStoredEffectTarget(effect),
             ...(latest ? { predecessorEvidenceDigest: latest.evidence_digest } : {}),
             issuedAt: now.toISOString(),
             expiresAt: new Date(now.getTime() + ttl).toISOString(),
@@ -1013,15 +1181,15 @@ export function createEffectAuthority(input: {
           reason = `github.${evidence.evidence.errorCode}`;
         } else if (evidence.evidence.kind === "absent") {
           state = "attention";
-          reason = "github.absent_after_outcome_unknown";
+          reason = "github.provider_absence_requires_attention";
         } else if (evidence.evidence.kind === "attention") {
           state = "attention";
           reason = evidence.evidence.reasonCode;
         } else if (evidence.evidence.kind === "present") {
           const observation = evidence.evidence.observation;
           resource = externalResource(observation);
-          const policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(
-            locked.run.admission_policy_snapshot);
+          const policy = parseStoredPolicy(locked.run);
+          const effectTarget = parseStoredEffectTarget(effect);
           const readiness = assessExactPullRequestReadiness({
             snapshot: {
               provider: "github",
@@ -1042,13 +1210,11 @@ export function createEffectAuthority(input: {
               payloadDigest: await computeEffectEvidencePayloadDigestV1(evidence.evidence),
             },
             expectedRepository: {
-              owner: GitHubDraftPullRequestEffectTargetV1Schema.parse(effect.target).owner,
-              repo: GitHubDraftPullRequestEffectTargetV1Schema.parse(effect.target).repo,
+              owner: effectTarget.owner,
+              repo: effectTarget.repo,
             },
-            expectedHeadSha: GitHubDraftPullRequestEffectTargetV1Schema.parse(effect.target)
-              .expectedHeadSha,
-            expectedBaseBranch: GitHubDraftPullRequestEffectTargetV1Schema.parse(effect.target)
-              .baseBranch,
+            expectedHeadSha: effectTarget.expectedHeadSha,
+            expectedBaseBranch: effectTarget.baseBranch,
             requiredChecks: policy.payload.admissionRules.requiredCheckNames,
           });
           state = readiness.ready ? "succeeded" : "observing";

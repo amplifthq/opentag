@@ -34,7 +34,10 @@ import type { ConsoleReadModel } from "./modules/console-reads/index.js";
 import type { HostedRunCoordinator } from "./modules/hosted-runs/index.js";
 import type { PermissionCoordinator } from "./modules/hosted-runs/permissions.js";
 import type { MaterialActionCoordinator } from "./modules/hosted-runs/material-actions.js";
-import type { EffectAuthority } from "./modules/effects/index.js";
+import {
+  EffectAuthorityStoredStateError,
+  type EffectAuthority,
+} from "./modules/effects/index.js";
 import type {
   ConsolePrincipal,
   IdentityModule,
@@ -114,13 +117,16 @@ export function createControlPlaneApplication(
 
   app.onError((error, context) => {
     const requestId = randomUUID();
+    const storedAuthorityError = error instanceof EffectAuthorityStoredStateError
+      ? error : null;
     console.error("control_plane_request_failed", {
       requestId,
       method: context.req.method,
       path: context.req.path,
-      classification: error instanceof ZodError
-        ? "validation_error"
-        : "unexpected_error",
+      classification: storedAuthorityError
+        ? "stored_effect_authority_invalid"
+        : error instanceof ZodError ? "validation_error" : "unexpected_error",
+      ...(storedAuthorityError ? { errorCode: storedAuthorityError.code } : {}),
     });
     return context.json({ error: "internal_error", requestId }, 500);
   });

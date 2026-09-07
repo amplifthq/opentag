@@ -14,6 +14,7 @@ import {
 } from "@opentag/control-protocol";
 import { describe, expect, it, vi } from "vitest";
 import { createControlPlaneApplication } from "../src/application.js";
+import { EffectAuthorityStoredStateError } from "../src/modules/effects/index.js";
 
 const now = "2026-08-15T12:00:00.000Z";
 const principal = {
@@ -296,6 +297,40 @@ describe("EffectAuthority Control V1 transport", () => {
     ));
     expect([first.status, second.status]).toEqual([204, 204]);
     expect([await first.text(), await second.text()]).toEqual(["", ""]);
+  });
+
+  it("logs a stable stored-authority error without exposing it to the caller", async () => {
+    const request = await effectRequest();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const application = applicationWithEffects({
+        request: vi.fn(async () => {
+          throw new EffectAuthorityStoredStateError(
+            "EFFECT_AUTHORITY_STORED_WORKSPACE_INVALID",
+          );
+        }),
+        acquire: vi.fn(),
+        record: vi.fn(),
+      });
+      const response = await application.fetch(post(
+        `/v1/runners/${principal.runnerId}/effects/request`,
+        request,
+      ));
+      const body = await response.json();
+
+      expect(response.status).toBe(500);
+      expect(body).toEqual({ error: "internal_error", requestId: expect.any(String) });
+      expect(JSON.stringify(body)).not.toContain("EFFECT_AUTHORITY_STORED_WORKSPACE_INVALID");
+      expect(errorLog).toHaveBeenCalledWith("control_plane_request_failed", {
+        requestId: expect.any(String),
+        method: "POST",
+        path: `/v1/runners/${principal.runnerId}/effects/request`,
+        classification: "stored_effect_authority_invalid",
+        errorCode: "EFFECT_AUTHORITY_STORED_WORKSPACE_INVALID",
+      });
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   it("fails closed on invalid bodies, digest conflicts, and tenant or path mismatch", async () => {

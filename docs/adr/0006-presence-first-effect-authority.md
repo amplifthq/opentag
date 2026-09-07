@@ -301,10 +301,13 @@ The following guarantees are mandatory:
    automatic mutation retry: a timed-out create request may still be in flight.
    Only intact local not-started proof can make a successor execute attempt
    eligible. Any future kind with stronger provider idempotency or absence
-   guarantees requires a separate tested policy decision.
+   guarantees requires a separate tested policy decision. Accepted absence
+   after provider I/O became possible uses the state-independent reason
+   `github.provider_absence_requires_attention`; it does not imply that the
+   prior Effect view was already `outcome_unknown`.
 6. Matching evidence for an already issued permit and transaction-owner begin
-   may arrive after lease expiry or Work cancellation. It updates Effect
-   evidence without reviving a cancelled Work or authorizing new mutation.
+   may arrive after executor lease expiration or Work cancellation. It updates
+   Effect evidence without reviving a cancelled Work or authorizing new mutation.
 7. Losing the Runner's local journal fails closed. Neither a previous permit
    nor a missing local receipt is permission to repeat provider I/O.
 8. Channel projection failure or ambiguity never changes canonical Work or
@@ -378,7 +381,9 @@ future product behavior must justify independently mutable profile metadata.
 Runner registration has no separate display name, and normalized inbound
 messages do not carry a caller-selected Agent or Teammate ID. Runner IDs remain
 diagnostic execution identities; the trusted channel binding supplies the
-Teammate identity.
+Teammate identity. As an intentional breaking contract, the public
+`AgentTarget` type is replaced by `MentionTarget` and its caller-selected
+`agentId` is removed; this reset provides no compatibility alias.
 
 Being backed by an active Slack binding means the Teammate remains present in
 the channel even while its Runner is offline. The time-bounded derived field is
@@ -471,7 +476,10 @@ Material Action and Slack `ChannelProjection` replacement remain separate
 future verticals. Their current tables are not merged horizontally in this
 change: doing so before their interfaces and evidence policies are replaced
 would merely move complexity into nullable polymorphic columns and JSON
-branches.
+branches. In particular, `cp_provider_delivery_intent` and
+`cp_provider_delivery_truth_lock` remain active until that projection vertical;
+this reset removes only their unused custody/timestamp fields and the obsolete
+projection-authority sentinel.
 
 Each replacement follows replace-not-layer discipline. Once all active
 consumers cross the new interface and its acceptance tests pass, the old code

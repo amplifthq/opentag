@@ -9,7 +9,10 @@ import {
   type EffectRequestV1,
 } from "@opentag/control-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createEffectAuthority } from "../src/modules/effects/index.js";
+import {
+  EffectAuthorityStoredStateError,
+  createEffectAuthority,
+} from "../src/modules/effects/index.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
 import { hostedAdmissionFixture, hostedClaimRequest, hostedGrantIssuerFixture,
@@ -319,6 +322,29 @@ describe.skipIf(!TEST_DATABASE_URL)("EffectAuthority PostgreSQL policy", () => {
       .resolves.toEqual({ kind: "conflict", reason: "stale_effect_authority" });
   });
 
+  it("surfaces malformed stored authority instead of concealing it as stale", async () => {
+    const context = await setup("stored_authority_invalid");
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt
+       SET workspace_attestation=jsonb_set(
+         workspace_attestation,'{attemptNumber}',$4::jsonb
+       )
+       WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3`,
+      [principal.organizationId, context.runId, context.claimed.attempt.id,
+        JSON.stringify("invalid")],
+    );
+
+    await expect(authority.request({ principal, request: context.request }))
+      .rejects.toEqual(new EffectAuthorityStoredStateError(
+        "EFFECT_AUTHORITY_STORED_WORKSPACE_INVALID",
+      ));
+    expect((await fixture.pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM cp_effect
+       WHERE organization_id=$1 AND effect_id=$2`,
+      [principal.organizationId, context.request.effectId],
+    )).rows[0]).toEqual({ count: 0 });
+  });
+
   it("makes request and approval replay exact and rejects self-approval or payload drift", async () => {
     const context = await setup("replay");
     const first = await authority.request({ principal, request: context.request });
@@ -492,7 +518,7 @@ describe.skipIf(!TEST_DATABASE_URL)("EffectAuthority PostgreSQL policy", () => {
       evidence: absent(context) });
     await expect(authority.record({ principal, evidence: exactAbsence }))
       .resolves.toMatchObject({ kind: "recorded", effect: { state: "attention",
-        reasonCode: "github.absent_after_outcome_unknown" } });
+        reasonCode: "github.provider_absence_requires_attention" } });
     expect((await fixture.pool.query<{ count: number }>(
       `SELECT count(*)::int AS count FROM cp_effect_attempt
        WHERE organization_id=$1 AND effect_id=$2 AND permit_kind='execute'`,

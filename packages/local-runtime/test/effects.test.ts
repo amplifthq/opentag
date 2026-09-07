@@ -118,7 +118,7 @@ function view(
         state,
         currentAttemptNumber: evidence.effectAttemptNumber,
         currentEvidenceDigest: evidence.evidenceDigest,
-        reasonCode: "github.absent_after_outcome_unknown",
+        reasonCode: "github.provider_absence_requires_attention",
         updatedAt: "2026-09-05T01:02:00.000Z",
       }
     : {
