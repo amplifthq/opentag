@@ -6,6 +6,7 @@ import {
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
   computeGitHubProjectTargetBindingDigestV1,
+  type RunnerReadinessReceiptEnvelopeV1,
 } from "../../packages/control-protocol/src/index.js";
 import { createOpenTagClient } from "../../packages/client/src/index.js";
 
@@ -115,14 +116,15 @@ async function main(): Promise<void> {
       target,
     },
   });
-  assert(targetContext.targets.some((candidate) =>
+  const targetReadback = targetContext.targets.find((candidate) =>
     candidate.projectTargetId === projectTargetId
-      && candidate.bindingDigest === targetBindingDigest), "target_readback_mismatch");
+      && candidate.bindingDigest === targetBindingDigest);
+  assert(targetReadback, "target_readback_mismatch");
 
   const now = new Date();
   const readinessId = `readiness_smoke_${stamp}`;
   const executorCapabilityDigest = `sha256:${"c".repeat(64)}`;
-  const readinessPayload = {
+  const readinessPayload: RunnerReadinessReceiptEnvelopeV1["payload"] = {
     readinessId,
     runnerId,
     registrationGeneration: registered.registrationGeneration,
@@ -136,6 +138,7 @@ async function main(): Promise<void> {
     targets: [{
       projectTargetId,
       bindingDigest: targetBindingDigest,
+      bindingGeneration: targetReadback.bindingGeneration,
       state: "ready" as const,
     }],
     observedAt: now.toISOString(),
