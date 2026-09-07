@@ -2649,7 +2649,39 @@ describe("hosted heartbeat lease authority", () => {
     `).get(value.claim.attempt.id)).toEqual({ leaseExpiresAt: "2026-08-10T00:12:00.000Z" });
         secondSqlite.close();
     });
-    it("retains acknowledged predecessors while their successor needs attention", async () => {
+    it.each(["pending", "leased"])("does not bypass ordinary %s progress for renewal", async (state) => {
+        vi.useFakeTimers();
+        const now = new Date("2026-08-10T00:01:00.000Z");
+        vi.setSystemTime(now);
+        const sqlite = new Database(":memory:");
+        migratePairedRunnerSchema(sqlite);
+        const repo = createPairedRunnerRepository(drizzle(sqlite));
+        const value = await fixture({ leaseExpiresAt: "2026-08-10T00:10:00.000Z" });
+        await begin(repo, value);
+        await repo.importHostedAssignedRun(value);
+        await startHostedExecution(repo, value.claim);
+        const request = await progressRequest(value.claim, now.toISOString());
+        await repo.recordHostedProgressLocally({ ...heartbeatAuthority,
+            runId: value.claim.runId, attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken, request });
+        if (state === "leased") await claimLifecycleOperation(repo, request.operationId, now);
+        const heartbeat = await buildHostedLifecycleRequestV1({ action: "heartbeat",
+            organizationId: value.claim.organizationId, runnerId: value.claim.runnerId,
+            runId: value.claim.runId, attempt: { attemptId: value.claim.attempt.id,
+                attemptNumber: 1, epoch: 1, fencingToken: value.claim.attempt.fencingToken,
+                fencingTokenDigest: value.claim.attempt.fencingTokenDigest },
+            occurredAt: new Date(now.getTime() + 1).toISOString(),
+            expectedLeaseExpiresAt: value.claim.attempt.leaseExpiresAt }) as HostedHeartbeatRequestV1;
+        await repo.beginHostedHeartbeatOperation({ ...heartbeatAuthority,
+            runId: value.claim.runId, attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken, request: heartbeat });
+        const claimable = await repo.claimDueHostedLifecycleOperations({ destinationId: "cloud-1",
+            organizationId: "org-1", leaseOwner: "worker", leaseSeconds: 30, now });
+        expect(claimable.map((entry) => entry.action)).toEqual(state === "pending" ? ["progress"] : []);
+        sqlite.close();
+    });
+
+    it("retains blocked progress while permitting attention-safe renewal", async () => {
         vi.useFakeTimers();
         const now = new Date("2026-08-10T00:01:00.000Z");
         vi.setSystemTime(now);
@@ -2701,6 +2733,24 @@ describe("hosted heartbeat lease authority", () => {
         expect(() => sqlite.prepare(`
       DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
     `).run(progress.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
+        const later = new Date("2026-08-10T00:01:30.000Z");
+        vi.setSystemTime(later);
+        const queued = await progressRequest(value.claim, later.toISOString());
+        await repo.recordHostedProgressLocally({ ...heartbeatAuthority,
+            runId: value.claim.runId, attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken, request: queued });
+        const renewed = await acknowledgeHeartbeat({ repo, claim: value.claim,
+            expectedLeaseExpiresAt: "2026-08-10T00:11:00.000Z",
+            acceptedLeaseExpiresAt: "2026-08-10T00:12:00.000Z",
+            now: new Date("2026-08-10T00:01:40.000Z") });
+        expect(renewed.request.expectedLeaseExpiresAt).toBe("2026-08-10T00:11:00.000Z");
+        expect(sqlite.prepare("SELECT state FROM hosted_lifecycle_operations WHERE operation_id=?")
+            .get(progress.operationId)).toEqual({ state: "attention" });
+        expect(sqlite.prepare("SELECT state FROM hosted_lifecycle_operations WHERE operation_id=?")
+            .get(queued.operationId)).toEqual({ state: "pending" });
+        expect(await repo.claimDueHostedLifecycleOperations({ destinationId: "cloud-1",
+            organizationId: "org-1", leaseOwner: "still-blocked", leaseSeconds: 30,
+            now: new Date("2026-08-10T00:01:41.000Z") })).toEqual([]);
         sqlite.close();
     });
 });

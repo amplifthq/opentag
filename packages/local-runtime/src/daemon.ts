@@ -484,30 +484,33 @@ export async function executeClaimedRun(
     return true;
   }
   let latestWorkspaceAttestation = hostedAuthority?.workspaceAttestation;
+  const synchronizeAcceptedLease = async () => {
+    const acceptedLeaseExpiresAt = await hostedAuthority
+      ?.readAcceptedLeaseExpiresAt?.();
+    if (!acceptedLeaseExpiresAt || hostedLeaseRevoked) return;
+    const acceptedDeadline = Date.parse(acceptedLeaseExpiresAt);
+    if (!Number.isFinite(acceptedDeadline) || (hostedLeaseDeadline !== undefined
+      && acceptedDeadline < hostedLeaseDeadline)) return;
+    if (latestWorkspaceAttestation) {
+      latestWorkspaceAttestation = {
+        ...latestWorkspaceAttestation,
+        leaseExpiresAt: acceptedLeaseExpiresAt,
+      };
+    }
+    if (
+      Number.isFinite(acceptedDeadline)
+      && hostedLeaseDeadline !== undefined
+      && acceptedDeadline > hostedLeaseDeadline
+    ) {
+      hostedLeaseDeadline = acceptedDeadline;
+      armHostedLeaseDeadline?.();
+    }
+  };
   if (heartbeatIntervalMs > 0) {
     heartbeatHandle = setInterval(() => {
       if (heartbeatInFlight) return;
       heartbeatInFlight = input.client.heartbeat(runId, lease)
-        .then(async () => {
-          const acceptedLeaseExpiresAt = await hostedAuthority
-            ?.readAcceptedLeaseExpiresAt?.();
-          if (!acceptedLeaseExpiresAt || hostedLeaseRevoked) return;
-          if (latestWorkspaceAttestation) {
-            latestWorkspaceAttestation = {
-              ...latestWorkspaceAttestation,
-              leaseExpiresAt: acceptedLeaseExpiresAt,
-            };
-          }
-          const acceptedDeadline = Date.parse(acceptedLeaseExpiresAt);
-          if (
-            Number.isFinite(acceptedDeadline)
-            && hostedLeaseDeadline !== undefined
-            && acceptedDeadline > hostedLeaseDeadline
-          ) {
-            hostedLeaseDeadline = acceptedDeadline;
-            armHostedLeaseDeadline?.();
-          }
-        })
+        .then(synchronizeAcceptedLease)
         .catch(requestExecutorCancel)
         .finally(() => {
           heartbeatInFlight = undefined;
@@ -692,6 +695,7 @@ export async function executeClaimedRun(
               ...(interruption?.success
                 ? { interruptionEvidence: interruption.data } : {}),
             });
+            await synchronizeAcceptedLease();
           } catch (error) {
             if (runNoLongerClaimed(error)) {
               requestExecutorCancel(error);

@@ -899,10 +899,12 @@ function permissionResolutionFromReceipt(input: {
 
 export async function buildHostedProgressMetadataForControlV1(input: {
   at: string;
+  dispatchedAt?: string;
 }): Promise<{ progressId: string; progressDigest: string }> {
   const progressDigest = await computeControlPayloadDigestV1({
     type: "status",
     occurredAt: input.at,
+    ...(input.dispatchedAt ? { dispatchedAt: input.dispatchedAt } : {}),
   });
   return {
     progressId: `progress_${progressDigest.slice("sha256:".length)}`,
@@ -1074,6 +1076,39 @@ async function createHostedExecutionClient(input: {
   const buildLifecycleRequest = input.buildHostedLifecycleRequestImpl
     ?? buildHostedLifecycleRequestV1;
   const executionOccurredAt = clock().toISOString();
+  // Sequence time follows serialized dispatch. Original executor observation
+  // time remains bound into progressDigest; journal retries keep sealed bytes.
+  let lastSignalAt = Date.parse(authority.runningOccurredAt);
+  const nextSignalTime = (observedAt: string) => {
+    lastSignalAt = Math.max(lastSignalAt + 1, Date.parse(observedAt), clock().getTime());
+    return new Date(lastSignalAt).toISOString();
+  };
+  // Seal new evidence only after earlier renewals/signals have finished pumping.
+  // Retried journal entries retain their original request bytes.
+  let lifecycleTail: Promise<unknown> = Promise.resolve();
+  const serializeLifecycle = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = lifecycleTail.then(operation);
+    lifecycleTail = result.catch(() => undefined);
+    return result;
+  };
+  const currentWorkspaceAttestation = async (runId: string,
+    value: import("@opentag/core").AttemptWorkspaceAttestationV1 | undefined) => {
+    if (!value) return undefined;
+    const current = await repo.getHostedExecutionLease({ destinationId: "cloud",
+      organizationId: authority.organizationId, runnerId: authority.runnerId,
+      credentialId: authority.credentialId, runId, attemptId: authority.attemptId,
+      fencingToken: authority.fencingToken });
+    if (!current || value.attemptId !== authority.attemptId
+      || value.attemptNumber !== authority.attemptNumber
+      || value.credentialId !== authority.credentialId
+      || value.fencingTokenDigest !== authority.fencingTokenDigest
+      || Date.parse(value.leaseExpiresAt) > Date.parse(current.leaseExpiresAt)) {
+      throw new Error("hosted_workspace_attestation_authority_mismatch");
+    }
+    // Only freshness comes from the accepted lease; workspace and fence facts
+    // are never replaced. The Control Plane still verifies the full attestation.
+    return { ...value, leaseExpiresAt: current.leaseExpiresAt };
+  };
   let executionStarted = false;
   const permissionRequests = new Map<string, {
     request: ActionPermissionRequest;
@@ -1191,181 +1226,188 @@ async function createHostedExecutionClient(input: {
       assertNotCancelled();
     },
     async heartbeat(runId, _lease) {
-      assertNotCancelled();
-      const journalAuthority = {
-        destinationId: "cloud",
-        organizationId: authority.organizationId,
-        runnerId: authority.runnerId,
-        credentialId: authority.credentialId,
-        runId,
-        attemptId: authority.attemptId,
-        fencingToken: authority.fencingToken,
-      };
-      let operation = await repo.getHostedHeartbeatOperationForRetry(
-        journalAuthority,
-      );
-      assertNotCancelled();
-      if (!operation) {
-        const currentLease = await repo.getHostedExecutionLease(
+      return serializeLifecycle(async () => {
+        assertNotCancelled();
+        const journalAuthority = {
+          destinationId: "cloud",
+          organizationId: authority.organizationId,
+          runnerId: authority.runnerId,
+          credentialId: authority.credentialId,
+          runId,
+          attemptId: authority.attemptId,
+          fencingToken: authority.fencingToken,
+        };
+        let operation = await repo.getHostedHeartbeatOperationForRetry(
           journalAuthority,
         );
         assertNotCancelled();
-        if (!currentLease) {
-          throw new Error("hosted_execution_authority_expired");
+        if (!operation) {
+          const currentLease = await repo.getHostedExecutionLease(
+            journalAuthority,
+          );
+          assertNotCancelled();
+          if (!currentLease) {
+            throw new Error("hosted_execution_authority_expired");
+          }
+          const request = HostedHeartbeatRequestV1Schema.parse(
+            await buildLifecycleRequest({
+              action: "heartbeat",
+              organizationId: authority.organizationId,
+              runnerId: authority.runnerId,
+              runId,
+              attempt,
+              occurredAt: nextSignalTime(clock().toISOString()),
+              expectedLeaseExpiresAt: currentLease.leaseExpiresAt,
+            }),
+          );
+          assertNotCancelled();
+          operation = (await repo.beginHostedHeartbeatOperation({
+            ...journalAuthority,
+            request,
+          })).operation;
+          assertNotCancelled();
         }
-        const request = HostedHeartbeatRequestV1Schema.parse(
-          await buildLifecycleRequest({
-            action: "heartbeat",
-            organizationId: authority.organizationId,
-            runnerId: authority.runnerId,
-            runId,
-            attempt,
-            occurredAt: clock().toISOString(),
-            expectedLeaseExpiresAt: currentLease.leaseExpiresAt,
-          }),
-        );
+        if (operation.state !== "acknowledged") await pumpLifecycle();
         assertNotCancelled();
-        operation = (await repo.beginHostedHeartbeatOperation({
-          ...journalAuthority,
-          request,
-        })).operation;
+        const acceptedLease = await repo.getHostedExecutionLease(journalAuthority);
         assertNotCancelled();
-      }
-      if (operation.state !== "acknowledged") await pumpLifecycle();
-      assertNotCancelled();
-      const acceptedLease = await repo.getHostedExecutionLease(journalAuthority);
-      assertNotCancelled();
-      if (
-        !acceptedLease
-        || Date.parse(acceptedLease.leaseExpiresAt)
-          <= Date.parse(operation.request.expectedLeaseExpiresAt)
-      ) {
-        throw new Error("hosted_heartbeat_receipt_rejected");
-      }
+        if (
+          !acceptedLease
+          || Date.parse(acceptedLease.leaseExpiresAt)
+            <= Date.parse(operation.request.expectedLeaseExpiresAt)
+        ) {
+          throw new Error("hosted_heartbeat_receipt_rejected");
+        }
+      });
     },
     async progress(runId, lease, progress) {
-      assertNotCancelled();
-      const progressMetadata = await buildHostedProgressMetadataForControlV1(
-        progress,
-      );
-      assertNotCancelled();
-      const request = HostedProgressRequestV1Schema.parse(
-        await buildLifecycleRequest({
-        action: "progress",
-        organizationId: authority.organizationId,
-        runnerId: authority.runnerId,
-        runId,
-        attempt,
-        occurredAt: progress.at,
-        ...progressMetadata,
-        ...(progress.workspaceAttestation
-          ? { workspaceAttestation: progress.workspaceAttestation } : {}),
-        ...(progress.interruptionEvidence
-          ? { interruptionEvidence: progress.interruptionEvidence } : {}),
-        }),
-      );
-      assertNotCancelled();
-      const local = await repo.recordHostedProgressLocally({
-        destinationId: "cloud",
-        organizationId: authority.organizationId,
-        credentialId: authority.credentialId,
-        runnerId: authority.runnerId,
-        runId,
-        ...lease,
-        request,
-      });
-      assertNotCancelled();
-      if (local.operation.state !== "acknowledged") await pumpLifecycle();
-      assertNotCancelled();
-    },
-    async complete(runId, lease, result, evidence) {
-      assertNotCancelled();
-      if (!executionStarted) {
-        const request = HostedRejectStartRequestV1Schema.parse(
+      return serializeLifecycle(async () => {
+        assertNotCancelled();
+        const workspaceAttestation = await currentWorkspaceAttestation(runId, progress.workspaceAttestation);
+        const occurredAt = nextSignalTime(progress.at);
+        const progressMetadata = await buildHostedProgressMetadataForControlV1(
+          { at: progress.at, dispatchedAt: occurredAt },
+        );
+        assertNotCancelled();
+        const request = HostedProgressRequestV1Schema.parse(
           await buildLifecycleRequest({
-            action: "reject-start",
-            organizationId: authority.organizationId,
-            runnerId: authority.runnerId,
-            runId,
-            attempt,
-            occurredAt: executionOccurredAt,
-            executorId: authority.executorId,
-            reasonCode: "unknown_safe_failure",
+          action: "progress",
+          organizationId: authority.organizationId,
+          runnerId: authority.runnerId,
+          runId,
+          attempt,
+          occurredAt,
+          ...progressMetadata,
+          ...(workspaceAttestation ? { workspaceAttestation } : {}),
+          ...(progress.interruptionEvidence
+            ? { interruptionEvidence: progress.interruptionEvidence } : {}),
           }),
         );
         assertNotCancelled();
-        const rejected = await repo.rejectHostedAttemptStartLocally({
+        const local = await repo.recordHostedProgressLocally({
           destinationId: "cloud",
           organizationId: authority.organizationId,
           credentialId: authority.credentialId,
           runnerId: authority.runnerId,
           runId,
-          executorId: authority.executorId,
           ...lease,
           request,
         });
         assertNotCancelled();
-        if (rejected.outcome !== "requeued" && rejected.outcome !== "duplicate") {
-          throw new Error("hosted_local_reject_start_split_outcome");
-        }
-        if (rejected.operation.state !== "acknowledged") await pumpLifecycle();
+        if (local.operation.state !== "acknowledged") await pumpLifecycle();
         assertNotCancelled();
-        return;
-      }
-      const completionMetadata =
-        await buildHostedCompletionMetadataForControlV1(result);
-      let blockedPermission: { permissionRequestId: string;
-        actionDescriptorDigest: string; policySnapshotDigest: string } | undefined;
-      if (completionMetadata.conclusion === "needs_human") {
-        const waiting: Array<(typeof permissionRequests extends Map<string, infer T> ? T : never)> = [];
-        for (const [actionId, pending] of permissionRequests) {
-          const current = await client.getActionPermissionCurrentControlV1({
-            organizationId: authority.organizationId, runnerId: authority.runnerId,
-            runId, actionId, attempt: { attemptId: attempt.attemptId,
-              attemptNumber: attempt.attemptNumber, epoch: attempt.epoch,
-              fencingTokenDigest: attempt.fencingTokenDigest },
-            permissionRequestId: pending.permissionRequestId,
-            permissionRequestDigest: pending.permissionRequestDigest,
+      });
+    },
+    async complete(runId, lease, result, evidence) {
+      return serializeLifecycle(async () => {
+        assertNotCancelled();
+        if (!executionStarted) {
+          const request = HostedRejectStartRequestV1Schema.parse(
+            await buildLifecycleRequest({
+              action: "reject-start",
+              organizationId: authority.organizationId,
+              runnerId: authority.runnerId,
+              runId,
+              attempt,
+              occurredAt: executionOccurredAt,
+              executorId: authority.executorId,
+              reasonCode: "unknown_safe_failure",
+            }),
+          );
+          assertNotCancelled();
+          const rejected = await repo.rejectHostedAttemptStartLocally({
+            destinationId: "cloud",
+            organizationId: authority.organizationId,
+            credentialId: authority.credentialId,
+            runnerId: authority.runnerId,
+            runId,
+            executorId: authority.executorId,
+            ...lease,
+            request,
           });
-          if (current.receipt.payload.state === "waiting") waiting.push(pending);
+          assertNotCancelled();
+          if (rejected.outcome !== "requeued" && rejected.outcome !== "duplicate") {
+            throw new Error("hosted_local_reject_start_split_outcome");
+          }
+          if (rejected.operation.state !== "acknowledged") await pumpLifecycle();
+          assertNotCancelled();
+          return;
         }
-        if (waiting.length !== 1) throw new Error("hosted_needs_human_permission_link_missing");
-        blockedPermission = { permissionRequestId: waiting[0]!.permissionRequestId,
-          actionDescriptorDigest: waiting[0]!.actionDescriptorDigest,
-          policySnapshotDigest: authority.policySnapshotDigest };
-      }
-      assertNotCancelled();
-      const request = HostedCompleteRequestV1Schema.parse(
-        await buildLifecycleRequest({
-          action: "complete",
+        const completionMetadata =
+          await buildHostedCompletionMetadataForControlV1(result);
+        let blockedPermission: { permissionRequestId: string;
+          actionDescriptorDigest: string; policySnapshotDigest: string } | undefined;
+        if (completionMetadata.conclusion === "needs_human") {
+          const waiting: Array<(typeof permissionRequests extends Map<string, infer T> ? T : never)> = [];
+          for (const [actionId, pending] of permissionRequests) {
+            const current = await client.getActionPermissionCurrentControlV1({
+              organizationId: authority.organizationId, runnerId: authority.runnerId,
+              runId, actionId, attempt: { attemptId: attempt.attemptId,
+                attemptNumber: attempt.attemptNumber, epoch: attempt.epoch,
+                fencingTokenDigest: attempt.fencingTokenDigest },
+              permissionRequestId: pending.permissionRequestId,
+              permissionRequestDigest: pending.permissionRequestDigest,
+            });
+            if (current.receipt.payload.state === "waiting") waiting.push(pending);
+          }
+          if (waiting.length !== 1) throw new Error("hosted_needs_human_permission_link_missing");
+          blockedPermission = { permissionRequestId: waiting[0]!.permissionRequestId,
+            actionDescriptorDigest: waiting[0]!.actionDescriptorDigest,
+            policySnapshotDigest: authority.policySnapshotDigest };
+        }
+        assertNotCancelled();
+        const workspaceAttestation = await currentWorkspaceAttestation(runId, evidence?.workspaceAttestation);
+        const request = HostedCompleteRequestV1Schema.parse(
+          await buildLifecycleRequest({
+            action: "complete",
+            organizationId: authority.organizationId,
+            runnerId: authority.runnerId,
+            runId,
+            attempt,
+            occurredAt: executionOccurredAt,
+            ...completionMetadata,
+            ...(blockedPermission ? { blockedPermission } : {}),
+            ...(workspaceAttestation ? { workspaceAttestation } : {}),
+            ...(evidence?.interruptionEvidence
+              ? { interruptionEvidence: evidence.interruptionEvidence } : {}),
+          }),
+        );
+        assertNotCancelled();
+        const outcome = await repo.completeHostedRunLocally({
+          destinationId: "cloud",
           organizationId: authority.organizationId,
+          credentialId: authority.credentialId,
           runnerId: authority.runnerId,
           runId,
-          attempt,
-          occurredAt: executionOccurredAt,
-          ...completionMetadata,
-          ...(blockedPermission ? { blockedPermission } : {}),
-          ...(evidence?.workspaceAttestation
-            ? { workspaceAttestation: evidence.workspaceAttestation } : {}),
-          ...(evidence?.interruptionEvidence
-            ? { interruptionEvidence: evidence.interruptionEvidence } : {}),
-        }),
-      );
-      assertNotCancelled();
-      const outcome = await repo.completeHostedRunLocally({
-        destinationId: "cloud",
-        organizationId: authority.organizationId,
-        credentialId: authority.credentialId,
-        runnerId: authority.runnerId,
-        runId,
-        ...lease,
-        result,
-        request,
+          ...lease,
+          result,
+          request,
+        });
+        assertNotCancelled();
+        if (outcome !== "completed" && outcome !== "duplicate") {
+          throw new Error("hosted_local_complete_split_outcome");
+        }
       });
-      assertNotCancelled();
-      if (outcome !== "completed" && outcome !== "duplicate") {
-        throw new Error("hosted_local_complete_split_outcome");
-      }
     },
     async requestActionPermission(runId, lease, request) {
       assertNotCancelled();

@@ -2200,9 +2200,26 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
             const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
             return db.transaction((tx) => {
                 const predecessor = alias(hostedLifecycleOperations, "hosted_lifecycle_predecessor");
+                // Heartbeats may pass progress already blocked on attention,
+                // but not normal pending/in-flight work or lifecycle transitions.
+                // The blocked progress remains immutable and is not retried.
                 const due = tx.select().from(hostedLifecycleOperations).where(and(eq(hostedLifecycleOperations.destinationId, input.destinationId), eq(hostedLifecycleOperations.organizationId, input.organizationId), notExists(tx.select({ operationId: predecessor.operationId })
                     .from(predecessor)
-                    .where(and(eq(predecessor.destinationId, hostedLifecycleOperations.destinationId), eq(predecessor.organizationId, hostedLifecycleOperations.organizationId), eq(predecessor.runId, hostedLifecycleOperations.runId), eq(predecessor.attemptId, hostedLifecycleOperations.attemptId), lt(predecessor.sequence, hostedLifecycleOperations.sequence), sql `${predecessor.state} <> 'acknowledged'`))), or(and(eq(hostedLifecycleOperations.state, "pending"), lte(hostedLifecycleOperations.nextAttemptAt, at)), and(eq(hostedLifecycleOperations.state, "leased"), lte(hostedLifecycleOperations.leaseExpiresAt, at))))).orderBy(asc(hostedLifecycleOperations.runId), asc(hostedLifecycleOperations.attemptId), asc(hostedLifecycleOperations.sequence), asc(hostedLifecycleOperations.operationId)).limit(limit).all();
+                    .where(and(eq(predecessor.destinationId, hostedLifecycleOperations.destinationId), eq(predecessor.organizationId, hostedLifecycleOperations.organizationId), eq(predecessor.runId, hostedLifecycleOperations.runId), eq(predecessor.attemptId, hostedLifecycleOperations.attemptId), lt(predecessor.sequence, hostedLifecycleOperations.sequence), sql `${predecessor.state} <> 'acknowledged'`, sql `NOT (
+                        ${hostedLifecycleOperations.action} = 'heartbeat'
+                        AND ${predecessor.action} = 'progress'
+                        AND (${predecessor.state} = 'attention' OR (
+                            ${predecessor.state} = 'pending' AND EXISTS (
+                                SELECT 1 FROM hosted_lifecycle_operations attention
+                                WHERE attention.destination_id = ${predecessor.destinationId}
+                                  AND attention.organization_id = ${predecessor.organizationId}
+                                  AND attention.run_id = ${predecessor.runId}
+                                  AND attention.attempt_id = ${predecessor.attemptId}
+                                  AND attention.action = 'progress' AND attention.state = 'attention'
+                                  AND attention.sequence < ${predecessor.sequence}
+                            )
+                        ))
+                    )`))), or(and(eq(hostedLifecycleOperations.state, "pending"), lte(hostedLifecycleOperations.nextAttemptAt, at)), and(eq(hostedLifecycleOperations.state, "leased"), lte(hostedLifecycleOperations.leaseExpiresAt, at))))).orderBy(asc(hostedLifecycleOperations.runId), asc(hostedLifecycleOperations.attemptId), asc(hostedLifecycleOperations.sequence), asc(hostedLifecycleOperations.operationId)).limit(limit).all();
                 const claimed: HostedLifecycleOperation[] = [];
                 for (const row of due) {
                     const leaseToken = randomUUID();

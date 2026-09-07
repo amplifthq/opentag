@@ -5,6 +5,16 @@ import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistra
 
 const now = new Date("2026-08-09T00:00:00.000Z");
 
+it("binds progress identity to source time and serialized dispatch time", async () => {
+  const first = { at: now.toISOString(), dispatchedAt: "2026-08-09T00:00:01.000Z" };
+  const receipt = await buildHostedProgressMetadataForControlV1(first);
+  expect(await buildHostedProgressMetadataForControlV1(first)).toEqual(receipt);
+  expect(await buildHostedProgressMetadataForControlV1({ ...first,
+    dispatchedAt: "2026-08-09T00:00:01.001Z" })).not.toEqual(receipt);
+  expect(await buildHostedProgressMetadataForControlV1({ ...first,
+    at: "2026-08-09T00:00:00.001Z" })).not.toEqual(receipt);
+});
+
 function readinessEntry(): ControlPlaneProjectionOutboxEntry {
   const envelope = RunnerReadinessReceiptEnvelopeV1Schema.parse({
     schemaVersion: 1,
@@ -2310,8 +2320,13 @@ describe("Control V1 projection pump", () => {
       pending = null;
       return "acknowledged" as const;
     });
+    const recordRenewedProgress = vi.fn(async ({ request }) => {
+      expect(request.workspaceAttestation.leaseExpiresAt).toBe(acceptedLeaseExpiresAt);
+      return { outcome: "recorded", operation: { state: "acknowledged" } };
+    });
     const repo = {
       ...emptyLifecycleRepository(),
+      recordHostedProgressLocally: recordRenewedProgress,
       claimDueHostedLifecycleOperations: vi.fn(async ({ now: claimedAt }) => {
         if (
           !pending
@@ -2396,8 +2411,35 @@ describe("Control V1 projection pump", () => {
       await expect(
         execution.hostedExecutionAuthority?.readAcceptedLeaseExpiresAt?.(),
       ).resolves.toBe("2026-08-09T00:03:00.000Z");
+      await execution.client.progress("run_1", lease, {
+        type: "executor.progress", message: "workspace re-attested", at: currentNow.toISOString(),
+        workspaceAttestation: {
+          workspaceId: "workspace_1", workspacePathDigest: `sha256:${"a".repeat(64)}`,
+          repositoryPathDigest: `sha256:${"a".repeat(64)}`, worktreeIdentityDigest: `sha256:${"a".repeat(64)}`,
+          baseRevision: "a".repeat(40), currentRevision: "a".repeat(40), currentTree: "a".repeat(40),
+          workspaceStateDigest: `sha256:${"a".repeat(64)}`, attemptId: lease.attemptId,
+          attemptNumber: 1, fencingTokenDigest: `sha256:${"e".repeat(64)}`,
+          credentialId: "credential_1", leaseExpiresAt: "2026-08-09T00:01:00.000Z",
+        },
+      });
       delayHeartbeatRequest = true;
-      await execution.client.heartbeat("run_1", lease);
+      const acceptedAttestation = recordRenewedProgress.mock.calls[0]![0].request.workspaceAttestation;
+      for (const mismatch of [
+        { credentialId: "wrong_credential" },
+        { fencingTokenDigest: `sha256:${"9".repeat(64)}` },
+        { leaseExpiresAt: "2026-08-09T00:04:00.000Z" },
+      ]) {
+        await expect(execution.client.progress("run_1", lease, {
+          type: "executor.progress", message: "must reject", at: currentNow.toISOString(),
+          workspaceAttestation: { ...acceptedAttestation, ...mismatch },
+        })).rejects.toThrow("hosted_workspace_attestation_authority_mismatch");
+      }
+      await Promise.all([
+        execution.client.heartbeat("run_1", lease),
+        execution.client.progress("run_1", lease, {
+          type: "executor.progress", message: "must wait behind renewal", at: currentNow.toISOString(),
+        }),
+      ]);
       return true;
     });
     const closeStore = vi.fn();
@@ -2441,7 +2483,7 @@ describe("Control V1 projection pump", () => {
 
     const iteration = loop!.beforeIteration();
     await vi.waitFor(() => {
-      expect(buildHostedLifecycleRequestImpl).toHaveBeenCalledTimes(3);
+      expect(buildHostedLifecycleRequestImpl).toHaveBeenCalledTimes(4);
     });
     const requests = heartbeatHostedRunControlV1.mock.calls.map(
       ([call]) => call.request,
