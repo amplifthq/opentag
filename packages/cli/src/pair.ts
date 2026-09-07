@@ -655,7 +655,18 @@ async function runHostedPair(input: {
           requestId: controlRequestIdFromOperationId(input.plan.operationId),
           operationId: input.plan.operationId,
           runnerId: config.daemon.runnerId,
-          capabilities: ["relay.repository-binding.v1"]
+          capabilities: [
+            "relay.claim-fence.v1",
+            "relay.effect-authority.v1",
+            "relay.hosted-admission.v1",
+            "relay.hosted-claim.v1",
+            "relay.lifecycle.v1",
+            "relay.material-receipt.v1",
+            "relay.permission.v1",
+            "relay.readiness.v1",
+            "relay.repository-binding.v1",
+            "relay.source-content-redeem.v1",
+          ]
         })
       );
     }
