@@ -398,9 +398,12 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
     async issueProjectionControls(command: { organizationId: string; runId: string;
       generation: number }) {
       return withPostgresTransaction(input.pool, async (client) => {
+      // Projection families hold single-decision copies, never source authority.
+      // Re-projecting one of those copies would discard its sibling decisions.
       const source = await client.query<ActionRow>(`SELECT DISTINCT ON (action_kind) *
         FROM cp_slack_action_authority WHERE organization_id=$1 AND run_id=$2
           AND attempt_number=$3 AND projection_generation=$3 AND consumed_at IS NULL
+          AND authority_family_id NOT LIKE 'projection:%'
           AND expires_at>$4 ORDER BY action_kind,created_at DESC`,
       [command.organizationId, command.runId, command.generation, input.clock.now()]);
       const controls: Array<{ kind: "status" | "cancel" | "approve" | "reject"

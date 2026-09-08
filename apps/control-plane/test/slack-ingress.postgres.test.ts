@@ -124,6 +124,29 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       fetchImpl: async () => { throw new Error("provider_call_forbidden"); } }) };
   }
 
+  it("preserves both approval decisions across repeated projection refreshes", async () => {
+    await insertSlackInstallation();
+    let tick = 0;
+    const { ingress } = productionComponents({ clock: { now: () => new Date(now.getTime() + tick++ * 1000) } });
+    await ingress.issueAction({ organizationId: "org_a", actionId: "approval_refresh_source",
+      installationId: "install_1", bindingId: "binding_1", teamId: "T1", appId: "A1", channelId: "C1",
+      threadRootMessageId: "1700000000.000100", runId: "run_refresh", pendingRequestId: "permission_refresh",
+      actionKind: "approval", actionDescriptor: "workspace.write", approvalEpoch: "1",
+      frozenCeiling: ["workspace.write"], policyDigest: digest("policy"), runnerId: "runner_1",
+      attemptId: "attempt_1", attemptNumber: 1, attemptEpoch: 1, fencingTokenDigest: digest("fence"),
+      permissionRequestDigest: digest("permission"), pendingActionId: "action_refresh",
+      allowedDecisions: ["allow_once", "deny"], requesterUserId: "U_REQUESTER", memberUserIds: ["U_MEMBER"],
+      operatorUserIds: [], approverUserId: "U_APPROVER", adminUserIds: [],
+      expiresAt: new Date(now.getTime() + 60_000) });
+    for (let refresh = 0; refresh < 4; refresh += 1) {
+      const controls = await ingress.issueProjectionControls({ organizationId: "org_a", runId: "run_refresh", generation: 1 });
+      expect(controls.map(control => control.kind).sort()).toEqual(["approve", "reject"]);
+    }
+    const nestedCopies = await fixture.pool.query(`SELECT action_id FROM cp_slack_action_authority
+      WHERE run_id='run_refresh' AND action_id LIKE '%:projection:%:projection:%'`);
+    expect(nestedCopies.rows).toEqual([]);
+  });
+
   it("preloads healthy active installations while isolating broken and disabled rows", async () => {
     await insertSlackInstallation();
     for (const [suffix, state, secretRef] of [["2", "active", "secret://missing"],
