@@ -11,8 +11,11 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 const fixture = async () => {
-  const root = await mkdtemp(join(tmpdir(), "opentag-cleanup-test-"));
-  directories.push(root);
+  const sandbox = await mkdtemp(join(tmpdir(), "opentag-cleanup-test-"));
+  directories.push(sandbox);
+  // Even a broken guard must keep the traversal probe inside disposable state.
+  const root = join(sandbox, "runner");
+  await mkdir(root, { mode: 0o700 });
   const target = await mkdtemp(join(root, "opentag-ghcr."));
   await writeFile(join(target, "config.json"), '{"auths":{"ghcr.io":{"auth":"test-only"}}}', { mode: 0o600 });
   return { root, target };
