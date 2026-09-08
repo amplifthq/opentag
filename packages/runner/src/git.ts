@@ -300,26 +300,6 @@ export async function cleanupInternalArtifacts(input: { runner: CommandRunner; w
   return untrackedRoots;
 }
 
-export async function commitRunChanges(input: {
-  runner: CommandRunner;
-  workspacePath: string;
-  message: string;
-}): Promise<boolean> {
-  const files = await changedFiles({ runner: input.runner, workspacePath: input.workspacePath });
-  if (files.length === 0) return false;
-
-  const addResult = await input.runner.run("git", ["add", "--", ...files], {
-    cwd: input.workspacePath
-  });
-  await assertCommandSucceeded(addResult, "stage run changes");
-
-  const commitResult = await input.runner.run("git", ["commit", "-m", input.message], {
-    cwd: input.workspacePath
-  });
-  await assertCommandSucceeded(commitResult, "commit run changes");
-  return true;
-}
-
 export async function commitChangedFiles(input: {
   runner: CommandRunner;
   workspacePath: string;

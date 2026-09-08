@@ -99,6 +99,7 @@ function permissionWorkspace(name: string, config: Record<string, string>): stri
 function input(workspace: { kind: "repository" | "scratch"; path: string }, runId = "run_acp") {
   return {
     runId,
+    assertExecutionCurrent: async () => true,
     workspace,
     command: { rawText: "prepare the report", intent: "run" as const, args: {} },
     context: [{ kind: "file", uri: "README.md", visibility: "private" as const, title: "Readme" }],
@@ -249,14 +250,27 @@ describe("ACP executor", () => {
     expect(git(repo, ["show", "opentag/run_acp:acp-output.txt"])).toContain("ACP fixture");
     const prompt = JSON.parse(git(repo, ["show", "opentag/run_acp:acp-prompt.json"]));
     expect(prompt.text).toContain("prepare the report");
+    expect(prompt.text).toContain("Do not run, request, or recommend git add, git commit");
+    expect(prompt.text).toContain("separate exact Effect approval");
     expect(prompt.text).toContain("Do not inspect .env files");
     expect(prompt.text).toContain("github.repository.read");
     expect(prompt.text).not.toContain("Read the selected repository");
   }, 15_000);
 
+  it("does not commit after current execution authority is revoked", async () => {
+    const repo = initRepo(); const initial = git(repo, ["rev-parse", "HEAD"]).trim();
+    const executor = createAcpExecutor({ manifest: manifest("success") });
+    await expect(executor.run({ ...input({ kind: "repository", path: repo }, "run_revoked_commit"),
+      assertExecutionCurrent: async () => false }, { emit: async () => undefined }))
+      .rejects.toThrow("local_commit_authority_expired");
+    expect(git(repo, ["rev-parse", "opentag/run_revoked_commit"]).trim()).toBe(initial);
+    expect(git(repo, ["rev-parse", "HEAD"]).trim()).toBe(initial);
+  });
+
   it("produces proposal evidence in canonical Unicode code-point order", async () => {
     const repo = initRepo();
     const executor = createAcpExecutor({ manifest: manifest("unicode-order") });
+    const attestations: Array<{ currentRevision: string; currentTree: string }> = [];
     const result = await executor.run({
       ...input({ kind: "repository", path: repo }, "run_unicode_order"),
       attemptId: "attempt_unicode_order",
@@ -266,7 +280,10 @@ describe("ACP executor", () => {
         credentialId: "credential_unicode_order",
         leaseExpiresAt: "2099-01-01T00:00:00.000Z",
       },
-    }, { emit: async () => undefined });
+    }, { emit: async event => { if (event.workspaceAttestation) attestations.push(event.workspaceAttestation); } });
+
+    expect(attestations.at(-1)?.currentRevision).toBe(git(repo, ["rev-parse", "opentag/run_unicode_order^{commit}"]).trim());
+    expect(attestations.at(-1)?.currentTree).toBe(git(repo, ["rev-parse", "opentag/run_unicode_order^{tree}"]).trim());
 
     const proposal = result.artifacts?.find((artifact) => artifact.id.endsWith(":proposal-evidence"));
     expect((proposal?.metadata?.proposalEvidence as { changedFiles?: string[] } | undefined)?.changedFiles).toEqual([

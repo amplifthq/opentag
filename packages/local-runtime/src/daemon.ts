@@ -545,6 +545,7 @@ export async function executeClaimedRun(
       {
         runId,
         attemptId: claimed.attemptId,
+        assertExecutionCurrent: hostedExecutionIsCurrent,
         ...(hostedAuthority?.credentialId && hostedAuthority.attemptNumber
           && hostedAuthority.fencingTokenDigest
           ? { attemptAuthority: {

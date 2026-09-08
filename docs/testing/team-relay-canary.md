@@ -136,6 +136,23 @@ test message. This change adds no tables and requires no schema migration.
 
 ### B. Stop at proposal unless a provider action is explicitly authorized
 
+Local staging and commit are Runner-owned finalization, not model shell
+permissions. The ACP executor edits/verifies and returns; it must not request
+`git add`, `git commit`, `git push`, or PR creation. After the child is confirmed
+stopped, the Runner rechecks current Attempt/fence/lease and the captured linked
+worktree, Git directory, branch and starting HEAD before staging and committing.
+It never stages in the user's primary checkout. Paths are literal and bounded
+to the worktree; redirected index/HEAD metadata and configured clean/process
+filters fail closed. Hooks, signing, fsmonitor, external diff/textconv and
+inherited Git routing variables are not executed during this finalization.
+The local commit uses the OpenTag author identity; failure retains the worktree
+and any staged evidence rather than resetting it or claiming completion.
+
+This does not add `command.execute` to the admission ceiling, does not grant
+agent-selected Git flags, and is not an OS sandbox against other concurrent host
+processes. A local commit is proposal material only: remote push and Draft PR
+creation still require the separate exact Effect approval described below.
+
 The preceding steps prove signed ingress, canonical lifecycle, pairing, and
 local ACP execution without creating a provider-side change. A proposal is not
 a draft pull request and does not imply publication.
