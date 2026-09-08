@@ -7,7 +7,7 @@ function sample(index:number){
  const at=(ms:number)=>new Date(Date.UTC(2026,8,8)+ms).toISOString();
  return [{...event,stage:"approval_committed",operationId:`action_${index}`,approvalRef:`effect_${index}`,at:at(0),durationMs:100},
    {...event,stage:"projection_enqueued",operationId:`intent_${index}`,approvalRef:`effect_${index}`,at:at(200),durationMs:30},
-   {...event,stage:"delivery_started",operationId:`intent_${index}`,at:at(300),queueMs:100},
+   {...event,stage:"delivery_started",operationId:`intent_${index}`,at:at(300),queueMs:120},
    {...event,stage:"delivery_settled",operationId:`intent_${index}`,at:at(500),durationMs:200,result:"accepted"}];
 }
 function report(rows:unknown[]){return JSON.parse(execFileSync(process.execPath,[script],{

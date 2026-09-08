@@ -39,7 +39,7 @@ for(const approval of approvals.values()){
     &&row.operationId===projection.operationId);
   samples.push({runId:approval.runId,approvalRef:approval.approvalRef,
     approvalProcessingMs:approval.durationMs??null,approvalToEnqueuedMs:elapsed(approval,projection),
-    deliveryQueueMs:started?.queueMs??null,slackRequestMs:settled.durationMs??null,
+    deliveryQueueMs:started?elapsed(projection,started):null,slackRequestMs:settled.durationMs??null,
     approvalToAcceptedMs:elapsed(approval,settled)});
 }
 const durations=samples.map(x=>x.approvalToAcceptedMs).filter(x=>x!==null).sort((a,b)=>a-b);
