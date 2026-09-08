@@ -8,6 +8,7 @@ import type { Pool } from "pg";
 import type { HostedRunCoordinator } from "../hosted-runs/index.js";
 import { readExactDeliveryAnchor } from "./repository.js";
 import { z } from "zod";
+import { PermissionResolutionReceiptEnvelopeV1Schema } from "@opentag/control-protocol";
 
 const hash = (value: unknown) => `sha256:${createHash("sha256")
   .update(canonicalJsonStringify(value)).digest("hex")}`;
@@ -87,8 +88,26 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     const controls = issuedControls.filter((control) => state === "publication_pending"
       ? control.kind === "status" || control.kind === "cancel" || control.kind === "effect_approve"
       : control.kind !== "effect_approve").slice(0, 4);
+    // Read durable permission truth, not the consumed/unconsumed projection copy.
+    const permissions = await input.pool.query<{ state: string; current_receipt: unknown }>(
+      `SELECT state,current_receipt FROM cp_permission_request
+       WHERE organization_id=$1 AND run_id=$2 AND attempt_number=$3
+         AND (state='waiting' OR current_receipt->'payload'->>'decision' IN ('allow_once','deny'))
+       ORDER BY created_at DESC,permission_request_id DESC LIMIT 1`,
+      [command.organizationId,command.runId,generation]);
+    const permission = permissions.rows[0];
+    const receipt = permission
+      ? PermissionResolutionReceiptEnvelopeV1Schema.parse(permission.current_receipt) : undefined;
+    if (receipt && (receipt.organizationId !== command.organizationId || receipt.runId !== command.runId
+      || receipt.attempt.attemptNumber !== generation || receipt.payload.state !== permission!.state)) {
+      throw new Error("projection_permission_receipt_mismatch");
+    }
+    const approval = receipt && ["waiting", "authorized", "denied"].includes(receipt.payload.state)
+      ? { state: receipt.payload.state as "waiting" | "authorized" | "denied",
+          actionDescriptor: receipt.payload.actionDescriptor } : undefined;
     const presentation = composeTeamRelayThreadProjection({ runId: command.runId, generation,
       state: state as Parameters<typeof composeTeamRelayThreadProjection>[0]["state"], controls,
+      ...(approval ? { approval } : {}),
       providerDelivery: { state: deliveryState,
         ...(deliveryErrorCode ? { reasonCode: deliveryErrorCode as any } : {}) } });
     const text = renderSlackTeamRelayProjection(presentation);

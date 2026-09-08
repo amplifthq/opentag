@@ -255,7 +255,8 @@ export function renderSlackTeamRelayProjection(presentation: OpenTagSourceThread
     `*OpenTag: ${markdownToSlackMrkdwn(presentation.title)}*`,
     markdownToSlackMrkdwn(presentation.summary),
     `Run: \`${escapeSlackText(presentation.runId)}\``,
-    ...(presentation.providerDelivery ? [markdownToSlackMrkdwn(presentation.providerDelivery.message)] : [])
+    ...(presentation.providerDelivery && !["pending", "accepted"].includes(presentation.providerDelivery.state)
+      ? [markdownToSlackMrkdwn(presentation.providerDelivery.message)] : [])
   ].join("\n");
 }
 

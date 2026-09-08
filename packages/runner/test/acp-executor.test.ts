@@ -384,6 +384,22 @@ describe("ACP executor", () => {
     });
   }, 15_000);
 
+  it("rejects an out-of-worktree write before requesting human authority", async () => {
+    const repo = initRepo(); const root = tempDir("outside-write");
+    const permissionResolver = vi.fn(async () => ({ actionId: "outside", decision: "allow_once" as const, material: true }));
+    const executor = createAcpExecutor({ manifest: manifest("local-write-outside") });
+    await executor.run({ ...input({ kind: "repository", path: repo }, "run_outside"),
+      attemptId: "attempt_outside", worktreeRoot: root,
+      attemptAuthority: { attemptNumber: 1, fencingTokenDigest: `sha256:${"a".repeat(64)}`,
+        credentialId: "credential_write", leaseExpiresAt: "2099-01-01T00:00:00.000Z" },
+      permissionResolver,
+    }, { emit: async () => undefined });
+    expect(permissionResolver).not.toHaveBeenCalled();
+    expect(existsSync(join(root, "outside-write.txt"))).toBe(false);
+    const prompt = JSON.parse(git(repo, ["show", "opentag/run_outside:acp-prompt.json"])).text;
+    expect(prompt).toContain(realpathSync(root) + "/run_outside-attempt_outside");
+  });
+
   it.each(["local-write", "local-write-mismatch"])("uses native file readback, not tool success, for %s", async mode => {
     const repo = initRepo(); const reports: Array<{ outcome: string; provider: string; localWriteObservation?: unknown }> = [];
     const executor = createAcpExecutor({ manifest: manifest(mode) });

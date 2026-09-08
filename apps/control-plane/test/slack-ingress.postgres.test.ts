@@ -124,7 +124,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       fetchImpl: async () => { throw new Error("provider_call_forbidden"); } }) };
   }
 
-  it("preserves both approval decisions across repeated projection refreshes", async () => {
+  it("does not project orphan approval authority without a current permission request", async () => {
     await insertSlackInstallation();
     let tick = 0;
     const { ingress } = productionComponents({ clock: { now: () => new Date(now.getTime() + tick++ * 1000) } });
@@ -140,7 +140,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       expiresAt: new Date(now.getTime() + 60_000) });
     for (let refresh = 0; refresh < 4; refresh += 1) {
       const controls = await ingress.issueProjectionControls({ organizationId: "org_a", runId: "run_refresh", generation: 1 });
-      expect(controls.map(control => control.kind).sort()).toEqual(["approve", "reject"]);
+      expect(controls).toEqual([]);
     }
     const nestedCopies = await fixture.pool.query(`SELECT action_id FROM cp_slack_action_authority
       WHERE run_id='run_refresh' AND action_id LIKE '%:projection:%:projection:%'`);

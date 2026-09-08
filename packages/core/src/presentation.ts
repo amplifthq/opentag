@@ -225,6 +225,7 @@ export function composeTeamRelayThreadProjection(input: {
   controls: OpenTagSourceThreadProjectionPresentation["controls"];
   providerDelivery?: { state: "pending" | "accepted" | "rejected" | "outcome_unknown" | "attention";
     reasonCode?: NonNullable<OpenTagSourceThreadProjectionPresentation["providerDelivery"]>["reasonCode"] };
+  approval?: { state: "waiting" | "authorized" | "denied"; actionDescriptor: string };
 }): OpenTagSourceThreadProjectionPresentation {
   const copy = TEAM_RELAY_COPY[input.state];
   const deliveryMessage = input.providerDelivery?.state === "outcome_unknown"
@@ -233,9 +234,17 @@ export function composeTeamRelayThreadProjection(input: {
       ? "Slack status delivery needs attention."
       : input.providerDelivery?.state === "pending" ? "Slack status delivery is pending."
         : input.providerDelivery?.state === "accepted" ? "Slack status delivery was accepted." : undefined;
+  const approval = input.approval;
+  const waiting = approval?.state === "waiting" && copy.runOutcome === "pending";
+  const approvalMessage = approval?.state === "authorized"
+    ? `Approved once: ${approval.actionDescriptor}. This approval does not authorize publication.`
+    : approval?.state === "denied" ? `Denied: ${approval.actionDescriptor}. This action will not execute.`
+      : waiting ? `Approval required: ${approval.actionDescriptor}. Allow this exact action once or deny it.` : undefined;
   return OpenTagSourceThreadProjectionPresentationSchema.parse({
     kind: "source_thread_projection", runId: input.runId, generation: input.generation,
     state: input.state, ...copy, controls: input.controls,
+    ...(waiting ? { title: "Waiting for approval" } : {}),
+    ...(approvalMessage ? { summary: waiting ? approvalMessage : `${approvalMessage}\n${copy.summary}` } : {}),
     ...(input.providerDelivery && deliveryMessage ? { providerDelivery: {
       state: input.providerDelivery.state,
       ...(input.providerDelivery.reasonCode ? { reasonCode: input.providerDelivery.reasonCode } : {}),

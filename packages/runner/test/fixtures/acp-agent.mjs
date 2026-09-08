@@ -122,6 +122,8 @@ const app = acp
     });
 
     if (mode === "permission" || mode.startsWith("local-write")) {
+      const writePath = mode === "local-write-outside"
+        ? join(session.cwd, "..", "outside-write.txt") : join(session.cwd, "observed-write.txt");
       const permission = await ctx.client.request(acp.methods.client.session.requestPermission, {
         sessionId: ctx.params.sessionId,
         toolCall: {
@@ -130,7 +132,7 @@ const app = acp
           kind: mode.startsWith("local-write") ? "edit" : "execute",
           status: "pending",
           rawInput: mode.startsWith("local-write") ? {
-            file_path: join(session.cwd, "observed-write.txt"), content: "verified native bytes\n",
+            file_path: writePath, content: "verified native bytes\n",
           } : {
             provider: fixtureConfig.OPENTAG_ACP_TEST_PROVIDER ?? "npm",
             connectionId: fixtureConfig.OPENTAG_ACP_TEST_CONNECTION ?? "npm:team",
@@ -149,8 +151,9 @@ const app = acp
         ]
       });
       await record(session.cwd, "acp-permission.json", permission);
-      if (mode.startsWith("local-write") && permission.outcome.outcome === "selected") {
-        await writeFile(join(session.cwd, "observed-write.txt"), mode === "local-write-mismatch" ? "different\n" : "verified native bytes\n");
+      if (mode.startsWith("local-write") && permission.outcome.outcome === "selected"
+        && permission.outcome.optionId !== "reject-once") {
+        await writeFile(writePath, mode === "local-write-mismatch" ? "different\n" : "verified native bytes\n");
       }
       await ctx.client.notify(acp.methods.client.session.update, {
         sessionId: ctx.params.sessionId,

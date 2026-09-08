@@ -31,7 +31,7 @@ async function containedPath(workspace: string, requested: string) {
 /** Only a bounded full-file write has enough request data for exact readback. */
 export async function prepareLocalWriteObservation(input: {
   rawInput: unknown; operation: string; targetFingerprint: string | undefined;
-  workspacePath: string; attestation: AttemptWorkspaceAttestation;
+  workspacePath: string; sessionCwd?: string; attestation: AttemptWorkspaceAttestation;
 }): Promise<(() => Promise<LocalWorkspaceWriteObservationV1 | undefined>) | undefined> {
   if (!["write", "edit"].includes(input.operation) || !input.targetFingerprint
     || !input.rawInput || typeof input.rawInput !== "object" || Array.isArray(input.rawInput)) return undefined;
@@ -45,7 +45,9 @@ export async function prepareLocalWriteObservation(input: {
   try {
     const workspace = await realpath(input.workspacePath);
     if (hash(workspace) !== input.attestation.workspacePathDigest) return undefined;
-    const path = await containedPath(workspace, requested);
+    const sessionCwd = input.sessionCwd ? await realpath(input.sessionCwd) : workspace;
+    const requestedPath = resolve(sessionCwd, requested);
+    const path = await containedPath(workspace, requestedPath);
     const before = await lstat(path).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null; throw error;
     });
@@ -55,7 +57,7 @@ export async function prepareLocalWriteObservation(input: {
     return async () => {
       try {
         if (await realpath(input.workspacePath) !== workspace
-          || await containedPath(workspace, requested) !== path) return undefined;
+          || await containedPath(workspace, requestedPath) !== path) return undefined;
         const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
         try {
           const stat = await handle.stat();
