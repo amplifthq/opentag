@@ -2558,7 +2558,7 @@ describe("Control V1 projection pump", () => {
     })).toThrow("runner_control_context_organization_mismatch");
   });
 
-  it("rejects future and expired server context at the one-minute readiness boundary", () => {
+  it("allows bounded clock skew without extending the one-minute age boundary", () => {
     expect(isRunnerControlContextFreshV1(
       "2026-08-08T23:59:00.000Z",
       now,
@@ -2570,7 +2570,13 @@ describe("Control V1 projection pump", () => {
     expect(isRunnerControlContextFreshV1(
       "2026-08-09T00:00:00.001Z",
       now,
-    )).toBe(false);
+    )).toBe(true);
+    expect(isRunnerControlContextFreshV1("2026-08-09T00:00:00.013Z", now)).toBe(true);
+    expect(isRunnerControlContextFreshV1("2026-08-09T00:00:01.000Z", now)).toBe(true);
+    expect(isRunnerControlContextFreshV1("2026-08-09T00:00:01.001Z", now)).toBe(false);
+    expect(isRunnerControlContextFreshV1("invalid", now)).toBe(false);
+    // Read the clock after the response; a long round trip cannot refresh it.
+    expect(isRunnerControlContextFreshV1(now.toISOString(), new Date(now.getTime()+60_001))).toBe(false);
   });
 
   it("builds readiness only from authoritative control context and public capability digests", async () => {

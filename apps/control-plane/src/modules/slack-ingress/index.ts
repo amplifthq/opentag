@@ -15,6 +15,7 @@ import type { RelayContentCustody } from "../source-content/index.js";
 import { createSourceIngressService, type SourceIngressService } from "../source-ingress/index.js";
 import type { EffectApproval, EffectApprovalIssue } from "../effects/index.js";
 import { z } from "zod";
+import { feedbackElapsedMs, logFeedbackTiming } from "../provider-delivery/feedback-timing.js";
 
 type HttpResult = { status: number; body: unknown };
 type RawRequest = { rawBody: Uint8Array; headers: Headers; receivedAt: string };
@@ -742,6 +743,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
     },
 
     async receiveInteractivity(routeIdentity: string, request: RawRequest): Promise<HttpResult> {
+      const feedbackStarted=performance.now();
       const commandAuthority = input.commandAuthority;
       if (!commandAuthority) return { status: 503, body: { error: "slack_command_authority_unavailable" } };
       try {
@@ -1015,6 +1017,13 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
           completed = result.outcome === "completed";
         }
         if (!completed) return { status: 403, body: { error: "source_thread_control_rejected" } };
+        if(claimed.row.action_kind==="approval"||claimed.row.action_kind==="effect"){
+          logFeedbackTiming({stage:"approval_committed",runId:claimed.row.run_id,
+            operationId:claimed.row.action_id,
+            approvalRef:claimed.row.action_kind==="effect"?claimed.row.pending_action_id:claimed.row.pending_request_id,
+            at:input.clock.now().toISOString(),durationMs:feedbackElapsedMs(feedbackStarted,performance.now()),
+            result:!("effectApproval" in claimed)&&claimed.command.type==="reject"?"denied":"authorized"});
+        }
         await input.testHooks?.afterServiceBeforeFinalize?.();
         const terminalDecision = "effectApproval" in claimed
           || (!("effectApproval" in claimed) && claimed.command.type !== "status");

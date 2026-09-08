@@ -8,9 +8,9 @@ import type { Pool } from "pg";
 import type { HostedRunCoordinator } from "../hosted-runs/index.js";
 import { readExactDeliveryAnchor } from "./repository.js";
 import { z } from "zod";
-import { PermissionResolutionReceiptEnvelopeV1Schema } from "@opentag/control-protocol";
-import { readRunPublicationEffect } from "../effects/index.js";
+import { readRunThreadFeedback } from "../hosted-runs/thread-feedback.js";
 import type { DurableJobQueue } from "../jobs/index.js";
+import { feedbackElapsedMs, logFeedbackTiming } from "./feedback-timing.js";
 
 const hash = (value: unknown) => `sha256:${createHash("sha256")
   .update(canonicalJsonStringify(value)).digest("hex")}`;
@@ -27,6 +27,7 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     projectionRevision?: number; includeControls?: boolean;
     deliveryEvent?: { intentId:string; revision:number; eventSequence:number;
       state:"accepted"|"rejected"|"outcome_unknown"|"attention" } }) {
+    const started=performance.now();
     const run = await input.hosted.inspect(command); if (!run) return { kind: "missing" as const };
     const current = await input.pool.query<{ current_attempt_number: number; projection_revision: string }>(
       "SELECT current_attempt_number,projection_revision::text FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2",
@@ -91,24 +92,7 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     const controls = issuedControls.filter((control) => state === "publication_pending"
       ? control.kind === "status" || control.kind === "cancel" || control.kind === "effect_approve"
       : control.kind !== "effect_approve").slice(0, 4);
-    // Read durable permission truth, not the consumed/unconsumed projection copy.
-    const permissions = await input.pool.query<{ state: string; current_receipt: unknown }>(
-      `SELECT state,current_receipt FROM cp_permission_request
-       WHERE organization_id=$1 AND run_id=$2 AND attempt_number=$3
-         AND (state='waiting' OR current_receipt->'payload'->>'decision' IN ('allow_once','deny'))
-       ORDER BY created_at DESC,permission_request_id DESC LIMIT 1`,
-      [command.organizationId,command.runId,generation]);
-    const permission = permissions.rows[0];
-    const receipt = permission
-      ? PermissionResolutionReceiptEnvelopeV1Schema.parse(permission.current_receipt) : undefined;
-    if (receipt && (receipt.organizationId !== command.organizationId || receipt.runId !== command.runId
-      || receipt.attempt.attemptNumber !== generation || receipt.payload.state !== permission!.state)) {
-      throw new Error("projection_permission_receipt_mismatch");
-    }
-    const approval = receipt && ["waiting", "authorized", "denied"].includes(receipt.payload.state)
-      ? { state: receipt.payload.state as "waiting" | "authorized" | "denied",
-          actionDescriptor: receipt.payload.actionDescriptor } : undefined;
-    const publication = await readRunPublicationEffect(input.pool, {
+    const {approval,publication,approvalRef} = await readRunThreadFeedback(input.pool, {
       organizationId: command.organizationId, runId: command.runId, attemptNumber: generation });
     const presentation = composeTeamRelayThreadProjection({ runId: command.runId, generation,
       state: state as Parameters<typeof composeTeamRelayThreadProjection>[0]["state"], controls,
@@ -168,6 +152,12 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     const wake = await input.jobs.enqueue({ jobId: `provider-delivery:${intent.sideEffectIntentId}`,
       organizationId: null, kind: "provider-delivery", payload: {}, maxAttempts: 1 });
     if (wake.kind === "conflict") throw new Error("projection_delivery_job_conflict");
+    const reference=publication
+      ? publication.state!=="requested"?publication.effectId:undefined
+      : approval&&approval.state!=="waiting"?approvalRef:undefined;
+    if(reference) logFeedbackTiming({stage:"projection_enqueued",runId:command.runId,
+      operationId:intent.sideEffectIntentId,approvalRef:reference,at:input.clock.now().toISOString(),
+      durationMs:feedbackElapsedMs(started,performance.now()),result:"queued"});
     return { kind: "queued" as const, presentation, intentId: intent.sideEffectIntentId };
   }, async projectDeliveryIntent(intentId: string) {
     const result = await input.pool.query<{ organization_id: string; run_id: string | null }>(

@@ -298,9 +298,9 @@ function terminalKind(state: HostedRunRow["state"]): TerminalKind | null {
     : null;
 }
 
-function projectRun(run: Pick<HostedRunRow, "state" | "queue_claim_deadline" | "outcome_state">
-  & { publication_mode?: string; has_candidate?: boolean }): HostedRunProjection {
-  const status = run.state === "queued" ? "waiting_for_runner"
+export function projectRunPhase(run: Pick<HostedRunRow, "state">
+  & { publication_mode?: string; has_candidate?: boolean }): HostedRunProjection["status"] {
+  return run.state === "queued" ? "waiting_for_runner"
     : run.state === "needs_approval" ? "waiting_for_approval"
     : run.state === "succeeded" && run.publication_mode === "proposal_only"
       ? "proposal_ready"
@@ -309,7 +309,11 @@ function projectRun(run: Pick<HostedRunRow, "state" | "queue_claim_deadline" | "
       : run.state === "running" && run.publication_mode === "pull_request" && run.has_candidate
         ? "publication_pending"
       : run.state;
-  return { canonicalStatus: run.state, status,
+}
+
+function projectRun(run: Pick<HostedRunRow, "state" | "queue_claim_deadline" | "outcome_state">
+  & { publication_mode?: string; has_candidate?: boolean }): HostedRunProjection {
+  return { canonicalStatus: run.state, status: projectRunPhase(run),
     queueClaimDeadline: run.queue_claim_deadline.toISOString(),
     outcome: run.outcome_state };
 }
