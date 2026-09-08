@@ -418,7 +418,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       policy_snapshot_digest,state,request,current_receipt,created_at,updated_at)
       VALUES('org_a','permission_1','run_1','runner_1','attempt_1',1,'pending_action_1','resolution_1',
       $1,$2,'waiting',$3,'{}',$4,$4)`, [permissionRequestDigest, policyDigest,
-      { attempt: { epoch: 1 } }, now]);
+      { attempt: { epoch: 1 }, actionDescriptorDigest }, now]);
     const effectTargetBindingDigest = digest("effect-binding");
     const effectTarget = { projectTargetId: "target_effect_action",
       targetBindingDigest: effectTargetBindingDigest, targetBindingGeneration: 1,

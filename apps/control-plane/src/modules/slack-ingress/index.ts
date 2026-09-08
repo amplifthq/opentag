@@ -794,6 +794,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
               fencing_token_digest: string; permission_state: string;
               permission_request_digest: string; permission_action_id: string;
               permission_policy_digest: string; permission_attempt_epoch: string | null;
+              permission_action_descriptor_digest: string | null;
             }>(`SELECT run.state AS run_state, run.permission_ceiling_digest,
                 attempt.state AS attempt_state, attempt.blocked_permission_request_id,
                 attempt.blocked_action_descriptor_digest, attempt.blocked_policy_snapshot_digest,
@@ -802,20 +803,31 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
                 permission.permission_request_digest,
                 permission.action_id AS permission_action_id,
                 permission.policy_snapshot_digest AS permission_policy_digest,
+                permission.request->>'actionDescriptorDigest' AS permission_action_descriptor_digest,
                 permission.request->'attempt'->>'epoch' AS permission_attempt_epoch
               FROM cp_hosted_run run
               JOIN cp_hosted_attempt attempt ON attempt.organization_id = run.organization_id
                 AND attempt.run_id = run.run_id AND attempt.attempt_number = run.current_attempt_number
               JOIN cp_permission_request permission ON permission.organization_id = run.organization_id
                 AND permission.run_id = run.run_id AND permission.permission_request_id = $3
-              WHERE run.organization_id = $1 AND run.run_id = $2`,
-            [row.organization_id, row.run_id, row.pending_request_id]);
+              WHERE run.organization_id = $1 AND run.run_id = $2
+                AND run.terminal_kind IS NULL AND attempt.lease_expires_at > $4
+                AND attempt.material_start_state IN ('open','started_or_ambiguous')`,
+            [row.organization_id, row.run_id, row.pending_request_id, input.clock.now()]);
             const state = current.rows[0];
-            if (!state || state.run_state !== "needs_approval" || state.attempt_state !== "needs_approval"
+            // An ACP tool may wait inline without ending the executor. Suspended
+            // completion still requires its exact blocked-permission tuple.
+            const inlineWait = state?.run_state === "running" && state.attempt_state === "running"
+              && state.blocked_permission_request_id === null
+              && state.blocked_action_descriptor_digest === null
+              && state.blocked_policy_snapshot_digest === null;
+            const suspendedWait = state?.run_state === "needs_approval" && state.attempt_state === "needs_approval"
+              && state.blocked_permission_request_id === row.pending_request_id
+              && state.blocked_action_descriptor_digest === row.action_descriptor_digest
+              && state.blocked_policy_snapshot_digest === row.policy_digest;
+            if (!state || (!inlineWait && !suspendedWait)
               || state.permission_state !== "waiting"
-              || state.blocked_permission_request_id !== row.pending_request_id
-              || state.blocked_action_descriptor_digest !== row.action_descriptor_digest
-              || state.blocked_policy_snapshot_digest !== row.policy_digest
+              || state.permission_action_descriptor_digest !== row.action_descriptor_digest
               || state.permission_ceiling_digest !== row.frozen_ceiling_digest
               || state.permission_request_digest !== row.permission_request_digest
               || state.permission_action_id !== row.pending_action_id

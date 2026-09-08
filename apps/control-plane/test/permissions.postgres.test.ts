@@ -630,6 +630,63 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
         workspaceAttestationDigest },
       idempotencyKey: "material_begin_exact_approval",
     })).resolves.toEqual({ kind: "begun" });
+    // A live ACP tool can wait inline while the same Attempt remains running.
+    const inlineInput = { ...digestInput, permissionRequestId: "permission_inline",
+      actionId: "action_inline" };
+    const inlineRequest = RunnerPermissionRequestV1Schema.parse({ ...inlineInput,
+      requestId: "request_inline", operationId: "operation_inline",
+      attempt: lifecycleAttempt,
+      permissionRequestDigest: await computePermissionRequestDigestV1(inlineInput) });
+    await expect(permissions.request({ principal, request: inlineRequest }))
+      .resolves.toMatchObject({ kind: "waiting" });
+    const inlineToken = await ingress.issueAction({ organizationId: principal.organizationId,
+      actionId: "slack_inline", installationId: "install_permission", bindingId: "binding_permission",
+      teamId: "T_PERMISSION", appId: "A_PERMISSION", channelId: "C_PERMISSION",
+      threadRootMessageId: "1700000000.000100", runId: claim.runId,
+      pendingRequestId: inlineRequest.permissionRequestId, actionKind: "approval",
+      actionDescriptor: inlineRequest.actionDescriptor, approvalEpoch: String(claim.attempt.epoch),
+      frozenCeiling: admission.admission.permissionCeiling.allowedActionDescriptors,
+      policyDigest: inlineRequest.policySnapshotDigest, runnerId: principal.runnerId,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number, attemptEpoch: claim.attempt.epoch,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      permissionRequestDigest: inlineRequest.permissionRequestDigest, pendingActionId: inlineRequest.actionId,
+      allowedDecisions: ["allow_once", "deny"], requesterUserId: "U_MEMBER", memberUserIds: ["U_MEMBER"],
+      operatorUserIds: [], approverUserId: "U_APPROVER", adminUserIds: [],
+      expiresAt: new Date(now.getTime() + 60_000) });
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_MEMBER")))
+      .resolves.toMatchObject({ status: 403 });
+    await fixture.pool.query("UPDATE cp_hosted_attempt SET lease_expires_at=$3 WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId, now]);
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+      .resolves.toMatchObject({ status: 403 });
+    await fixture.pool.query("UPDATE cp_hosted_attempt SET lease_expires_at=$3 WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId, claim.attempt.leaseExpiresAt]);
+    await fixture.pool.query("UPDATE cp_hosted_run SET state='needs_approval' WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId]);
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+      .resolves.toMatchObject({ status: 403 });
+    await fixture.pool.query("UPDATE cp_hosted_run SET state='running' WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId]);
+    await fixture.pool.query("UPDATE cp_hosted_attempt SET workspace_attestation=$3::jsonb WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId, JSON.stringify({ ...workspaceAttestation, workspaceId: "wrong_workspace" })]);
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+      .resolves.toMatchObject({ status: 403 });
+    expect((await fixture.pool.query("SELECT state FROM cp_permission_request WHERE permission_request_id=$1",
+      [inlineRequest.permissionRequestId])).rows[0].state).toBe("waiting");
+    await fixture.pool.query("UPDATE cp_hosted_attempt SET workspace_attestation=$3::jsonb WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId, JSON.stringify(workspaceAttestation)]);
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+      .resolves.toEqual({ status: 200, body: { ok: true } });
+    const inlineReceipt = PermissionResolutionReceiptEnvelopeV1Schema.parse((await fixture.pool.query(
+      "SELECT current_receipt FROM cp_permission_request WHERE organization_id=$1 AND permission_request_id=$2",
+      [principal.organizationId, inlineRequest.permissionRequestId])).rows[0].current_receipt);
+    expect(inlineReceipt.payload).toMatchObject({ state: "authorized", decisionActorRef: "U_APPROVER",
+      workspaceAttestationDigest, permissionRequestDigest: inlineRequest.permissionRequestDigest });
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+      .resolves.toMatchObject({ status: 403 });
+    await expect(hosted.inspect({ organizationId: principal.organizationId, runId: claim.runId }))
+      .resolves.toMatchObject({ canonicalStatus: "running" });
+
     const success = await buildHostedLifecycleRequestV1({
       organizationId: principal.organizationId, runnerId: principal.runnerId,
       runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
