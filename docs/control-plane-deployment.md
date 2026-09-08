@@ -7,6 +7,10 @@ commands. This document does not claim that a managed environment is deployed.
 
 ## Minimum topology
 
+For the Railway image profile, see [container image releases](control-plane-image-release.md).
+The [separate Railway template repository](https://github.com/amplifthq/opentag-railway)
+consumes the same application and migration image; it does not own a second runtime.
+
 The reference profile has four application roles and one durable dependency:
 
 | Service | Authority |

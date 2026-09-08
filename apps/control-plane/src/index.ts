@@ -17,6 +17,7 @@ import { createControlPlaneRuntime } from "./runtime.js";
 import { bootstrapSlackInstallation } from "./modules/slack-installation-bootstrap/index.js";
 import type { ControlPlaneConfig } from "./config.js";
 import type { SqlMigration } from "./database/migrations.js";
+import { containerMain } from "./container.js";
 
 export function createEnvironmentSlackSecretResolver(
   env: Record<string, string | undefined>,
@@ -77,6 +78,10 @@ export async function main(input: {
   const argv = input.argv ?? process.argv.slice(2);
   const env = input.env ?? process.env;
   const command = argv[0] ?? "serve";
+  if (command === "container") {
+    await containerMain({ argv: argv.slice(1), env, runCommand: main });
+    return;
+  }
   const config = parseControlPlaneConfig(env);
   const migrations = await loadSqlMigrations(migrationDirectory);
 
@@ -204,5 +209,14 @@ export async function main(input: {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  await main();
+  if (process.argv[2] === "container") {
+    main().catch((error: unknown) => {
+      const code = error instanceof Error && /^container_[a-z_]+$/u.test(error.message)
+        ? error.message : "container_start_failed";
+      console.error("control_plane_container_failed", { code });
+      process.exit(1);
+    });
+  } else {
+    await main();
+  }
 }

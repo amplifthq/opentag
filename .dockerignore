@@ -6,3 +6,9 @@
 **/*.tsbuildinfo
 .pnpm-store
 .superpowers
+**/.env
+**/.env.*
+**/secrets
+.worktrees
+.agents
+.codex
