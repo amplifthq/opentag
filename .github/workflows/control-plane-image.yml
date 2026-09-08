@@ -35,7 +35,7 @@ jobs:
       IMAGE_TAG: sha-${{ github.event.workflow_run.head_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Download the image from the successful main CI run
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: control-plane-image-${{ github.event.workflow_run.head_sha }}
           run-id: ${{ github.event.workflow_run.id }}
@@ -46,7 +46,7 @@ jobs:
           test "$(docker image inspect opentag-control-plane:verified --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_SHA"
           test "$(docker image inspect opentag-control-plane:verified --format '{{.Config.User}}')" = opentag
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -71,7 +71,7 @@ jobs:
             `Published tested image: \`${reference}\`\n\nSource: \`${receipt.sourceSha}\`\n`);
           NODE
       - name: Retain the immutable image receipt
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: control-plane-image-receipt-${{ github.event.workflow_run.head_sha }}
           path: control-plane-image.json
