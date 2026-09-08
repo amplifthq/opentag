@@ -10,7 +10,7 @@ const records=[];let invalidRecords=0;
 for(const line of readFileSync(0,"utf8").split("\n").filter(Boolean)){
   try{
     let row=JSON.parse(line);
-    if(typeof row.message==="string")row=JSON.parse(row.message);
+    if(row.event!=="control_plane_feedback_timing"&&typeof row.message==="string")row=JSON.parse(row.message);
     if(row.event!=="control_plane_feedback_timing")continue;
     if(!Number.isFinite(Date.parse(row.at))||typeof row.runId!=="string"||typeof row.operationId!=="string"){
       invalidRecords++;continue;

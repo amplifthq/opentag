@@ -76,9 +76,9 @@ function teammateFromRow(row: TeammateRow,
     ...(row.active_publication_mode?{publication_mode:row.active_publication_mode}:{}),has_candidate:row.active_has_candidate}) : undefined;
   const publicationPending = phase === "publication_pending";
   const waitingForApproval = feedback?.approval?.state === "waiting" || activeWork?.state === "needs_approval";
-  const presentation = activeWork && (publicationPending || waitingForApproval)
+  const presentation = activeWork && (publicationPending || waitingForApproval || feedback?.approval)
     ? composeTeamRelayThreadProjection({runId:activeWork.runId,generation:row.active_run_attempt_number??1,
-        state:publicationPending?"publication_pending":"waiting_for_approval",controls:[],
+        state:publicationPending?"publication_pending":waitingForApproval?"waiting_for_approval":"running",controls:[],
         ...(feedback?.approval?{approval:feedback.approval}:{}),
         ...(feedback?.publication?{publication:feedback.publication}:{})}) : undefined;
   if (!row.configured_project_target_id) {
@@ -104,7 +104,7 @@ function teammateFromRow(row: TeammateRow,
   } else if (waitingForApproval) {
     workState = "needs_attention";
     reason = presentation!.summary;
-  } else if (!row.readiness_expires_at) {
+  } else if (!row.readiness_expires_at && !(activeWork && row.active_attempt_valid)) {
     workState = "runner_offline";
     reason = activeWork
       ? `Runner readiness expired while Run ${activeWork.runId} remains ${activeWork.state}.`
@@ -118,7 +118,7 @@ function teammateFromRow(row: TeammateRow,
     reason = `Run ${activeWork.runId} has no current valid Attempt lease.`;
   } else if (activeWork?.state === "assigned" || activeWork?.state === "running") {
     workState = "working";
-    reason = `Run ${activeWork.runId} is ${activeWork.state} on the paired Runner.`;
+    reason = presentation?.summary ?? `Run ${activeWork.runId} is ${activeWork.state} on the paired Runner.`;
   } else if (activeWork) {
     workState = "needs_attention";
     reason = `Run ${activeWork.runId} has an unexpected active state: ${activeWork.state}.`;
@@ -244,6 +244,12 @@ export function createConsoleReadModel(input: { pool: Pool }) {
                       AND attempt.attempt_number = run.current_attempt_number
                       AND attempt.runner_id = run.runner_id
                       AND attempt.credential_id = runner.current_credential_id
+                      AND EXISTS (SELECT 1 FROM cp_runner_credential current_credential
+                        WHERE current_credential.organization_id=runner.organization_id
+                          AND current_credential.runner_id=runner.runner_id
+                          AND current_credential.credential_id=runner.current_credential_id
+                          AND current_credential.credential_generation=runner.credential_generation
+                          AND current_credential.revoked_at IS NULL)
                       AND attempt.lease_expires_at > clock_timestamp()
                       AND (
                         (run.state = 'assigned' AND attempt.state = 'claimed')

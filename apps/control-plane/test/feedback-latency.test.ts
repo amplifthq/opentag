@@ -21,4 +21,6 @@ it("correlates exact approved projection without counting replay as another samp
 it("requires twenty accepted samples and understands Railway log envelopes",()=>{
  const rows=Array.from({length:20},(_,i)=>sample(i)).flat().map(x=>({message:JSON.stringify(x)}));
  expect(report(rows)).toMatchObject({sampleCount:20,p95Ms:500,verdict:"within_target"});
+ const native=sample(1).map(x=>({...x,message:"",level:"info",timestamp:x.at}));
+ expect(report(native)).toMatchObject({sampleCount:1,pending:0,invalidRecords:0});
 });

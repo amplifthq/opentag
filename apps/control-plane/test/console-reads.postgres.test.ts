@@ -118,9 +118,16 @@ describe("derived Teammate read model", () => {
     {
       name: "expired readiness",
       row: teammateRow({ readiness_expires_at: null, active_run_id: "run_stale",
-        active_run_state: "running",
+        active_run_state: "running", active_attempt_valid: false,
         active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"), active_run_count: 1 }),
       workState: "runner_offline",
+    },
+    {
+      name: "busy Runner with a current leased Attempt",
+      row: teammateRow({ readiness_expires_at: null, active_run_id: "run_busy",
+        active_run_state: "running", active_attempt_valid: true,
+        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"), active_run_count: 1 }),
+      workState: "working",
     },
     {
       name: "invalid current Attempt",
