@@ -22,6 +22,7 @@
     "smoke:openclaw-acp-conformance": "OPENTAG_RUN_OPENCLAW_ACP_CONFORMANCE=1 vitest run packages/runner/test/openclaw-acp-live-smoke.test.ts",
     "smoke:privacy": "node scripts/test/privacy-redaction-scan.mjs",
     "smoke:control-plane-compose:typecheck": "tsc -p scripts/test/tsconfig.control-plane-compose-smoke.json",
+    "smoke:control-plane-image": "node scripts/test/control-plane-image-smoke.mjs",
     "verify:delivery-fixtures": "vitest run packages/delivery-contract/test/corpus-verifier.test.ts packages/delivery-contract/test/canonical-fixtures.test.ts"
   },
   "devDependencies": {

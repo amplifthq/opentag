@@ -7,6 +7,44 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../.
 const read = (path: string) => readFile(resolve(repositoryRoot, path), "utf8");
 
 describe("Control Plane deployment contract", () => {
+  it("publishes only the tested image from a successful main push", async () => {
+    const [ci, publish] = await Promise.all([
+      read(".github/workflows/ci.yml"), read(".github/workflows/control-plane-image.yml"),
+    ]);
+    expect(ci).toContain("control-plane-image-smoke.mjs opentag-control-plane:verified");
+    expect(ci).toContain("audit-control-plane-image.mjs");
+    expect(ci).toContain("docker save opentag-control-plane:verified");
+    expect(publish).toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(publish).toContain("github.event.workflow_run.event == 'push'");
+    expect(publish).toContain("github.event.workflow_run.head_branch == 'main'");
+    expect(publish).toContain("github.event.workflow_run.head_repository.full_name == github.repository");
+    expect(publish).toContain("run-id: ${{ github.event.workflow_run.id }}");
+    expect(publish).toContain("docker load --input control-plane-image.tar");
+    expect(publish).not.toContain("docker build");
+    expect(publish).not.toContain(":latest");
+    expect(publish).not.toContain("pull_request_target");
+    expect(publish).toContain("${{ github.run_id }}-${{ github.run_attempt }}");
+    expect(publish).toContain("control-plane-image.json");
+    expect(publish).toContain('docker --config "$anonymous_config" pull "$reference"');
+    for (const match of `${ci}\n${publish}`.matchAll(/uses: ([^\s]+)/gu)) {
+      expect(match[1]).toMatch(/@[a-f0-9]{40}$/u);
+    }
+  });
+
+  it("keeps container custody separate from the existing Compose secret mounts", async () => {
+    const [dockerfile, ignore, container] = await Promise.all([
+      read("apps/control-plane/Dockerfile"), read(".dockerignore"), read("apps/control-plane/src/container.ts"),
+    ]);
+    expect(dockerfile).toContain("ARG OPENTAG_RELEASE_SHA=local");
+    expect(dockerfile).toContain("org.opencontainers.image.revision=$OPENTAG_RELEASE_SHA");
+    expect(dockerfile).toContain("install -d -m 0700 -o 10001 -g 10001 /run/secrets");
+    expect(ignore).toContain("**/.env");
+    expect(ignore).toContain(".worktrees");
+    expect(container).toContain('z.enum(["serve", "jobs"])');
+    expect(container).not.toContain("randomBytes");
+    expect(container).not.toContain("command.execute");
+  });
+
   it("uses one OCI image for migrations, bootstraps, HTTP, and durable jobs", async () => {
     const compose = await read("deploy/compose/compose.yaml");
     expect(compose).toContain("postgres:");

@@ -41,10 +41,16 @@ RUN corepack pnpm --filter @opentag/control-plane \
 
 FROM node:22-bookworm-slim AS runtime
 
+ARG OPENTAG_RELEASE_SHA=local
 ENV NODE_ENV=production
+ENV OPENTAG_RELEASE_SHA=$OPENTAG_RELEASE_SHA
+LABEL org.opencontainers.image.source="https://github.com/amplifthq/opentag" \
+  org.opencontainers.image.licenses="MIT" \
+  org.opencontainers.image.revision=$OPENTAG_RELEASE_SHA
 WORKDIR /workspace
 RUN groupadd --gid 10001 opentag \
-  && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin opentag
+  && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin opentag \
+  && install -d -m 0700 -o 10001 -g 10001 /run/secrets
 
 COPY --from=build --chown=opentag:opentag /output/package.json ./apps/control-plane/package.json
 COPY --from=build --chown=opentag:opentag /output/node_modules ./apps/control-plane/node_modules
