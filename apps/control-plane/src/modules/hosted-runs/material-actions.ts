@@ -1,5 +1,6 @@
 import {
   AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
+  AttemptWorkspaceAttestationV1Schema,
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
   computeMaterialActionFencingTokenDigestV1,
@@ -148,6 +149,43 @@ type CurrentReceipt = {
   outcome: "succeeded" | "failed" | "outcome_unknown";
   receipt: unknown;
 };
+
+/** Proposal readiness may accept only resolved, scoped local-write observations. */
+export async function areAttemptLocalWritesResolved(
+  client: { query<Row extends Record<string, unknown>>(text: string, values?: readonly unknown[]): Promise<{ rows: Row[] }> },
+  input: { organizationId: string; runId: string; attemptId: string },
+): Promise<boolean> {
+  const truth = await classifyAttemptMaterialActionCancellationTruth(client, input);
+  if (truth.kind !== "resolved" || !truth.receipts.length
+    || truth.receipts.some(receipt => receipt.outcome !== "succeeded")) return false;
+  const rows = await client.query<{ receipt: unknown; receipt_digest: string; action_id: string; target_fingerprint: string;
+    workspace_attestation: unknown }>(
+    `SELECT current.receipt,current.receipt_digest,current.action_id,begin.target_fingerprint,attempt.workspace_attestation
+     FROM cp_material_action_current current
+     JOIN cp_material_action_begin_intent begin ON begin.organization_id=current.organization_id
+       AND begin.run_id=current.run_id AND begin.attempt_id=current.attempt_id AND begin.action_id=current.action_id
+     JOIN cp_hosted_attempt attempt ON attempt.organization_id=current.organization_id
+       AND attempt.run_id=current.run_id AND attempt.attempt_id=current.attempt_id
+     WHERE current.organization_id=$1 AND current.run_id=$2 AND current.attempt_id=$3
+       AND begin.action_descriptor='workspace.write'`,
+    [input.organizationId, input.runId, input.attemptId]);
+  if (rows.rows.length !== truth.receipts.length) return false;
+  for (const row of rows.rows) {
+    const parsed = MaterialActionReceiptEnvelopeV1Schema.safeParse(row.receipt);
+    if (!parsed.success) return false;
+    const receipt = parsed.data; const proof = receipt.payload.localWriteObservation;
+    const workspace = AttemptWorkspaceAttestationV1Schema.safeParse(row.workspace_attestation);
+    if (!proof || receipt.organizationId !== input.organizationId || receipt.runId !== input.runId
+      || receipt.attempt.attemptId !== input.attemptId || receipt.payload.actionId !== row.action_id
+      || receipt.receiptDigest !== row.receipt_digest
+      || proof.targetFingerprint !== row.target_fingerprint || !workspace.success
+      || proof.workspaceId !== workspace.data.workspaceId
+      || proof.workspacePathDigest !== workspace.data.workspacePathDigest
+      || proof.worktreeIdentityDigest !== workspace.data.worktreeIdentityDigest
+      || await computeControlPayloadDigestV1(proof) !== receipt.payload.actionPayloadDigest) return false;
+  }
+  return true;
+}
 
 const StoredPermissionRequestV1Schema = PermissionRequestDigestInputV1Schema.extend({
   permissionRequestDigest: ReceiptDigestSchema,
@@ -482,6 +520,11 @@ export function createMaterialActionCoordinator(input: {
         || receipt.receiptDigest !== expectedReceiptDigest
       ) return { kind: "conflict" };
 
+      const localWrite = receipt.payload.localWriteObservation;
+      if (localWrite && await computeControlPayloadDigestV1(localWrite) !== receipt.payload.actionPayloadDigest) {
+        return { kind: "conflict" };
+      }
+
       return withPostgresTransaction(input.pool, async (client) => {
         const operation = await client.query(
           `SELECT receipt_digest, receipt
@@ -502,9 +545,9 @@ export function createMaterialActionCoordinator(input: {
         }
         const authority = await client.query<{ credential_id: string; fencing_token_digest: string;
           current_attempt_number: number; terminal_kind: string | null;
-          outcome_state: string | null; reconciliation_identity: string | null }>(
+          outcome_state: string | null; reconciliation_identity: string | null; workspace_attestation: unknown }>(
           `SELECT attempt.credential_id, attempt.fencing_token_digest,run.current_attempt_number,
-                  run.terminal_kind,run.outcome_state,run.reconciliation_identity
+                  run.terminal_kind,run.outcome_state,run.reconciliation_identity,attempt.workspace_attestation
            FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
              ON attempt.organization_id = run.organization_id
             AND attempt.run_id = run.run_id
@@ -516,6 +559,14 @@ export function createMaterialActionCoordinator(input: {
             command.principal.runnerId],
         );
         const attemptAuthority = authority.rows[0];
+        const observedWorkspace = localWrite
+          ? AttemptWorkspaceAttestationV1Schema.safeParse(attemptAuthority?.workspace_attestation) : null;
+        if (localWrite && (!observedWorkspace?.success
+          || localWrite.workspaceId !== observedWorkspace.data.workspaceId
+          || localWrite.workspacePathDigest !== observedWorkspace.data.workspacePathDigest
+          || localWrite.worktreeIdentityDigest !== observedWorkspace.data.worktreeIdentityDigest)) {
+          return { kind: "conflict" as const };
+        }
         if (!attemptAuthority || attemptAuthority.credential_id !== command.principal.credentialId
           || attemptAuthority.fencing_token_digest !== receipt.attempt.fencingTokenDigest) {
           return { kind: "stale_fence" as const };

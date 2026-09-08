@@ -740,6 +740,7 @@ export const MaterialActionExternalUriV1Schema = z
   });
 
 export const MaterialActionReasonCodeV1Schema = z.enum([
+  "local_write_observed",
   "provider_accepted",
   "provider_error",
   "provider_rejected",
@@ -852,6 +853,20 @@ export const HostedRunnerMaterialActionBeginV1Schema = RunnerMaterialActionBegin
     message: "Hosted material begin requires accepted workspace attestation.",
   });
 
+export const LocalWorkspaceWriteObservationV1Schema = z.object({
+  kind: z.literal("local_workspace_write_observation_v1"),
+  workspaceId: z.string().min(1).max(512),
+  workspacePathDigest: ReceiptDigestSchema,
+  worktreeIdentityDigest: ReceiptDigestSchema,
+  targetFingerprint: ReceiptDigestSchema,
+  filePathDigest: ReceiptDigestSchema,
+  expectedContentDigest: ReceiptDigestSchema,
+  observedContentDigest: ReceiptDigestSchema,
+  byteLength: z.number().int().min(0).max(2_000_000),
+}).strict().refine(value => value.expectedContentDigest === value.observedContentDigest,
+  { message: "Local write observation must match the authorized content." });
+export type LocalWorkspaceWriteObservationV1 = z.infer<typeof LocalWorkspaceWriteObservationV1Schema>;
+
 export const MaterialActionPayloadV1Schema = z
   .object({
     actionId: MaterialActionStableIdV1Schema,
@@ -864,6 +879,7 @@ export const MaterialActionPayloadV1Schema = z
     operationId: MaterialActionStableIdV1Schema,
     requestDigest: ReceiptDigestSchema,
     actionPayloadDigest: ReceiptDigestSchema,
+    localWriteObservation: LocalWorkspaceWriteObservationV1Schema.optional(),
     outcome: z.enum(["succeeded", "failed", "outcome_unknown"]),
     externalId: MaterialActionStableIdV1Schema.optional(),
     externalUri: MaterialActionExternalUriV1Schema.optional(),
@@ -876,8 +892,15 @@ export const MaterialActionPayloadV1Schema = z
   })
   .strict()
   .superRefine((payload, ctx) => {
+    if ((payload.localWriteObservation || payload.reasonCode === "local_write_observed")
+      && (!payload.localWriteObservation || payload.actionDescriptor !== "workspace.write"
+        || payload.provider !== "local_workspace" || payload.outcome !== "succeeded"
+        || payload.reasonCode !== "local_write_observed"
+        || payload.localWriteObservation.targetFingerprint !== payload.targetFingerprint)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid local write observation scope." });
+    }
     const compatibleReasonCodes = {
-      succeeded: ["provider_accepted"],
+      succeeded: ["provider_accepted", "local_write_observed"],
       failed: ["provider_error", "provider_rejected"],
       outcome_unknown: ["provider_receipt_missing", "provider_timeout"],
     } as const;

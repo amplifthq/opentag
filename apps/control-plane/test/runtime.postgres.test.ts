@@ -464,7 +464,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         occurredAt: new Date().toISOString(), conclusion: "success",
         reasonCode: "executor_success", resultDigest: digest("executor-success"),
         workspaceAttestation: finalWorkspaceAttestation,
-        artifactDigests: [proposalArtifact.metadata.artifactDigest],
+        artifactDigests: [await computeControlPayloadDigestV1(proposalArtifact)],
         evidenceDigests: [verificationDigest] });
       await runtimeClient.completeHostedRunControlV1({
         organizationId: claimed.claim.organizationId,

@@ -53,6 +53,7 @@ export type ExecutorPermissionResolution = {
 };
 
 export type ExecutorMaterialActionReport = {
+  localWriteObservation?: import("@opentag/core").LocalWorkspaceWriteObservationV1;
   actionId: string;
   toolCallId: string;
   provider: string;

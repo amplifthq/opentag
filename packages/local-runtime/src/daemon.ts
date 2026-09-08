@@ -652,7 +652,8 @@ export async function executeClaimedRun(
             observedAt: new Date().toISOString(),
             metadata: {
               toolCallId: report.toolCallId,
-              assurance: "reported",
+              assurance: report.localWriteObservation ? "local_observation" : "reported",
+              ...(report.localWriteObservation ? { localWriteObservation: report.localWriteObservation } : {}),
               ...(report.reportedOutcome ? { agentReportedOutcome: report.reportedOutcome } : {})
             }
           });

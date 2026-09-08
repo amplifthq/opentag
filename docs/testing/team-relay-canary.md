@@ -136,6 +136,27 @@ test message. This change adds no tables and requires no schema migration.
 
 ### B. Stop at proposal unless a provider action is explicitly authorized
 
+Completion receipts bind the canonical digest of each whole artifact. Candidate
+settlement validates the artifact's internal evidence digest first, then requires
+the whole-artifact digest in the accepted executor receipt. These two digests
+have different purposes and are not interchangeable.
+
+For direct full-file ACP writes of at most 2 MB, the Runner can prepare a scoped
+observation before permission, then read the actual file after the tool update.
+Only an exact expected-content match in the same worktree produces a typed
+`local_workspace_write_observation_v1` receipt. The path is contained, the file
+must be regular with one hard link, and symlink replacement, changing file state,
+outside paths, unknown fields, partial edits and shell commands remain unproven.
+Proof contains digests, length and workspace identity, not local paths or bytes.
+The authenticated Runner is the evidence producer; model success text is not.
+
+Control Plane validates the proof scope/digest against the exact begun action and
+accepted workspace identity. Only a complete set of successful scoped local-write
+observations can satisfy proposal material readiness. Missing, external, failed
+or unknown outcomes still block. Historical unknown receipts remain immutable;
+an accepted observation appends evidence rather than rewriting history. This
+does not change cancellation/negative-start authority or grant external effects.
+
 Local staging and commit are Runner-owned finalization, not model shell
 permissions. The ACP executor edits/verifies and returns; it must not request
 `git add`, `git commit`, `git push`, or PR creation. After the child is confirmed

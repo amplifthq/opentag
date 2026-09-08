@@ -384,6 +384,21 @@ describe("ACP executor", () => {
     });
   }, 15_000);
 
+  it.each(["local-write", "local-write-mismatch"])("uses native file readback, not tool success, for %s", async mode => {
+    const repo = initRepo(); const reports: Array<{ outcome: string; provider: string; localWriteObservation?: unknown }> = [];
+    const executor = createAcpExecutor({ manifest: manifest(mode) });
+    await executor.run({ ...input({ kind: "repository", path: repo }, `run_${mode}`),
+      attemptId: `attempt_${mode}`, attemptAuthority: { attemptNumber: 1, fencingTokenDigest: `sha256:${"a".repeat(64)}`,
+        credentialId: "credential_local_write", leaseExpiresAt: "2099-01-01T00:00:00.000Z" },
+      permissionResolver: async () => ({ actionId: "action_local", decision: "allow_once", material: true }),
+      materialActionReporter: async report => { reports.push(report); },
+    }, { emit: async () => undefined });
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.outcome).toBe(mode === "local-write" ? "succeeded" : "unknown");
+    expect(reports[0]?.provider).toBe(mode === "local-write" ? "local_workspace" : "acp");
+    expect(Boolean(reports[0]?.localWriteObservation)).toBe(mode === "local-write");
+  });
+
   it("pauses on the governed resolver and records an unverified ACP material outcome as unknown", async () => {
     const scratch = tempDir("governed");
     const reports: Array<{ actionId: string; outcome: string; receiptRef: string }> = [];

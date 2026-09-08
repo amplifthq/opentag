@@ -26,6 +26,7 @@ import {
   HostedCompleteRequestV1Schema,
   HostedHeartbeatRequestV1Schema,
   HostedProgressRequestV1Schema,
+  LocalWorkspaceWriteObservationV1Schema,
   HostedRejectStartRequestV1Schema,
   HostedRunningRequestV1Schema,
   computeMaterialActionPayloadDigestV1,
@@ -1571,6 +1572,13 @@ async function createHostedExecutionClient(input: {
       }
       const observedAt = receipt.observedAt;
       const operationId = `material_${receipt.id}`;
+      const localWriteObservation = receipt.metadata?.localWriteObservation === undefined ? undefined
+        : LocalWorkspaceWriteObservationV1Schema.parse(receipt.metadata.localWriteObservation);
+      if (localWriteObservation && (pending.actionDescriptor !== "workspace.write"
+        || receipt.provider !== "local_workspace" || receipt.outcome !== "succeeded"
+        || localWriteObservation.targetFingerprint !== pending.targetFingerprint)) {
+        throw new Error("hosted_local_write_observation_scope_mismatch");
+      }
       const payload = {
         actionId,
         actionDescriptor: pending.actionDescriptor,
@@ -1581,12 +1589,13 @@ async function createHostedExecutionClient(input: {
         targetFingerprint: pending.targetFingerprint,
         operationId,
         requestDigest: pending.permissionRequestDigest,
-        actionPayloadDigest: await computeControlPayloadDigestV1(receipt.metadata ?? {}),
+        actionPayloadDigest: await computeControlPayloadDigestV1(localWriteObservation ?? receipt.metadata ?? {}),
+        ...(localWriteObservation ? { localWriteObservation } : {}),
         outcome: receipt.outcome === "unknown" ? "outcome_unknown" as const : receipt.outcome,
         ...(receipt.externalId ? { externalId: receipt.externalId } : {}),
         ...(receipt.externalUri ? { externalUri: receipt.externalUri } : {}),
         observedAt,
-        reasonCode: receipt.outcome === "succeeded"
+        reasonCode: localWriteObservation ? "local_write_observed" as const : receipt.outcome === "succeeded"
           ? "provider_accepted" as const
           : receipt.outcome === "failed"
             ? "provider_error" as const

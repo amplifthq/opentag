@@ -39,6 +39,7 @@ import {
 import { createExecutorRunResult, type ProposalEvidence } from "./result.js";
 import { scrubEnvironment, type RunnerSecurityPolicy } from "./security.js";
 import { assertLocalCommitAuthority, captureLocalCommitTarget, commitIsolatedRunChanges, createLocalGitRunner } from "./local-commit.js";
+import { prepareLocalWriteObservation } from "./local-write-observation.js";
 
 const DEFAULT_CANCEL_GRACE_MS = 1_000;
 const DEFAULT_READINESS_TIMEOUT_MS = 3_000;
@@ -950,7 +951,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         }
 
         const output: string[] = [];
-        const governedActions = new Map<string, { resolution: ExecutorPermissionResolution; reported: boolean }>();
+        const governedActions = new Map<string, { resolution: ExecutorPermissionResolution; reported: boolean;
+          observeWrite?: Awaited<ReturnType<typeof prepareLocalWriteObservation>> }>();
         const childOutput = strictAcpOutput(Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>);
         const stream = acp.ndJsonStream(
           Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
@@ -1008,6 +1010,10 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                     at: new Date().toISOString(), workspaceAttestation });
                 }
                 const permissionWorkspaceAttestation = workspaceAttestation;
+                const observeWrite = workspace.kind === "repository" && permissionWorkspaceAttestation
+                  ? await prepareLocalWriteObservation({ rawInput: ctx.params.toolCall.rawInput,
+                    operation: target.operation, targetFingerprint: target.targetFingerprint,
+                    workspacePath: executionPath, attestation: permissionWorkspaceAttestation }) : undefined;
                 const resolution = await governedResolver({
                   toolCallId: request.toolCall.toolCallId,
                   title: request.toolCall.title,
@@ -1042,7 +1048,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   return permissionResponseForDecision({ decision: "deny" }, requestOptions);
                 }
                 if (resolution.decision !== "deny" && !resolution.reconciled && resolution.material) {
-                  governedActions.set(request.toolCall.toolCallId, { resolution, reported: false });
+                  governedActions.set(request.toolCall.toolCallId, { resolution, reported: false, observeWrite });
                 }
                 if (resolution.reconciled) {
                   await sink.emit({
@@ -1096,12 +1102,16 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                     const governed = governedActions.get(message.update.toolCallId);
                     if (governed && !governed.reported && (message.update.status === "completed" || message.update.status === "failed")) {
                       try {
+                        const localWriteObservation = message.update.status === "completed"
+                          && input.assertExecutionCurrent && await input.assertExecutionCurrent()
+                          ? await governed.observeWrite?.() : undefined;
                         await input.materialActionReporter?.({
                           actionId: governed.resolution.actionId,
                           toolCallId: message.update.toolCallId,
-                          provider: "acp",
+                          provider: localWriteObservation ? "local_workspace" : "acp",
                           receiptRef: `acp:${session.sessionId}:${message.update.toolCallId}`,
-                          outcome: "unknown",
+                          outcome: localWriteObservation ? "succeeded" : "unknown",
+                          ...(localWriteObservation ? { localWriteObservation } : {}),
                           reportedOutcome: message.update.status
                         });
                         governed.reported = true;

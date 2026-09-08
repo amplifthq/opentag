@@ -3,6 +3,7 @@ import {
   buildHostedLifecycleRequestV1,
   canonicalJsonStringify,
   computeHostedClaimFencingTokenDigestV1,
+  computeControlPayloadDigestV1,
   type HostedClaimV1,
 } from "@opentag/control-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -276,7 +277,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       organizationId: claim.organizationId, runnerId: claim.runnerId, runId: claim.runId,
       attempt, occurredAt: now.toISOString(), conclusion: "success",
       reasonCode: "executor_success", resultDigest: `sha256:${"5".repeat(64)}`,
-      artifactDigests: [artifact.metadata.artifactDigest],
+      artifactDigests: [await computeControlPayloadDigestV1(artifact)],
       evidenceDigests: artifact.metadata.proposalEvidence.verificationEvidenceDigests,
       workspaceAttestation: attestation });
     await service.lifecycle({ principal, runId: claim.runId, action: "complete", request: complete });

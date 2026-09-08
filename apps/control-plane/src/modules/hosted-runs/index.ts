@@ -37,7 +37,7 @@ import { withPostgresTransaction, type PostgresTransactionClient } from "../../d
 import type { RuntimePrincipal } from "../runners/index.js";
 import { cancellationMaterialEvidence,
   classifyAttemptMaterialActionCancellationTruth,
-  classifyAttemptMaterialActionTruth } from "./material-actions.js";
+  classifyAttemptMaterialActionTruth, areAttemptLocalWritesResolved } from "./material-actions.js";
 
 type Clock = { now(): Date };
 type IdFactory = (kind: "attempt") => string;
@@ -1258,7 +1258,7 @@ export function createHostedRunCoordinator(input: {
           ? HostedLifecycleReceiptEnvelopeV1Schema.parse(executorResult.rows[0].receipt) : null;
         if (!executorReceipt || executorReceipt.payload.operation !== "executor_result"
           || executorReceipt.payload.conclusion !== "success"
-          || !executorReceipt.payload.artifactDigests.includes(artifact.metadata.artifactDigest)
+          || !executorReceipt.payload.artifactDigests.includes(await computeControlPayloadDigestV1(artifact))
           || canonicalJsonStringify(executorReceipt.payload.evidenceDigests)
             !== canonicalJsonStringify(evidence.verificationEvidenceDigests)) {
           return { kind: "conflict", reason: "invalid_evidence" } as const;
@@ -1271,6 +1271,9 @@ export function createHostedRunCoordinator(input: {
           organizationId: command.principal.organizationId, runId: command.runId,
           attemptId: attempt.attempt_id,
         });
+        const localWritesResolved = materialTruth.kind === "started_or_ambiguous"
+          && await areAttemptLocalWritesResolved(client, { organizationId: command.principal.organizationId,
+            runId: command.runId, attemptId: attempt.attempt_id });
         const evaluatedAt = existing?.assessment.assessedAt ?? input.clock.now().toISOString();
         const candidateResult = PublicationCandidateSchema.safeParse({
           candidateId: command.candidateId, runId: command.runId,
@@ -1295,7 +1298,7 @@ export function createHostedRunCoordinator(input: {
           publicationPolicyDigest: run.publication_policy_digest,
           candidate,
           unresolvedMaterialOutcomes: [
-            ...(materialTruth.kind === "proven_not_started"
+            ...(materialTruth.kind === "proven_not_started" || localWritesResolved
               ? [] : [materialTruth.reconciliationIdentity]),
             ...(run.outcome_state === "outcome_unknown" ? [`${run.run_id}:outcome_unknown`] : []),
           ],
