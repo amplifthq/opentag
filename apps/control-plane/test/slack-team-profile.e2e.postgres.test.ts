@@ -142,7 +142,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack team relay certification profile", ()
             organizationId: input.intent.organizationId, providerId: "slack", providerInstanceId: "T_CERT",
             providerBindingDigest: digest("binding"), providerConfigGeneration: 1,
             providerConfigGenerationDigest: digest("generation"), ...owner } }) }) };
-    const projection = createTeamRelayProjectionService({ pool: fixture.pool, hosted,
+    const projection = createTeamRelayProjectionService({ pool: fixture.pool, hosted, jobs,
       producer: producer as never, clock, deliveryOwner: owner });
     const queued = await projection.projectRun({ organizationId: "org_cert", runId: "run_cert",
       projectionRevision: 2, includeControls: false });

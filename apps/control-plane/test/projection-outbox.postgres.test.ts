@@ -17,7 +17,9 @@ const owner = { runtimeOwnerId: "control-plane", runtimeGeneration: 1, schemaGen
 
 describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
+  let projectionDeliveryJobs: ReturnType<typeof createDurableJobQueue>;
   beforeEach(async () => { fixture = await createIsolatedPostgres(); await fixture.migrate();
+    projectionDeliveryJobs = createDurableJobQueue({pool:fixture.pool,clock:{now:()=>now},leaseDurationMs:30_000});
     await fixture.pool.query("INSERT INTO cp_organization(organization_id,display_name) VALUES('org_projection','Projection')");
     await fixture.pool.query(`INSERT INTO cp_runner(organization_id,runner_id,registration_generation,
       credential_generation,current_credential_id,capabilities,created_at,updated_at)
@@ -154,7 +156,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       scopeBeginMarkerDigest:digest("resource-less-marker")}))!;
     await repository.settleOrReadTerminal({...begun,outcome:"accepted",
       evidenceDigest:digest("resource-less-evidence")});
-    const service=createTeamRelayProjectionService({pool:fixture.pool,hosted:{inspect:async()=>({state:"queued",
+    const service=createTeamRelayProjectionService({pool:fixture.pool,jobs:projectionDeliveryJobs,hosted:{inspect:async()=>({state:"queued",
       canonicalStatus:"queued",status:"waiting_for_runner",queueClaimDeadline:new Date(now.getTime()+300_000).toISOString(),
       outcome:null,terminalKind:null,terminalReason:null})} as any,producer:{async enqueue(value){requests.push(value);}},
       clock:{now:()=>new Date(now.getTime()+1)}});
@@ -201,7 +203,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       externalResourceDigest: digest("resource") });
     let projectionStatus = "waiting_for_runner";
     let controlIssueCount = 0;
-    const service = createTeamRelayProjectionService({ pool: fixture.pool,
+    const service = createTeamRelayProjectionService({ pool: fixture.pool,jobs:projectionDeliveryJobs,
       hosted: { inspect: async () => ({ state: "queued", canonicalStatus: "queued",
         status: projectionStatus, queueClaimDeadline: new Date(now.getTime()+300_000).toISOString(),
         outcome: null, terminalKind: null, terminalReason: null }) } as any,
@@ -213,6 +215,10 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await service.projectRun({ organizationId: "org_projection", runId: "run_projection" });
     expect(requests).toHaveLength(1);
     expect(requests[0].intent.operation).toBe("update");
+    const deliveryWake = await fixture.pool.query(
+      "SELECT job_kind,state,available_at FROM cp_job WHERE job_id=$1",
+      [`provider-delivery:${requests[0].intent.sideEffectIntentId}`]);
+    expect(deliveryWake.rows).toEqual([{ job_kind: "provider-delivery", state: "pending", available_at: now }]);
     expect(requests[0].providerRequest.operation).toEqual({ kind: "update_message",
       channelId: "C1", messageTs: "171.001", threadTs: "1700000000.1" });
     expect(controlIssueCount).toBe(1);
@@ -248,7 +254,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       FROM cp_projection_delivery_watermark WHERE intent_id='external_rejected' AND delivery_state='rejected'`);
     await fixture.pool.query("UPDATE cp_hosted_run SET updated_at=$1 WHERE run_id='run_projection'",
       [new Date(now.getTime()+3)]);
-    const eventService=createTeamRelayProjectionService({pool:fixture.pool,hosted:{inspect:async()=>({
+    const eventService=createTeamRelayProjectionService({pool:fixture.pool,jobs:projectionDeliveryJobs,hosted:{inspect:async()=>({
       state:"queued",canonicalStatus:"queued",status:"waiting_for_runner",
       queueClaimDeadline:new Date(now.getTime()+300_000).toISOString(),outcome:null,
       terminalKind:null,terminalReason:null})} as any,clock:{now:()=>new Date(now.getTime()+4)},
@@ -346,7 +352,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await repository.settleOrReadTerminal({ ...externalBegun, outcome: "outcome_unknown",
       evidenceDigest: digest("truth-external-evidence"), errorCode: "ambiguous_response" });
     const projected: any[] = [];
-    const service = createTeamRelayProjectionService({ pool: fixture.pool,
+    const service = createTeamRelayProjectionService({ pool: fixture.pool,jobs:projectionDeliveryJobs,
       hosted: { inspect: async () => ({ state: "queued", canonicalStatus: "queued",
         status: "waiting_for_runner", queueClaimDeadline: new Date(now.getTime() + 300_000).toISOString(),
         outcome: null, terminalKind: null, terminalReason: null }) } as any,
@@ -404,7 +410,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     const begun=(await repository.markBegin({ ...renewed, installationBeginMarkerId:"installation",
       installationBeginMarkerDigest:digest("marker"),scopeBeginMarkerId:"scope",
       scopeBeginMarkerDigest:digest("marker") }))!;
-    const service=createTeamRelayProjectionService({ pool:fixture.pool,
+    const service=createTeamRelayProjectionService({ pool:fixture.pool,jobs:projectionDeliveryJobs,
       hosted:{ inspect:async()=>({ state:"running",canonicalStatus:"running",status:"running",
         queueClaimDeadline:new Date(now.getTime()+300_000).toISOString(),outcome:null,
         terminalKind:null,terminalReason:null }) } as any,

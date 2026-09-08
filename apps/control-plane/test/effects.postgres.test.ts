@@ -9,9 +9,11 @@ import {
   type EffectRequestV1,
 } from "@opentag/control-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { composeTeamRelayThreadProjection } from "@opentag/core";
 import {
   EffectAuthorityStoredStateError,
   createEffectAuthority,
+  readRunPublicationEffect,
 } from "../src/modules/effects/index.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
@@ -307,6 +309,32 @@ describe.skipIf(!TEST_DATABASE_URL)("EffectAuthority PostgreSQL policy", () => {
       },
     };
   }
+
+  it("commits immediately due approval feedback without any Runner acquisition", async () => {
+    const context = await setup("approval_feedback");
+    await requestAndApprove(context);
+    const publication = await readRunPublicationEffect(fixture.pool, {
+      organizationId: principal.organizationId, runId: context.runId, attemptNumber: 1 });
+    expect(publication).toMatchObject({state:"authorized",currentAttemptNumber:0});
+    const view = composeTeamRelayThreadProjection({runId:context.runId,generation:1,
+      state:"publication_pending",controls:[],publication});
+    expect(view.title).toBe("Publication approved");
+    expect(view.summary).toContain("Waiting for the paired Runner");
+    const jobs = await fixture.pool.query(`SELECT job_id,state,available_at<=clock_timestamp() AS due
+      FROM cp_job WHERE job_kind='team-relay.project.v2' AND payload->>'runId'=$1
+        AND (payload->>'projectionRevision')::integer=(SELECT projection_revision FROM cp_hosted_run
+          WHERE organization_id=$2 AND run_id=$1)`,[context.runId,principal.organizationId]);
+    expect(jobs.rows).toHaveLength(1);
+    expect(jobs.rows[0]).toMatchObject({state:"pending",due:true});
+    expect((await fixture.pool.query("SELECT count(*)::integer AS count FROM cp_effect_attempt WHERE effect_id=$1",
+      [context.request.effectId])).rows).toEqual([{count:0}]);
+    await requestAndApprove(context);
+    expect((await fixture.pool.query("SELECT job_id FROM cp_job WHERE job_id=$1",[jobs.rows[0].job_id])).rows)
+      .toEqual([{job_id:jobs.rows[0].job_id}]);
+    // Keep this test's approved work out of later acquisition tests.
+    await fixture.pool.query("UPDATE cp_effect SET state='cancelled_before_permit',reason_code='test_cleanup' WHERE effect_id=$1",
+      [context.request.effectId]);
+  });
 
   it("rejects stale fences, target generations, and corrupted request digests", async () => {
     const context = await setup("stale");

@@ -413,6 +413,17 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
               AND permission.attempt_id=authority.attempt_id
               AND permission.permission_request_digest=authority.permission_request_digest
               AND permission.state='waiting'))
+          AND (action_kind <> 'effect' OR EXISTS (
+            SELECT 1 FROM cp_effect effect
+            WHERE effect.organization_id=authority.organization_id
+              AND effect.run_id=authority.run_id
+              AND effect.effect_id=authority.pending_action_id
+              AND effect.run_attempt_id=authority.attempt_id
+              AND effect.run_attempt_number=authority.attempt_number
+              AND effect.approval_request_id=authority.pending_request_id
+              AND effect.approval_request_digest=authority.permission_request_digest
+              AND effect.state='requested' AND effect.approval_id IS NULL
+              AND effect.approval_expires_at>$4))
           AND expires_at>$4 ORDER BY action_kind,created_at DESC`,
       [command.organizationId, command.runId, command.generation, input.clock.now()]);
       const controls: Array<{ kind: "status" | "cancel" | "approve" | "reject"

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EffectViewV1Schema, type EffectViewV1 } from "@opentag/control-protocol";
 import {
   actionReceiptHeading,
   buildActionReceiptsFromResult,
@@ -226,6 +227,7 @@ export function composeTeamRelayThreadProjection(input: {
   providerDelivery?: { state: "pending" | "accepted" | "rejected" | "outcome_unknown" | "attention";
     reasonCode?: NonNullable<OpenTagSourceThreadProjectionPresentation["providerDelivery"]>["reasonCode"] };
   approval?: { state: "waiting" | "authorized" | "denied"; actionDescriptor: string };
+  publication?: EffectViewV1;
 }): OpenTagSourceThreadProjectionPresentation {
   const copy = TEAM_RELAY_COPY[input.state];
   const deliveryMessage = input.providerDelivery?.state === "outcome_unknown"
@@ -240,11 +242,44 @@ export function composeTeamRelayThreadProjection(input: {
     ? `Approved once: ${approval.actionDescriptor}. This approval does not authorize publication.`
     : approval?.state === "denied" ? `Denied: ${approval.actionDescriptor}. This action will not execute.`
       : waiting ? `Approval required: ${approval.actionDescriptor}. Allow this exact action once or deny it.` : undefined;
+  const publication = input.publication ? EffectViewV1Schema.parse(input.publication) : undefined;
+  // Approval feedback depends only on committed Control Plane truth. An issued
+  // permit is not proof that the Runner has begun or completed provider I/O.
+  let publicationCopy: Pick<OpenTagSourceThreadProjectionPresentation, "title" | "summary"> | undefined;
+  if (publication && (input.state === "publication_pending" || input.state === "ready_for_review")) {
+    switch (publication.state) {
+      case "authorized":
+      case "retry_eligible":
+        publicationCopy = {title:"Publication approved",summary:"Publication approved. Waiting for the paired Runner to publish the exact candidate."};
+        break;
+      case "permit_issued":
+        publicationCopy = {title:"Publication in progress",summary:"Publication approved. The Runner has a permit; the GitHub result is not yet confirmed."};
+        break;
+      case "observing":
+        publicationCopy = {title:"Draft PR created",summary:`Draft PR created: ${publication.externalResource.uri}\nVerification is still pending.`};
+        break;
+      case "succeeded":
+        publicationCopy = {title:"Ready for review",summary:`Draft PR created and verified: ${publication.externalResource.uri}`};
+        break;
+      case "outcome_unknown":
+      case "attention":
+        publicationCopy = {title:"Publication needs attention",summary:"The publication result is not confirmed. Do not repeat the approval or publication; verification is required."};
+        break;
+      case "cancelled_before_permit":
+        publicationCopy = {title:"Publication cancelled",summary:"Publication was cancelled before a permit was issued. This approval cannot be reused."};
+        break;
+      case "requested":
+        publicationCopy = {title:"Publication approval required",summary:"The exact candidate is ready. Approve publication to create its draft PR."};
+        break;
+    }
+  }
   return OpenTagSourceThreadProjectionPresentationSchema.parse({
     kind: "source_thread_projection", runId: input.runId, generation: input.generation,
-    state: input.state, ...copy, controls: input.controls,
+    state: input.state, ...copy, controls: input.controls.filter(control =>
+      control.kind !== "effect_approve" || publication?.state === "requested"),
     ...(waiting ? { title: "Waiting for approval" } : {}),
     ...(approvalMessage ? { summary: waiting ? approvalMessage : `${approvalMessage}\n${copy.summary}` } : {}),
+    ...publicationCopy,
     ...(input.providerDelivery && deliveryMessage ? { providerDelivery: {
       state: input.providerDelivery.state,
       ...(input.providerDelivery.reasonCode ? { reasonCode: input.providerDelivery.reasonCode } : {}),

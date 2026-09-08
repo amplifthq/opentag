@@ -9,6 +9,8 @@ import type { HostedRunCoordinator } from "../hosted-runs/index.js";
 import { readExactDeliveryAnchor } from "./repository.js";
 import { z } from "zod";
 import { PermissionResolutionReceiptEnvelopeV1Schema } from "@opentag/control-protocol";
+import { readRunPublicationEffect } from "../effects/index.js";
+import type { DurableJobQueue } from "../jobs/index.js";
 
 const hash = (value: unknown) => `sha256:${createHash("sha256")
   .update(canonicalJsonStringify(value)).digest("hex")}`;
@@ -16,6 +18,7 @@ type Enqueue = { enqueue(input: { intent: DeliveryIntentV2; providerRequest: obj
   phase: "received" | "running" | "terminal"; frozenDeadline: string }): Promise<unknown> };
 
 export function createTeamRelayProjectionService(input: { pool: Pool; hosted: HostedRunCoordinator;
+  jobs: Pick<DurableJobQueue, "enqueue">;
   producer: Enqueue; clock: { now(): Date };
   deliveryOwner?: Pick<ExpectedDeliveryOwner,"runtimeOwnerId"|"runtimeGeneration"|"schemaGeneration">;
   controls?: { issueProjectionControls(input: { organizationId: string; runId: string;
@@ -105,9 +108,12 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     const approval = receipt && ["waiting", "authorized", "denied"].includes(receipt.payload.state)
       ? { state: receipt.payload.state as "waiting" | "authorized" | "denied",
           actionDescriptor: receipt.payload.actionDescriptor } : undefined;
+    const publication = await readRunPublicationEffect(input.pool, {
+      organizationId: command.organizationId, runId: command.runId, attemptNumber: generation });
     const presentation = composeTeamRelayThreadProjection({ runId: command.runId, generation,
       state: state as Parameters<typeof composeTeamRelayThreadProjection>[0]["state"], controls,
       ...(approval ? { approval } : {}),
+      ...(publication ? { publication } : {}),
       providerDelivery: { state: deliveryState,
         ...(deliveryErrorCode ? { reasonCode: deliveryErrorCode as any } : {}) } });
     const text = renderSlackTeamRelayProjection(presentation);
@@ -157,6 +163,11 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     await input.producer.enqueue({ intent, providerRequest,
       phase: terminal ? "terminal" : state === "running" ? "running" : "received",
       frozenDeadline: row.deadline_at.toISOString() });
+    // The durable projection job is not complete until delivery is woken. A
+    // crash between these enqueues retries this job, never the human decision.
+    const wake = await input.jobs.enqueue({ jobId: `provider-delivery:${intent.sideEffectIntentId}`,
+      organizationId: null, kind: "provider-delivery", payload: {}, maxAttempts: 1 });
+    if (wake.kind === "conflict") throw new Error("projection_delivery_job_conflict");
     return { kind: "queued" as const, presentation, intentId: intent.sideEffectIntentId };
   }, async projectDeliveryIntent(intentId: string) {
     const result = await input.pool.query<{ organization_id: string; run_id: string | null }>(

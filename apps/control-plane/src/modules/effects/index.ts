@@ -294,6 +294,18 @@ function externalResource(observation: {
   } as const;
 }
 
+/** Projection reads reuse the same validated Effect view as command responses. */
+export async function readRunPublicationEffect(pool: Pool, input: {
+  organizationId: string; runId: string; attemptNumber: number;
+}): Promise<EffectViewV1 | undefined> {
+  const result = await pool.query<EffectRow>(
+    `SELECT * FROM cp_effect WHERE organization_id=$1 AND run_id=$2
+       AND run_attempt_number=$3 AND effect_kind='github.create_draft_pull_request'
+     ORDER BY created_at DESC,effect_id DESC LIMIT 1`,
+    [input.organizationId,input.runId,input.attemptNumber]);
+  return result.rows[0] ? projectEffect(result.rows[0]) : undefined;
+}
+
 function projectEffect(row: EffectRow): EffectViewV1 {
   const base = {
     effectId: row.effect_id,

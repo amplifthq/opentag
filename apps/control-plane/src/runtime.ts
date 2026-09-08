@@ -584,7 +584,7 @@ export function createControlPlaneRuntime(input: {
     return { intent, persistedPayload };
   } });
   const teamRelayProjection = createTeamRelayProjectionService({ pool: postgres.pool,
-    hosted, producer: providerDeliveryProducer, clock,deliveryOwner:deliveryRuntimeOwner,
+    hosted, jobs, producer: providerDeliveryProducer, clock,deliveryOwner:deliveryRuntimeOwner,
     ...(slack ? { controls: slack } : {}) });
   const providerDeliveryWorker = createProviderDeliveryWorker({ kernel: providerDeliveryKernel,
     preloadSourceApps: async () => {
