@@ -44,7 +44,7 @@ export const RelayCapabilitySchema = z.enum([
   "relay.lifecycle.v1",
   "relay.permission.v1",
   "relay.material-receipt.v1",
-  "relay.publication.v1",
+  "relay.effect-authority.v1",
   "relay.cancel-resume.v1",
   "relay.follow-up.v1",
 ]);
@@ -166,280 +166,553 @@ export const MaterialActionNormalizedNameV1Schema = z
   .regex(/^[a-z][a-z0-9._-]{0,63}$/u)
   .refine(isCredentialSafeText, "Normalized name must not contain credential-like data.");
 
-export const PublicationOperationStepV1Schema = z.enum([
-  "push_owned_branch",
-  "create_draft_pull_request",
+export const EffectKindV1Schema = z.literal("github.create_draft_pull_request");
+export const EffectStateV1Schema = z.enum([
+  "requested",
+  "authorized",
+  "permit_issued",
+  "observing",
+  "outcome_unknown",
+  "retry_eligible",
+  "succeeded",
+  "attention",
+  "cancelled_before_permit",
 ]);
 
-export const PublicationRepositoryV1Schema = z.object({
-  provider: z.literal("github"),
-  owner: z.string().min(1).max(100).regex(/^[a-z0-9](?:[a-z0-9-]{0,38})$/u),
-  repo: z.string().min(1).max(100).regex(/^[A-Za-z0-9._-]+$/u),
-  remote: z.string().min(1).max(128).regex(/^[A-Za-z0-9._/-]+$/u),
-  baseBranch: z.string().min(1).max(255),
-}).strict();
+const EffectRunIdV1Schema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/u)
+  .refine((value) => value !== "." && value !== ".." && !value.endsWith(".lock"))
+  .refine(isCredentialSafeText, "Effect Run ID must not contain credential-like data.");
 
-export const PublicationOperationCapabilityV1Schema = z.object({
-  schemaVersion: ControlSchemaVersionSchema,
-  protocolVersion: ControlProtocolVersionSchema,
-  capabilityId: MaterialActionStableIdV1Schema,
-  organizationId: MaterialActionStableIdV1Schema,
-  runId: MaterialActionStableIdV1Schema,
+function isConservativeGitBranchRef(value: string): boolean {
+  if (value === "@" || value.startsWith("/") || value.endsWith("/")
+    || value.endsWith(".") || value.includes("//") || value.includes("..")
+    || value.includes("@{")) return false;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(value)) return false;
+  return value.split("/").every((component) => component.length > 0
+    && !component.startsWith(".") && !component.endsWith(".lock"));
+}
+
+export const GitBranchRefV1Schema = z
+  .string()
+  .min(1)
+  .max(255)
+  .refine(isConservativeGitBranchRef, "Value must be a conservative Git branch ref.")
+  .refine(isCredentialSafeText, "Git branch ref must not contain credential-like data.");
+
+const GitRemoteNameV1Schema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u)
+  .refine(isCredentialSafeText, "Git remote must not contain credential-like data.");
+
+const EffectGitHubTargetSegmentV1Schema = GitHubTargetSegmentV1Schema.refine(
+  isCredentialSafeText,
+  "GitHub target segment must not contain credential-like data.",
+);
+
+export const EffectWorkAuthorityV1Schema = z.object({
+  runId: EffectRunIdV1Schema,
   attemptId: MaterialActionStableIdV1Schema,
   attemptNumber: z.number().int().positive(),
   epoch: z.number().int().positive(),
+  fencingToken: z.string().min(1).max(4096),
   fencingTokenDigest: ReceiptDigestSchema,
-  candidateId: MaterialActionStableIdV1Schema,
-  candidateDigest: ReceiptDigestSchema,
-  approvalId: MaterialActionStableIdV1Schema,
-  approverId: MaterialActionStableIdV1Schema,
-  repository: PublicationRepositoryV1Schema,
-  branch: z.string().min(1).max(255),
-  expectedHeadSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
-  step: PublicationOperationStepV1Schema,
-  operationId: MaterialActionStableIdV1Schema,
-  idempotencyKey: MaterialActionStableIdV1Schema,
-  runnerId: MaterialActionStableIdV1Schema,
-  runnerGeneration: z.number().int().positive(),
-  issuedAt: ControlTimestampSchema,
-  expiresAt: ControlTimestampSchema,
-}).strict().superRefine((capability, ctx) => {
-  if (capability.epoch !== capability.attemptNumber) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["epoch"],
-      message: "Publication Attempt epoch must equal attempt number." });
-  }
-  if (capability.branch === capability.repository.baseBranch) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["branch"],
-      message: "Publication branch must not be the target branch." });
-  }
-  const issued = Date.parse(capability.issuedAt);
-  const expires = Date.parse(capability.expiresAt);
-  if (!(expires > issued) || expires - issued > 5 * 60_000) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expiresAt"],
-      message: "Publication capability must be short-lived." });
-  }
+}).strict().refine((work) => work.epoch === work.attemptNumber, {
+  path: ["epoch"],
+  message: "Effect Work epoch must equal its Attempt number.",
 });
 
-/** Credential-free Runner poll for the next coordinator-owned publication operation. */
-export const RunnerPublicationClaimNextV1Schema = z.object({
-  schemaVersion: ControlSchemaVersionSchema,
-  protocolVersion: ControlProtocolVersionSchema,
-  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
-  requestId: MaterialActionStableIdV1Schema,
-  organizationId: MaterialActionStableIdV1Schema,
-  runnerId: MaterialActionStableIdV1Schema,
-}).strict();
-
-export const RunnerBranchOwnershipAttestationV1Schema = z.object({
-  schemaVersion: ControlSchemaVersionSchema,
-  protocolVersion: ControlProtocolVersionSchema,
-  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
-  requestId: MaterialActionStableIdV1Schema,
-  organizationId: MaterialActionStableIdV1Schema,
-  runnerId: MaterialActionStableIdV1Schema,
-  runnerGeneration: z.number().int().positive(),
-  runId: MaterialActionStableIdV1Schema,
-  attemptId: MaterialActionStableIdV1Schema,
-  attemptNumber: z.number().int().positive(),
-  fencingToken: z.string().min(1).max(4096),
-  candidateId: MaterialActionStableIdV1Schema,
-  candidateDigest: ReceiptDigestSchema,
+export const GitHubDraftPullRequestEffectTargetV1Schema = z.object({
   projectTargetId: MaterialActionStableIdV1Schema,
   targetBindingDigest: ReceiptDigestSchema,
-  remote: z.string().min(1).max(128).regex(/^[A-Za-z0-9._/-]+$/u),
-  baseBranch: z.string().min(1).max(255),
+  targetBindingGeneration: z.number().int().positive(),
+  provider: z.literal("github"),
+  owner: EffectGitHubTargetSegmentV1Schema,
+  repo: EffectGitHubTargetSegmentV1Schema,
+  remote: GitRemoteNameV1Schema,
+  baseBranch: GitBranchRefV1Schema,
+  branch: GitBranchRefV1Schema,
   frozenBaseRevision: z.string().regex(/^[a-f0-9]{40,64}$/u),
   workspaceTreeDigest: z.string().regex(/^[a-f0-9]{40,64}$/u),
-  branch: z.string().min(1).max(255),
   expectedHeadSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
-  attestedAt: ControlTimestampSchema,
-}).strict().superRefine((attestation, ctx) => {
-  if (attestation.branch !== `opentag/${attestation.runId}`) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["branch"],
-      message: "Publication branch must be the deterministic Run branch." });
+}).strict().refine((target) => target.branch !== target.baseBranch, {
+  path: ["branch"],
+  message: "Effect publication branch must not equal its base branch.",
+});
+
+export const EffectRequestAuthorityV1Schema = z.object({
+  approvalPolicy: z.literal("human_approval_required"),
+  policySnapshotId: MaterialActionStableIdV1Schema,
+  policySnapshotDigest: ReceiptDigestSchema,
+  approvalRequestId: MaterialActionStableIdV1Schema,
+  approvalExpiresAt: ControlTimestampSchema,
+}).strict();
+
+const EffectRequestDigestInputV1BaseSchema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.effect-authority.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  effectId: MaterialActionStableIdV1Schema,
+  idempotencyKey: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  work: EffectWorkAuthorityV1Schema,
+  effectKind: EffectKindV1Schema,
+  candidate: z.object({
+    candidateId: MaterialActionStableIdV1Schema,
+    candidateDigest: ReceiptDigestSchema,
+  }).strict(),
+  authority: EffectRequestAuthorityV1Schema,
+  target: GitHubDraftPullRequestEffectTargetV1Schema,
+  requestedAt: ControlTimestampSchema,
+}).strict();
+
+export const EffectRequestDigestInputV1Schema =
+  EffectRequestDigestInputV1BaseSchema.superRefine((request, ctx) => {
+    if (request.target.branch !== `opentag/${request.work.runId}`) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["target", "branch"],
+        message: "Effect publication branch must be deterministic for the Run.",
+      });
+    }
+    const requestedAt = Date.parse(request.requestedAt);
+    const expiresAt = Date.parse(request.authority.approvalExpiresAt);
+    if (!(expiresAt > requestedAt) || expiresAt - requestedAt > 24 * 60 * 60_000) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["authority", "approvalExpiresAt"],
+        message: "Effect approval window must be positive and no longer than 24 hours.",
+      });
+    }
+  });
+
+export const EffectRequestV1Schema = EffectRequestDigestInputV1BaseSchema.extend({
+  requestDigest: ReceiptDigestSchema,
+}).strict().superRefine((request, ctx) => {
+  if (request.target.branch !== `opentag/${request.work.runId}`) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["target", "branch"],
+      message: "Effect publication branch must be deterministic for the Run.",
+    });
   }
-  if (attestation.branch === attestation.baseBranch) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["branch"],
-      message: "Publication branch must not be the target branch." });
+  const requestedAt = Date.parse(request.requestedAt);
+  const expiresAt = Date.parse(request.authority.approvalExpiresAt);
+  if (!(expiresAt > requestedAt) || expiresAt - requestedAt > 24 * 60 * 60_000) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["authority", "approvalExpiresAt"],
+      message: "Effect approval window must be positive and no longer than 24 hours.",
+    });
   }
 });
 
-export const HumanPublicationApprovalV1Schema = z.object({
+const EffectExternalResourceV1Schema = z.object({
+  provider: z.literal("github"),
+  resourceRef: z.string().regex(/^github_pr_[1-9][0-9]*$/u),
+  uri: z.string().url().max(2048).refine(isCredentialSafeText),
+}).strict().superRefine((resource, ctx) => {
+  const match = /^github_pr_([1-9][0-9]*)$/u.exec(resource.resourceRef);
+  let url: URL;
+  try {
+    url = new URL(resource.uri);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username !== ""
+    || url.password !== "" || url.search !== "" || url.hash !== ""
+    || !match || !url.pathname.endsWith(`/pull/${match[1]}`)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["uri"],
+      message: "GitHub resource URI must be canonical and match its resource reference." });
+  }
+});
+
+const EffectViewV1BaseSchema = z.object({
+  effectId: MaterialActionStableIdV1Schema,
+  effectKind: EffectKindV1Schema,
+  updatedAt: ControlTimestampSchema,
+}).strict();
+
+const EffectViewReasonCodeV1Schema = z
+  .string()
+  .regex(/^[a-z][a-z0-9_.-]{0,127}$/u)
+  .refine(isCredentialSafeText);
+
+export const EffectViewV1Schema = z.discriminatedUnion("state", [
+  EffectViewV1BaseSchema.extend({
+    state: z.literal("requested"),
+    currentAttemptNumber: z.literal(0),
+  }).strict(),
+  EffectViewV1BaseSchema.extend({
+    state: z.literal("authorized"),
+    currentAttemptNumber: z.literal(0),
+  }).strict(),
+  EffectViewV1BaseSchema.extend({
+    state: z.literal("permit_issued"),
+    currentAttemptNumber: z.number().int().positive(),
+  }).strict(),
+  EffectViewV1BaseSchema.extend({
+    state: z.literal("observing"),
+    currentAttemptNumber: z.number().int().positive(),
+    currentEvidenceDigest: ReceiptDigestSchema,
+    externalResource: EffectExternalResourceV1Schema,
+  }).strict(),
+  EffectViewV1BaseSchema.extend({
+    state: z.literal("outcome_unknown"),
+    currentAttemptNumber: z.number().int().positive(),
+    currentEvidenceDigest: ReceiptDigestSchema,
+    externalResource: EffectExternalResourceV1Schema.optional(),
+    reasonCode: EffectViewReasonCodeV1Schema,
+  }).strict(),
+  EffectViewV1BaseSchema.extend({
+    state: z.literal("retry_eligible"),
+    currentAttemptNumber: z.number().int().positive(),
+    currentEvidenceDigest: ReceiptDigestSchema,
+    reasonCode: z.literal("local.provider_io_not_begun"),
+  }).strict(),
+  EffectViewV1BaseSchema.extend({
+    state: z.literal("succeeded"),
+    currentAttemptNumber: z.number().int().positive(),
+    currentEvidenceDigest: ReceiptDigestSchema,
+    externalResource: EffectExternalResourceV1Schema,
+  }).strict(),
+  EffectViewV1BaseSchema.extend({
+    state: z.literal("attention"),
+    currentAttemptNumber: z.number().int().nonnegative(),
+    currentEvidenceDigest: ReceiptDigestSchema.optional(),
+    externalResource: EffectExternalResourceV1Schema.optional(),
+    reasonCode: EffectViewReasonCodeV1Schema,
+  }).strict(),
+  EffectViewV1BaseSchema.extend({
+    state: z.literal("cancelled_before_permit"),
+    currentAttemptNumber: z.literal(0),
+    reasonCode: EffectViewReasonCodeV1Schema,
+  }).strict(),
+]).superRefine((view, ctx) => {
+  if (view.state !== "attention") return;
+  if (view.currentAttemptNumber === 0
+    && (view.currentEvidenceDigest !== undefined || view.externalResource !== undefined)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["currentAttemptNumber"],
+      message: "Pre-permit attention cannot include Effect evidence or an external resource." });
+  }
+  if (view.externalResource !== undefined && view.currentEvidenceDigest === undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["currentEvidenceDigest"],
+      message: "An attention view with an external resource requires accepted evidence." });
+  }
+});
+
+export const EffectAcquireRequestV1Schema = z.object({
   schemaVersion: ControlSchemaVersionSchema,
   protocolVersion: ControlProtocolVersionSchema,
-  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requiredCapabilities: z.tuple([z.literal("relay.effect-authority.v1")]),
   requestId: MaterialActionStableIdV1Schema,
   organizationId: MaterialActionStableIdV1Schema,
   runnerId: MaterialActionStableIdV1Schema,
-  runId: MaterialActionStableIdV1Schema,
-  ownershipId: MaterialActionStableIdV1Schema,
-  ownershipDigest: ReceiptDigestSchema,
-  candidateId: MaterialActionStableIdV1Schema,
-  candidateDigest: ReceiptDigestSchema,
-  approvalId: MaterialActionStableIdV1Schema,
-  approvedAt: ControlTimestampSchema,
+  runnerGeneration: z.number().int().positive(),
+  acquireJournalDigest: ReceiptDigestSchema,
+}).strict();
+
+const EffectPermitDigestInputV1BaseSchema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.effect-authority.v1")]),
+  permitId: MaterialActionStableIdV1Schema,
+  effectId: MaterialActionStableIdV1Schema,
+  effectAttemptNumber: z.number().int().positive(),
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  acquireRequestId: MaterialActionStableIdV1Schema,
+  acquireJournalDigest: ReceiptDigestSchema,
+  runId: EffectRunIdV1Schema,
+  runAttemptId: MaterialActionStableIdV1Schema,
+  runAttemptNumber: z.number().int().positive(),
+  fencingTokenDigest: ReceiptDigestSchema,
+  effectKind: EffectKindV1Schema,
+  requestDigest: ReceiptDigestSchema,
+  targetDigest: ReceiptDigestSchema,
+  approvalDigest: ReceiptDigestSchema,
+  predecessorEvidenceDigest: ReceiptDigestSchema.optional(),
+  candidate: z.object({
+    candidateId: MaterialActionStableIdV1Schema,
+    candidateDigest: ReceiptDigestSchema,
+  }).strict(),
+  target: GitHubDraftPullRequestEffectTargetV1Schema,
+  issuedAt: ControlTimestampSchema,
   expiresAt: ControlTimestampSchema,
 }).strict();
 
-export const RunnerPublicationBeginV1Schema = z.object({
-  schemaVersion: ControlSchemaVersionSchema,
-  protocolVersion: ControlProtocolVersionSchema,
-  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
-  requestId: MaterialActionStableIdV1Schema,
-  fencingToken: z.string().min(1).max(4096),
-  capability: PublicationOperationCapabilityV1Schema,
-  begunAt: ControlTimestampSchema,
-}).strict();
+function effectPermitWindowValid(permit: {
+  issuedAt: string;
+  expiresAt: string;
+}): boolean {
+  const issuedAt = Date.parse(permit.issuedAt);
+  const expiresAt = Date.parse(permit.expiresAt);
+  return expiresAt > issuedAt && expiresAt - issuedAt <= 5 * 60_000;
+}
 
-export const PublicationOperationObservationV1Schema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("present"), headSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
-    externalId: MaterialActionStableIdV1Schema.optional(),
-    externalUri: z.string().url().max(2048).refine(isCredentialSafeText).optional(),
-    draft: z.literal(true).optional(), provider: z.literal("github").optional(),
-    repository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) })
-      .strict().optional(), baseBranch: z.string().min(1).max(255).optional(),
-    state: z.literal("open").optional(), headBranch: z.string().min(1).max(255).optional(),
-    headRepository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) })
-      .strict().optional() }).strict(),
-  z.object({ kind: z.literal("absent") }).strict(),
-  z.object({ kind: z.literal("ambiguous"), reason: z.string().min(1).max(256).optional() }).strict(),
-]);
-
-const PublicationOperationReceiptBaseV1Schema = z.object({
-  schemaVersion: ControlSchemaVersionSchema,
-  protocolVersion: ControlProtocolVersionSchema,
-  receiptId: MaterialActionStableIdV1Schema,
-  capabilityId: MaterialActionStableIdV1Schema,
-  operationId: MaterialActionStableIdV1Schema,
-  organizationId: MaterialActionStableIdV1Schema,
-  runId: MaterialActionStableIdV1Schema,
-  attemptId: MaterialActionStableIdV1Schema,
-  candidateId: MaterialActionStableIdV1Schema,
-  candidateDigest: ReceiptDigestSchema,
-  step: PublicationOperationStepV1Schema,
-  runnerId: MaterialActionStableIdV1Schema,
-  runnerGeneration: z.number().int().positive(),
-  fencingTokenDigest: ReceiptDigestSchema,
-  observation: PublicationOperationObservationV1Schema,
-  outcome: z.enum(["succeeded", "failed", "outcome_unknown"]),
-  observedAt: ControlTimestampSchema,
-  receiptDigest: ReceiptDigestSchema,
-}).strict();
-
-export const PublicationOperationReceiptDigestInputV1Schema =
-  PublicationOperationReceiptBaseV1Schema.omit({ receiptDigest: true });
-
-export const PublicationOperationReceiptV1Schema =
-  PublicationOperationReceiptBaseV1Schema.superRefine((receipt, ctx) => {
-  const expected = receipt.observation.kind === "present" ? "succeeded"
-    : receipt.observation.kind === "absent" ? "failed" : "outcome_unknown";
-  if (receipt.outcome !== expected) ctx.addIssue({ code: z.ZodIssueCode.custom,
-    path: ["outcome"], message: "Publication outcome must match the observation." });
-  if (receipt.step === "create_draft_pull_request" && receipt.observation.kind === "present"
-    && (!receipt.observation.headBranch || !receipt.observation.headRepository)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["observation"],
-      message: "Succeeded draft-PR receipts require provider-observed head provenance." });
-  }
+export const EffectExecutePermitDigestInputV1Schema =
+  EffectPermitDigestInputV1BaseSchema.extend({
+    permitKind: z.literal("execute"),
+  }).strict().refine(effectPermitWindowValid, {
+    path: ["expiresAt"],
+    message: "Effect permit must be short-lived.",
   });
 
-export const RunnerPublicationReceiptV1Schema = z.object({
-  fencingToken: z.string().min(1).max(4096),
-  receipt: PublicationOperationReceiptV1Schema,
-}).strict();
+export const EffectReconciliationPermitDigestInputV1Schema =
+  EffectPermitDigestInputV1BaseSchema.extend({
+    permitKind: z.literal("reconcile"),
+    originalExecutePermitId: MaterialActionStableIdV1Schema,
+    observationPolicy: z.literal("github.exact_draft_pr.v1"),
+  }).strict().refine(effectPermitWindowValid, {
+    path: ["expiresAt"],
+    message: "Effect reconciliation permit must be short-lived.",
+  });
 
-export const RunnerPublicationCompletionPendingV1Schema = z.object({
-  capability: PublicationOperationCapabilityV1Schema,
-  completionReceipt: PublicationOperationReceiptV1Schema,
-}).strict().superRefine((value, ctx) => {
-  if (value.capability.step !== "create_draft_pull_request"
-    || value.completionReceipt.step !== "create_draft_pull_request"
-    || value.capability.capabilityId !== value.completionReceipt.capabilityId
-    || value.capability.operationId !== value.completionReceipt.operationId
-    || value.completionReceipt.outcome !== "succeeded"
-    || value.completionReceipt.observation.kind !== "present"
-    || value.completionReceipt.observation.draft !== true
-    || !value.completionReceipt.observation.externalId
-    || !value.completionReceipt.observation.externalUri) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom,
-      message: "Publication completion dispatch requires the exact succeeded draft PR receipt." });
-  }
-});
+export const EffectPermitDigestInputV1Schema = z.discriminatedUnion("permitKind", [
+  EffectExecutePermitDigestInputV1Schema,
+  EffectReconciliationPermitDigestInputV1Schema,
+]);
 
-export const RunnerPublicationReconciliationPendingV1Schema = z.object({
-  capability: PublicationOperationCapabilityV1Schema,
-}).strict();
+export const EffectExecutePermitV1Schema = EffectExecutePermitDigestInputV1Schema
+  .safeExtend({ permitDigest: ReceiptDigestSchema });
+export const EffectReconciliationPermitV1Schema = EffectReconciliationPermitDigestInputV1Schema
+  .safeExtend({ permitDigest: ReceiptDigestSchema });
+export const EffectPermitV1Schema = z.discriminatedUnion("permitKind", [
+  EffectExecutePermitV1Schema,
+  EffectReconciliationPermitV1Schema,
+]);
 
-export const RunnerPublicationReconcileV1Schema = z.object({
-  schemaVersion: ControlSchemaVersionSchema,
-  protocolVersion: ControlProtocolVersionSchema,
-  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
-  requestId: MaterialActionStableIdV1Schema,
-  organizationId: MaterialActionStableIdV1Schema,
-  runnerId: MaterialActionStableIdV1Schema,
-  runId: MaterialActionStableIdV1Schema,
-  capabilityId: MaterialActionStableIdV1Schema,
-  operationId: MaterialActionStableIdV1Schema,
-  observation: PublicationOperationObservationV1Schema,
+export const GitHubDraftPullRequestAbsenceScopeV1Schema = z.object({
+  provider: z.literal("github"),
+  repository: z.object({
+    owner: EffectGitHubTargetSegmentV1Schema,
+    repo: EffectGitHubTargetSegmentV1Schema,
+  }).strict(),
+  baseBranch: GitBranchRefV1Schema,
+  headBranch: GitBranchRefV1Schema,
+  expectedHeadSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  bindingGeneration: z.number().int().positive(),
+  targetBindingDigest: ReceiptDigestSchema,
+  observationPolicy: z.literal("github.exact_draft_pr.v1"),
   observedAt: ControlTimestampSchema,
 }).strict();
 
-export const PublicationCompletionObservationV1Schema = z.object({
+const GitHubCheckNameV1Schema = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine((value) => !/[\u0000-\u001f\u007f]/u.test(value))
+  .refine(isCredentialSafeText, "Check name must not contain credential-like data.");
+
+export const GitHubDraftPullRequestObservationV1Schema = z.object({
   provider: z.literal("github"),
-  repository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) }).strict(),
-  remote: z.string().min(1).max(128),
-  branch: z.string().min(1).max(255),
-  baseBranch: z.string().min(1).max(255),
+  repository: z.object({
+    owner: EffectGitHubTargetSegmentV1Schema,
+    repo: EffectGitHubTargetSegmentV1Schema,
+  }).strict(),
+  remote: GitRemoteNameV1Schema,
+  branch: GitBranchRefV1Schema,
+  baseBranch: GitBranchRefV1Schema,
   pullRequestNumber: z.number().int().positive(),
-  pullRequestResourceRef: z.string().min(1).max(512),
+  pullRequestResourceRef: z.string().regex(/^github_pr_[1-9][0-9]*$/u),
   pullRequestUrl: z.string().url().max(2048).refine(isCredentialSafeText),
   draft: z.literal(true),
   state: z.enum(["open", "closed", "merged"]),
   headSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
-  headBranch: z.string().min(1).max(255),
-  headRepository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) }).strict(),
+  headBranch: GitBranchRefV1Schema,
+  headRepository: z.object({
+    owner: EffectGitHubTargetSegmentV1Schema,
+    repo: EffectGitHubTargetSegmentV1Schema,
+  }).strict(),
   baseSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
-  checks: z.record(z.string().min(1).max(256), z.enum(["passed", "failed", "pending"])),
+  checks: z.record(GitHubCheckNameV1Schema, z.enum(["passed", "failed", "pending"])),
   checksComplete: z.boolean(),
   observedAt: ControlTimestampSchema,
-}).strict();
+}).strict().superRefine((observation, ctx) => {
+  const expectedResourceRef = `github_pr_${observation.pullRequestNumber}`;
+  const expectedUrl = `https://github.com/${observation.repository.owner}/${observation.repository.repo}/pull/${observation.pullRequestNumber}`;
+  if (observation.pullRequestResourceRef !== expectedResourceRef) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["pullRequestResourceRef"],
+      message: "GitHub pull request resource reference must be canonical." });
+  }
+  if (observation.pullRequestUrl !== expectedUrl) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["pullRequestUrl"],
+      message: "GitHub pull request URL must be canonical and credential-free." });
+  }
+  if (observation.branch !== observation.headBranch) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["headBranch"],
+      message: "Observed head branch must equal the authorized publication branch." });
+  }
+  if (observation.repository.owner.toLowerCase() !== observation.headRepository.owner.toLowerCase()
+    || observation.repository.repo.toLowerCase() !== observation.headRepository.repo.toLowerCase()) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["headRepository"],
+      message: "Observed head repository must equal the authorized repository." });
+  }
+});
 
-export const RunnerPublicationCompletionV1Schema = z.object({
+export const EffectEvidenceV1Schema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("not_started"),
+    acquireJournalDigest: ReceiptDigestSchema,
+    localJournalDigest: ReceiptDigestSchema,
+    reason: z.literal("provider_io_not_begun"),
+  }).strict(),
+  z.object({
+    kind: z.literal("present"),
+    observation: GitHubDraftPullRequestObservationV1Schema,
+  }).strict(),
+  z.object({
+    kind: z.literal("absent"),
+    observationScope: GitHubDraftPullRequestAbsenceScopeV1Schema,
+  }).strict(),
+  z.object({
+    kind: z.literal("ambiguous"),
+    errorCode: z.enum([
+      "transport_error",
+      "provider_timeout",
+      "malformed_response",
+      "provider_receipt_missing",
+    ]),
+  }).strict(),
+  z.object({
+    kind: z.literal("attention"),
+    reasonCode: z.string().regex(/^[a-z][a-z0-9_.-]{0,127}$/u),
+  }).strict(),
+]);
+
+const EffectEvidenceEnvelopeDigestInputV1BaseSchema = z.object({
   schemaVersion: ControlSchemaVersionSchema,
   protocolVersion: ControlProtocolVersionSchema,
-  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
-  requestId: MaterialActionStableIdV1Schema,
+  requiredCapabilities: z.tuple([z.literal("relay.effect-authority.v1")]),
+  evidenceId: MaterialActionStableIdV1Schema,
+  effectId: MaterialActionStableIdV1Schema,
+  permitId: MaterialActionStableIdV1Schema,
+  effectAttemptNumber: z.number().int().positive(),
   organizationId: MaterialActionStableIdV1Schema,
-  runnerId: MaterialActionStableIdV1Schema,
-  runnerGeneration: z.number().int().positive(),
-  runId: MaterialActionStableIdV1Schema,
-  attemptId: MaterialActionStableIdV1Schema,
-  attemptNumber: z.number().int().positive(),
-  fencingToken: z.string().min(1).max(4096),
-  candidateId: MaterialActionStableIdV1Schema,
-  candidateDigest: ReceiptDigestSchema,
-  observation: PublicationCompletionObservationV1Schema,
+  producer: z.object({
+    kind: z.literal("runner"),
+    runnerId: MaterialActionStableIdV1Schema,
+    runnerGeneration: z.number().int().positive(),
+  }).strict(),
+  predecessorEvidenceDigest: ReceiptDigestSchema.optional(),
+  observedAt: ControlTimestampSchema,
+  evidence: EffectEvidenceV1Schema,
+  payloadDigest: ReceiptDigestSchema,
 }).strict();
 
-export function computePublicationCapabilityDigestV1(
-  capability: z.input<typeof PublicationOperationCapabilityV1Schema>,
-): Promise<string> {
-  return sha256Utf8V1(canonicalJsonStringify(
-    PublicationOperationCapabilityV1Schema.parse(capability)));
+function effectEvidenceObservationTimeMatches(envelope: {
+  observedAt: string;
+  evidence: z.infer<typeof EffectEvidenceV1Schema>;
+}): boolean {
+  if (envelope.evidence.kind === "present") {
+    return envelope.evidence.observation.observedAt === envelope.observedAt;
+  }
+  if (envelope.evidence.kind === "absent") {
+    return envelope.evidence.observationScope.observedAt === envelope.observedAt;
+  }
+  return true;
 }
 
-export function computeBranchOwnershipAttestationDigestV1(
-  attestation: z.input<typeof RunnerBranchOwnershipAttestationV1Schema>,
+export const EffectEvidenceEnvelopeDigestInputV1Schema =
+  EffectEvidenceEnvelopeDigestInputV1BaseSchema.refine(effectEvidenceObservationTimeMatches, {
+    path: ["observedAt"],
+    message: "Effect evidence envelope time must equal its provider observation time.",
+  });
+export const EffectEvidenceEnvelopeV1Schema =
+  EffectEvidenceEnvelopeDigestInputV1BaseSchema.extend({
+    evidenceDigest: ReceiptDigestSchema,
+  }).strict().refine(effectEvidenceObservationTimeMatches, {
+    path: ["observedAt"],
+    message: "Effect evidence envelope time must equal its provider observation time.",
+  });
+
+export function computeEffectRequestDigestV1(
+  request: z.input<typeof EffectRequestDigestInputV1Schema>,
 ): Promise<string> {
   return sha256Utf8V1(canonicalJsonStringify(
-    RunnerBranchOwnershipAttestationV1Schema.parse(attestation)));
+    EffectRequestDigestInputV1Schema.parse(request),
+  ));
 }
 
-export function computePublicationOperationReceiptDigestV1(
-  receipt: z.input<typeof PublicationOperationReceiptDigestInputV1Schema>,
+export function computeEffectFencingTokenDigestV1(rawFencingToken: string): Promise<string> {
+  return sha256Utf8V1(rawFencingToken);
+}
+
+export function computeEffectTargetDigestV1(
+  target: z.input<typeof GitHubDraftPullRequestEffectTargetV1Schema>,
 ): Promise<string> {
   return sha256Utf8V1(canonicalJsonStringify(
-    PublicationOperationReceiptDigestInputV1Schema.parse(receipt)));
+    GitHubDraftPullRequestEffectTargetV1Schema.parse(target),
+  ));
 }
+
+export async function verifyEffectRequestV1(
+  request: z.input<typeof EffectRequestV1Schema>,
+): Promise<boolean> {
+  const parsed = EffectRequestV1Schema.parse(request);
+  const { requestDigest, ...digestInput } = parsed;
+  return requestDigest === await computeEffectRequestDigestV1(digestInput)
+    && parsed.work.fencingTokenDigest
+      === await computeEffectFencingTokenDigestV1(parsed.work.fencingToken);
+}
+
+export function computeEffectPermitDigestV1(
+  permit: z.input<typeof EffectPermitDigestInputV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(
+    EffectPermitDigestInputV1Schema.parse(permit),
+  ));
+}
+
+export async function verifyEffectPermitV1(
+  permit: z.input<typeof EffectPermitV1Schema>,
+): Promise<boolean> {
+  const parsed = EffectPermitV1Schema.parse(permit);
+  const { permitDigest, ...digestInput } = parsed;
+  return parsed.targetDigest === await computeEffectTargetDigestV1(parsed.target)
+    && permitDigest === await computeEffectPermitDigestV1(digestInput);
+}
+
+export function computeEffectEvidencePayloadDigestV1(
+  evidence: z.input<typeof EffectEvidenceV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(EffectEvidenceV1Schema.parse(evidence)));
+}
+
+export function computeEffectEvidenceDigestV1(
+  envelope: z.input<typeof EffectEvidenceEnvelopeDigestInputV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(
+    EffectEvidenceEnvelopeDigestInputV1Schema.parse(envelope),
+  ));
+}
+
+export async function verifyEffectEvidenceEnvelopeV1(
+  envelope: z.input<typeof EffectEvidenceEnvelopeV1Schema>,
+): Promise<boolean> {
+  const parsed = EffectEvidenceEnvelopeV1Schema.parse(envelope);
+  const { evidenceDigest, ...digestInput } = parsed;
+  return parsed.payloadDigest === await computeEffectEvidencePayloadDigestV1(parsed.evidence)
+    && evidenceDigest === await computeEffectEvidenceDigestV1(digestInput);
+}
+
+export type EffectRequestV1 = z.infer<typeof EffectRequestV1Schema>;
+export type EffectViewV1 = z.infer<typeof EffectViewV1Schema>;
+export type EffectAcquireRequestV1 = z.infer<typeof EffectAcquireRequestV1Schema>;
+export type EffectExecutePermitV1 = z.infer<typeof EffectExecutePermitV1Schema>;
+export type EffectReconciliationPermitV1 = z.infer<typeof EffectReconciliationPermitV1Schema>;
+export type EffectPermitV1 = z.infer<typeof EffectPermitV1Schema>;
+export type EffectEvidenceV1 = z.infer<typeof EffectEvidenceV1Schema>;
+export type EffectEvidenceEnvelopeV1 = z.infer<typeof EffectEvidenceEnvelopeV1Schema>;
 
 export const MaterialActionExternalUriV1Schema = z
   .string()
@@ -467,6 +740,7 @@ export const MaterialActionExternalUriV1Schema = z
   });
 
 export const MaterialActionReasonCodeV1Schema = z.enum([
+  "local_write_observed",
   "provider_accepted",
   "provider_error",
   "provider_rejected",
@@ -579,6 +853,20 @@ export const HostedRunnerMaterialActionBeginV1Schema = RunnerMaterialActionBegin
     message: "Hosted material begin requires accepted workspace attestation.",
   });
 
+export const LocalWorkspaceWriteObservationV1Schema = z.object({
+  kind: z.literal("local_workspace_write_observation_v1"),
+  workspaceId: z.string().min(1).max(512),
+  workspacePathDigest: ReceiptDigestSchema,
+  worktreeIdentityDigest: ReceiptDigestSchema,
+  targetFingerprint: ReceiptDigestSchema,
+  filePathDigest: ReceiptDigestSchema,
+  expectedContentDigest: ReceiptDigestSchema,
+  observedContentDigest: ReceiptDigestSchema,
+  byteLength: z.number().int().min(0).max(2_000_000),
+}).strict().refine(value => value.expectedContentDigest === value.observedContentDigest,
+  { message: "Local write observation must match the authorized content." });
+export type LocalWorkspaceWriteObservationV1 = z.infer<typeof LocalWorkspaceWriteObservationV1Schema>;
+
 export const MaterialActionPayloadV1Schema = z
   .object({
     actionId: MaterialActionStableIdV1Schema,
@@ -591,6 +879,7 @@ export const MaterialActionPayloadV1Schema = z
     operationId: MaterialActionStableIdV1Schema,
     requestDigest: ReceiptDigestSchema,
     actionPayloadDigest: ReceiptDigestSchema,
+    localWriteObservation: LocalWorkspaceWriteObservationV1Schema.optional(),
     outcome: z.enum(["succeeded", "failed", "outcome_unknown"]),
     externalId: MaterialActionStableIdV1Schema.optional(),
     externalUri: MaterialActionExternalUriV1Schema.optional(),
@@ -603,8 +892,15 @@ export const MaterialActionPayloadV1Schema = z
   })
   .strict()
   .superRefine((payload, ctx) => {
+    if ((payload.localWriteObservation || payload.reasonCode === "local_write_observed")
+      && (!payload.localWriteObservation || payload.actionDescriptor !== "workspace.write"
+        || payload.provider !== "local_workspace" || payload.outcome !== "succeeded"
+        || payload.reasonCode !== "local_write_observed"
+        || payload.localWriteObservation.targetFingerprint !== payload.targetFingerprint)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid local write observation scope." });
+    }
     const compatibleReasonCodes = {
-      succeeded: ["provider_accepted"],
+      succeeded: ["provider_accepted", "local_write_observed"],
       failed: ["provider_error", "provider_rejected"],
       outcome_unknown: ["provider_receipt_missing", "provider_timeout"],
     } as const;
@@ -899,6 +1195,7 @@ const RunnerProjectTargetReadbackV1Schema = z
   .object({
     projectTargetId: NonEmptyIdSchema.max(200),
     bindingDigest: ReceiptDigestSchema,
+    bindingGeneration: z.number().int().positive(),
     provider: z.literal("github"),
     owner: CanonicalGitHubProjectTargetSegmentV1Schema,
     repo: CanonicalGitHubProjectTargetSegmentV1Schema,
@@ -1160,12 +1457,6 @@ export const RunnerRegistrationRequestV1Schema = z
   .object({
     ...ControlMutationRequestV1Shape,
     runnerId: NonEmptyIdSchema,
-    displayName: z
-      .string()
-      .min(1)
-      .max(120)
-      .refine((value) => value === value.trim(), "Display name must not contain leading or trailing whitespace.")
-      .optional(),
     capabilities: RelayCapabilitiesSchema,
   })
   .strict()
@@ -1599,6 +1890,7 @@ export const RunnerReadinessPayloadV1Schema = z
         .object({
           projectTargetId: NonEmptyIdSchema,
           bindingDigest: ReceiptDigestSchema,
+          bindingGeneration: z.number().int().positive(),
           state: ReadinessStateV1Schema,
           ...ReadinessReasonShape,
         })
@@ -2631,13 +2923,14 @@ export type HostedLifecycleActionV1 =
   | "progress"
   | "complete";
 
-export async function computeHostedLifecycleRequestDigestV1(input: {
+/** Canonical digest input, excluding the raw fence; shared with transactional verification. */
+export function hostedLifecycleRequestDigestInputV1(input: {
   organizationId: string;
   runnerId: string;
   runId: string;
   action: HostedLifecycleActionV1;
   request: HostedLifecycleRequestV1;
-}): Promise<string> {
+}) {
   const { request } = input;
   const common = {
     operation: input.action,
@@ -2701,7 +2994,13 @@ export async function computeHostedLifecycleRequestDigestV1(input: {
                     ? { blockedPermission: complete.blockedPermission } : {}),
                 };
               })();
-  return sha256Utf8V1(canonicalJsonStringify({ ...common, ...actionFields }));
+  return { ...common, ...actionFields };
+}
+
+export async function computeHostedLifecycleRequestDigestV1(
+  input: Parameters<typeof hostedLifecycleRequestDigestInputV1>[0],
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(hostedLifecycleRequestDigestInputV1(input)));
 }
 
 export function computeHostedLifecycleOperationIdV1(
@@ -2835,35 +3134,20 @@ function hostedLifecycleReceiptOperationV1(
   return action;
 }
 
-export async function verifyHostedLifecycleReceiptV1(input: {
-  receipt: HostedLifecycleReceiptEnvelopeV1;
-  request: HostedLifecycleRequestV1;
+/** Canonical receipt payload shared by asynchronous and transactional verification. */
+export function hostedLifecycleReceiptPayloadV1(input: {
   action: HostedLifecycleActionV1;
-  organizationId: string;
-  runnerId: string;
-  runId: string;
-  credentialId: string;
-}): Promise<boolean> {
-  const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(input.receipt);
-  const request = HostedLifecycleRequestV1Schema.parse(input.request);
+  request: HostedLifecycleRequestV1;
+  heartbeatLeaseExpiresAt?: string;
+}) {
+  const { request } = input;
   const operation = hostedLifecycleReceiptOperationV1(input.action);
-  const expectedRequestDigest = await computeHostedLifecycleRequestDigestV1({
-    organizationId: input.organizationId,
-    runnerId: input.runnerId,
-    runId: input.runId,
-    action: input.action,
-    request,
-  });
-  const expectedRequestId = await computeHostedLifecycleRequestIdV1({
-    operationId: request.operationId,
-    requestDigest: request.requestDigest,
-  });
   const expectedPayload = input.action === "heartbeat"
-    ? receipt.payload.operation === "heartbeat"
+    ? input.heartbeatLeaseExpiresAt !== undefined
       ? {
           operation,
           occurredAt: request.occurredAt,
-          leaseExpiresAt: receipt.payload.leaseExpiresAt,
+          leaseExpiresAt: input.heartbeatLeaseExpiresAt,
         }
       : null
     : input.action === "running"
@@ -2911,14 +3195,45 @@ export async function verifyHostedLifecycleReceiptV1(input: {
                     ? { blockedPermission: value.blockedPermission } : {}),
                 };
               })();
-  if (!expectedPayload) return false;
-  const expectedPayloadWithEvidence = {
+  if (!expectedPayload) return null;
+  return {
     ...expectedPayload,
     ...(request.workspaceAttestation
       ? { workspaceAttestation: request.workspaceAttestation } : {}),
     ...(request.interruptionEvidence
       ? { interruptionEvidence: request.interruptionEvidence } : {}),
   };
+}
+
+export async function verifyHostedLifecycleReceiptV1(input: {
+  receipt: HostedLifecycleReceiptEnvelopeV1;
+  request: HostedLifecycleRequestV1;
+  action: HostedLifecycleActionV1;
+  organizationId: string;
+  runnerId: string;
+  runId: string;
+  credentialId: string;
+}): Promise<boolean> {
+  const receipt = HostedLifecycleReceiptEnvelopeV1Schema.parse(input.receipt);
+  const request = HostedLifecycleRequestV1Schema.parse(input.request);
+  const operation = hostedLifecycleReceiptOperationV1(input.action);
+  const expectedRequestDigest = await computeHostedLifecycleRequestDigestV1({
+    organizationId: input.organizationId,
+    runnerId: input.runnerId,
+    runId: input.runId,
+    action: input.action,
+    request,
+  });
+  const expectedRequestId = await computeHostedLifecycleRequestIdV1({
+    operationId: request.operationId,
+    requestDigest: request.requestDigest,
+  });
+  const expectedPayloadWithEvidence = hostedLifecycleReceiptPayloadV1({
+    action: input.action, request,
+    ...(receipt.payload.operation === "heartbeat"
+      ? { heartbeatLeaseExpiresAt: receipt.payload.leaseExpiresAt } : {}),
+  });
+  if (!expectedPayloadWithEvidence) return false;
   const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
   return request.requestDigest === expectedRequestDigest
     && request.requestId === expectedRequestId
@@ -3010,19 +3325,6 @@ export type RunnerProposalSettlementResponseV1 = z.infer<
   typeof RunnerProposalSettlementResponseV1Schema
 >;
 export type MaterialActionAttemptRefV1 = z.infer<typeof MaterialActionAttemptRefV1Schema>;
-export type PublicationOperationStepV1 = z.infer<typeof PublicationOperationStepV1Schema>;
-export type PublicationRepositoryV1 = z.infer<typeof PublicationRepositoryV1Schema>;
-export type PublicationOperationCapabilityV1 = z.infer<typeof PublicationOperationCapabilityV1Schema>;
-export type RunnerPublicationClaimNextV1 = z.infer<typeof RunnerPublicationClaimNextV1Schema>;
-export type RunnerBranchOwnershipAttestationV1 = z.infer<typeof RunnerBranchOwnershipAttestationV1Schema>;
-export type HumanPublicationApprovalV1 = z.infer<typeof HumanPublicationApprovalV1Schema>;
-export type RunnerPublicationBeginV1 = z.infer<typeof RunnerPublicationBeginV1Schema>;
-export type PublicationOperationReceiptV1 = z.infer<typeof PublicationOperationReceiptV1Schema>;
-export type RunnerPublicationCompletionPendingV1 = z.infer<typeof RunnerPublicationCompletionPendingV1Schema>;
-export type RunnerPublicationReconciliationPendingV1 = z.infer<typeof RunnerPublicationReconciliationPendingV1Schema>;
-export type RunnerPublicationReconcileV1 = z.infer<typeof RunnerPublicationReconcileV1Schema>;
-export type PublicationCompletionObservationV1 = z.infer<typeof PublicationCompletionObservationV1Schema>;
-export type RunnerPublicationCompletionV1 = z.infer<typeof RunnerPublicationCompletionV1Schema>;
 export type RunnerMaterialActionReconcileAttemptV1 = z.infer<
   typeof RunnerMaterialActionReconcileAttemptV1Schema
 >;

@@ -17,6 +17,8 @@ const sha256Digest = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const closedCode = z.string().regex(/^[a-z][a-z0-9_.-]{0,127}$/u);
 const opaqueIdentifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
 
+export const SOURCE_INGRESS_WAIT_LIMIT_MS = 8 * 60 * 60 * 1_000;
+
 const SourceIngressCommandSchema = z.object({
   organizationId: identity,
   installationId: identity,
@@ -59,8 +61,6 @@ export type IngressReservation = Readonly<{
 export type SourceResolution =
   | { kind: "accepted"; runId: string }
   | { kind: "waiting_for_runner"; runId: string }
-  | { kind: "follow_up_queued"; followUpId: string }
-  | { kind: "binding_change_pending"; code: string }
   | { kind: "setup_required"; code: string }
   | { kind: "not_authorized"; code: string }
   | { kind: "invalid_request"; code: string }
@@ -73,8 +73,7 @@ export type SourceResolution =
 const SourceResolutionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("accepted"), runId: opaqueIdentifier }).strict(),
   z.object({ kind: z.literal("waiting_for_runner"), runId: opaqueIdentifier }).strict(),
-  z.object({ kind: z.literal("follow_up_queued"), followUpId: opaqueIdentifier }).strict(),
-  ...(["binding_change_pending", "setup_required", "not_authorized", "invalid_request",
+  ...(["setup_required", "not_authorized", "invalid_request",
     "queue_full", "storage_quota_exceeded", "source_content_deleted",
     "temporarily_unavailable"] as const).map((kind) => z.object({
       kind: z.literal(kind), code: closedCode,
@@ -96,6 +95,10 @@ type ReservationRow = {
   content_aad_digest: string;
   content_key_version: string;
   content_payload_digest: string;
+  resolution_request_digest: string | null;
+  resolution_run_id: string | null;
+  resolution: SourceResolution | null;
+  resolved_at: Date | null;
   state: "pending" | "resolved";
   created_at: Date;
 };
@@ -188,26 +191,21 @@ export function createSourceIngressService(input: {
               : { outcome: "conflict", mayAcknowledge: false } as const;
           }
           const authority = await client.query<{
-            source_app_id: string; app_instance_id: string; binding_digest: string;
+            installation_id: string; binding_digest: string;
             credential_generation: number; credential_generation_digest: string;
           }>(
-            `SELECT installation.source_app_id, installation.app_instance_id,
-                    installation.binding_digest, installation.credential_generation,
-                    installation.credential_generation_digest
-             FROM cp_source_app_installation installation
-             JOIN cp_source_binding binding
-               ON binding.organization_id = installation.organization_id
-              AND binding.installation_id = installation.installation_id
-             WHERE installation.organization_id = $1 AND installation.installation_id = $2
-               AND binding.binding_id = $3 AND installation.state = 'active'
-               AND binding.state = 'active' AND binding.binding_digest = installation.binding_digest
-             FOR UPDATE OF installation, binding`,
+            `SELECT installation_id,binding_digest,credential_generation,
+                    credential_generation_digest
+             FROM cp_slack_binding
+             WHERE organization_id=$1 AND installation_id=$2 AND binding_id=$3
+               AND state='active'
+             FOR UPDATE`,
             [command.organizationId, command.installationId, command.bindingId],
           );
           const row = authority.rows[0];
           const installation = command.sourceApp.installation;
-          if (!row || row.source_app_id !== command.sourceApp.appId
-            || row.app_instance_id !== installation.appInstanceId
+          if (!row || command.sourceApp.appId !== "slack"
+            || row.installation_id !== installation.appInstanceId
             || row.binding_digest !== installation.bindingDigest
             || row.credential_generation !== installation.credentialGeneration
             || row.credential_generation_digest !== installation.credentialGenerationDigest) {
@@ -266,8 +264,9 @@ export function createSourceIngressService(input: {
 
     async readResolution(reservation: IngressReservation) {
       const result = await input.pool.query<{ resolution: SourceResolution }>(
-        `SELECT resolution FROM cp_source_resolution
-         WHERE organization_id = $1 AND reservation_id = $2`,
+        `SELECT resolution FROM cp_ingress_reservation
+         WHERE organization_id = $1 AND reservation_id = $2
+           AND state = 'resolved'`,
         [reservation.organizationId, reservation.reservationId],
       );
       return result.rows[0]?.resolution ?? null;
@@ -305,6 +304,28 @@ export function createSourceIngressService(input: {
       if (!result.rows[0]) throw new Error("source_ingress_stale_lease");
     },
 
+    // Readiness is an expected dependency wait, not a failed processing attempt.
+    // Keep the original custody obligation and release only this worker's lease.
+    async deferUntilReadiness(command: { reservation: IngressReservation;
+      jobId: string; leaseToken: string; retryAt: Date }) {
+      const result = await input.pool.query(
+        `UPDATE cp_job job
+         SET state='pending', available_at=$4, attempt_count=attempt_count-1,
+             lease_owner=NULL, lease_token=NULL, lease_expires_at=NULL,
+             last_error_code='runner_not_ready', updated_at=$5
+         WHERE job_id=$1 AND organization_id=$2 AND job_kind='source_ingress.process'
+           AND state='claimed' AND lease_token=$3 AND lease_expires_at>$5
+           AND payload->>'reservationId'=$6
+           AND EXISTS (SELECT 1 FROM cp_ingress_reservation reservation
+             WHERE reservation.organization_id=job.organization_id
+               AND reservation.reservation_id=$6 AND reservation.state='pending')
+         RETURNING job_id`,
+        [command.jobId, command.reservation.organizationId, command.leaseToken,
+          command.retryAt, input.clock.now(), command.reservation.reservationId],
+      );
+      if (!result.rows[0]) throw new Error("source_ingress_stale_lease");
+    },
+
     async finalizeExpiredProcessing() {
       return withPostgresTransaction(input.pool, async (client) => {
         const exhausted = await client.query<ReservationRow & {
@@ -324,44 +345,29 @@ export function createSourceIngressService(input: {
         );
         const row = exhausted.rows[0];
         if (!row) return null;
-        const existing = await client.query<{ resolution: SourceResolution }>(
-          `SELECT resolution FROM cp_source_resolution
-           WHERE organization_id = $1 AND reservation_id = $2 FOR UPDATE`,
-          [row.organization_id, row.reservation_id],
-        );
-        const resolution = existing.rows[0]?.resolution ?? poisonedResolution;
-        if (!existing.rows[0]) {
-          await client.query(
-            `INSERT INTO cp_source_resolution(resolution_id, organization_id, reservation_id,
-               resolution, operator_attention, created_at) VALUES($1,$2,$3,$4,true,$5)`,
-            [stableId("resolution", [row.organization_id, row.reservation_id]),
-              row.organization_id, row.reservation_id, resolution, input.clock.now()],
-          );
-        }
+        const resolution = row.resolution ?? poisonedResolution;
         await client.query(
-          `UPDATE cp_ingress_reservation SET state = 'resolved', updated_at = $2
+          `UPDATE cp_ingress_reservation
+           SET state = 'resolved', resolution = $2,
+               resolved_at = COALESCE(resolved_at, $3), updated_at = $3
            WHERE reservation_id = $1`,
-          [row.reservation_id, input.clock.now()],
+          [row.reservation_id, resolution, input.clock.now()],
         );
         await client.query(
           `UPDATE cp_job SET state = 'succeeded', lease_owner = NULL,
              lease_token = NULL, lease_expires_at = NULL,
-             last_error_code = 'lease_expired', updated_at = $2
+             last_error_code = 'lease_expired',
+             settlement_lease_token = $3, settlement_outcome = $4,
+             settled_at = $2, updated_at = $2
            WHERE job_id = $1`,
-          [row.job_id, input.clock.now()],
-        );
-        await client.query(
-          `INSERT INTO cp_job_settlement(job_id, lease_token, outcome, settled_at)
-           VALUES($1,$2,$3,$4)`,
-          [row.job_id, row.lease_token, resolution, input.clock.now()],
+          [row.job_id, input.clock.now(), row.lease_token, resolution],
         );
         return { jobId: row.job_id, resolution } as const;
       });
     },
 
     async recordResolution(command: { reservation: IngressReservation;
-      resolution: SourceResolution; jobId: string; leaseToken: string;
-      operatorAttention?: boolean }) {
+      resolution: SourceResolution; jobId: string; leaseToken: string }) {
       const resolution = SourceResolutionSchema.parse(command.resolution) as SourceResolution;
       return withPostgresTransaction(input.pool, async (client) => {
         const lease = await client.query(
@@ -375,23 +381,18 @@ export function createSourceIngressService(input: {
             input.clock.now(), command.reservation.reservationId],
         );
         if (!lease.rows[0]) throw new Error("source_ingress_stale_lease");
-        const existing = await client.query<{ resolution: SourceResolution }>(
-          `SELECT resolution FROM cp_source_resolution
+        const existing = await client.query<{ resolution: SourceResolution | null }>(
+          `SELECT resolution FROM cp_ingress_reservation
            WHERE organization_id = $1 AND reservation_id = $2 FOR UPDATE`,
           [command.reservation.organizationId, command.reservation.reservationId],
         );
-        if (existing.rows[0]) return existing.rows[0].resolution;
-        const resolutionId = stableId("resolution", [command.reservation.organizationId,
-          command.reservation.reservationId]);
+        if (!existing.rows[0]) throw new Error("source_ingress_reservation_missing");
+        if (existing.rows[0].resolution) return existing.rows[0].resolution;
         await client.query(
-          `INSERT INTO cp_source_resolution(resolution_id, organization_id, reservation_id,
-             resolution, operator_attention, created_at) VALUES($1,$2,$3,$4,$5,$6)`,
-          [resolutionId, command.reservation.organizationId, command.reservation.reservationId,
-            resolution, command.operatorAttention ?? false, input.clock.now()],
-        );
-        await client.query(
-          "UPDATE cp_ingress_reservation SET state = 'resolved', updated_at = $2 WHERE reservation_id = $1",
-          [command.reservation.reservationId, input.clock.now()],
+          `UPDATE cp_ingress_reservation
+           SET state = 'resolved', resolution = $2, resolved_at = $3, updated_at = $3
+           WHERE reservation_id = $1 AND state = 'pending'`,
+          [command.reservation.reservationId, resolution, input.clock.now()],
         );
         return resolution;
       });

@@ -85,19 +85,15 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
   async function signedIngress(commandAuthority: ReturnType<typeof createControlPlaneSourceThreadAuthority>) {
     const bindingDigest=`sha256:${"7".repeat(64)}`;
     const generationDigest=`sha256:${"8".repeat(64)}`;
-    await fixture.pool.query(`INSERT INTO cp_source_app_installation(organization_id,installation_id,
-      source_app_id,app_instance_id,binding_digest,credential_generation,credential_generation_digest,
-      state,created_at,updated_at) VALUES('org_permission','install_permission','slack','A_PERMISSION',
-      $1,1,$2,'active',$3,$3) ON CONFLICT DO NOTHING`,[bindingDigest,generationDigest,now]);
-    await fixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,installation_id,
-      binding_digest,state,created_at,updated_at) VALUES('org_permission','binding_permission',
-      'install_permission',$1,'active',$2,$2) ON CONFLICT DO NOTHING`,[bindingDigest,now]);
-    await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,route_identity,
-      binding_id,team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,bot_token_ref,
-      created_at,updated_at) VALUES('org_permission','install_permission','route_permission',
-      'binding_permission','T_PERMISSION','A_PERMISSION','C_PERMISSION','U_APP',
-      ARRAY['U_MEMBER','U_APPROVER'],'secret://permission/signing','secret://permission/bot',$1,$1)
-      ON CONFLICT DO NOTHING`,[now]);
+    await fixture.pool.query(`INSERT INTO cp_slack_binding(
+      organization_id,binding_id,installation_id,binding_digest,state,
+      credential_generation,credential_generation_digest,route_identity,
+      team_id,app_id,channel_id,bot_user_id,member_user_ids,approver_user_id,
+      signing_secret_ref,bot_token_ref,created_at,updated_at)
+      VALUES('org_permission','binding_permission','install_permission',$1,'active',1,$2,
+      'route_permission','T_PERMISSION','A_PERMISSION','C_PERMISSION','U_APP',
+      ARRAY['U_MEMBER','U_APPROVER'],'U_APPROVER','secret://permission/signing',
+      'secret://permission/bot',$3,$3) ON CONFLICT DO NOTHING`,[bindingDigest,generationDigest,now]);
     const clock={now:()=>now};
     const jobs=createDurableJobQueue({pool:fixture.pool,clock,leaseDurationMs:30_000,
       tokenFactory:()=>"permission-job-lease"});
@@ -634,6 +630,63 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
         workspaceAttestationDigest },
       idempotencyKey: "material_begin_exact_approval",
     })).resolves.toEqual({ kind: "begun" });
+    // A live ACP tool can wait inline while the same Attempt remains running.
+    const inlineInput = { ...digestInput, permissionRequestId: "permission_inline",
+      actionId: "action_inline" };
+    const inlineRequest = RunnerPermissionRequestV1Schema.parse({ ...inlineInput,
+      requestId: "request_inline", operationId: "operation_inline",
+      attempt: lifecycleAttempt,
+      permissionRequestDigest: await computePermissionRequestDigestV1(inlineInput) });
+    await expect(permissions.request({ principal, request: inlineRequest }))
+      .resolves.toMatchObject({ kind: "waiting" });
+    const inlineToken = await ingress.issueAction({ organizationId: principal.organizationId,
+      actionId: "slack_inline", installationId: "install_permission", bindingId: "binding_permission",
+      teamId: "T_PERMISSION", appId: "A_PERMISSION", channelId: "C_PERMISSION",
+      threadRootMessageId: "1700000000.000100", runId: claim.runId,
+      pendingRequestId: inlineRequest.permissionRequestId, actionKind: "approval",
+      actionDescriptor: inlineRequest.actionDescriptor, approvalEpoch: String(claim.attempt.epoch),
+      frozenCeiling: admission.admission.permissionCeiling.allowedActionDescriptors,
+      policyDigest: inlineRequest.policySnapshotDigest, runnerId: principal.runnerId,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number, attemptEpoch: claim.attempt.epoch,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      permissionRequestDigest: inlineRequest.permissionRequestDigest, pendingActionId: inlineRequest.actionId,
+      allowedDecisions: ["allow_once", "deny"], requesterUserId: "U_MEMBER", memberUserIds: ["U_MEMBER"],
+      operatorUserIds: [], approverUserId: "U_APPROVER", adminUserIds: [],
+      expiresAt: new Date(now.getTime() + 60_000) });
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_MEMBER")))
+      .resolves.toMatchObject({ status: 403 });
+    await fixture.pool.query("UPDATE cp_hosted_attempt SET lease_expires_at=$3 WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId, now]);
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+      .resolves.toMatchObject({ status: 403 });
+    await fixture.pool.query("UPDATE cp_hosted_attempt SET lease_expires_at=$3 WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId, claim.attempt.leaseExpiresAt]);
+    await fixture.pool.query("UPDATE cp_hosted_run SET state='needs_approval' WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId]);
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+      .resolves.toMatchObject({ status: 403 });
+    await fixture.pool.query("UPDATE cp_hosted_run SET state='running' WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId]);
+    await fixture.pool.query("UPDATE cp_hosted_attempt SET workspace_attestation=$3::jsonb WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId, JSON.stringify({ ...workspaceAttestation, workspaceId: "wrong_workspace" })]);
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+      .resolves.toMatchObject({ status: 403 });
+    expect((await fixture.pool.query("SELECT state FROM cp_permission_request WHERE permission_request_id=$1",
+      [inlineRequest.permissionRequestId])).rows[0].state).toBe("waiting");
+    await fixture.pool.query("UPDATE cp_hosted_attempt SET workspace_attestation=$3::jsonb WHERE organization_id=$1 AND run_id=$2",
+      [principal.organizationId, claim.runId, JSON.stringify(workspaceAttestation)]);
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+      .resolves.toEqual({ status: 200, body: { ok: true } });
+    const inlineReceipt = PermissionResolutionReceiptEnvelopeV1Schema.parse((await fixture.pool.query(
+      "SELECT current_receipt FROM cp_permission_request WHERE organization_id=$1 AND permission_request_id=$2",
+      [principal.organizationId, inlineRequest.permissionRequestId])).rows[0].current_receipt);
+    expect(inlineReceipt.payload).toMatchObject({ state: "authorized", decisionActorRef: "U_APPROVER",
+      workspaceAttestationDigest, permissionRequestDigest: inlineRequest.permissionRequestDigest });
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+      .resolves.toMatchObject({ status: 403 });
+    await expect(hosted.inspect({ organizationId: principal.organizationId, runId: claim.runId }))
+      .resolves.toMatchObject({ canonicalStatus: "running" });
+
     const success = await buildHostedLifecycleRequestV1({
       organizationId: principal.organizationId, runnerId: principal.runnerId,
       runId: claim.runId, action: "complete", attempt: lifecycleAttempt,

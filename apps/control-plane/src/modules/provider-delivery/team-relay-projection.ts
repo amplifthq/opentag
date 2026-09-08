@@ -79,12 +79,14 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
         return {kind:"delivery_event_stale" as const};
       deliveryState=exact.state as typeof deliveryState; deliveryErrorCode=exact.error_code;
     }
-    const issuedControls = command.includeControls === false || !input.controls ? []
+    const terminal = ["proposal_ready", "ready_for_review", "failed", "cancelled",
+      "interrupted", "timed_out"].includes(state);
+    const issuedControls = terminal || command.includeControls === false || !input.controls ? []
       : await input.controls.issueProjectionControls({ organizationId: command.organizationId,
           runId: command.runId, generation });
     const controls = issuedControls.filter((control) => state === "publication_pending"
-      ? control.kind === "status" || control.kind === "cancel" || control.kind.startsWith("publication_")
-      : !control.kind.startsWith("publication_")).slice(0, 4);
+      ? control.kind === "status" || control.kind === "cancel" || control.kind === "effect_approve"
+      : control.kind !== "effect_approve").slice(0, 4);
     const presentation = composeTeamRelayThreadProjection({ runId: command.runId, generation,
       state: state as Parameters<typeof composeTeamRelayThreadProjection>[0]["state"], controls,
       providerDelivery: { state: deliveryState,
@@ -129,11 +131,10 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     const priorOperation = priorRequest.operation ?? {};
     const providerRequest = { ...priorRequest,
       operation: acceptedAnchor ? { kind: "update_message",
-        channelId: priorOperation.channelId, messageTs: acceptedAnchor.externalResourceId }
+        channelId: priorOperation.channelId, messageTs: acceptedAnchor.externalResourceId,
+        ...(priorOperation.threadTs ? { threadTs: priorOperation.threadTs } : {}) }
         : priorOperation,
       presentation: { kind: "message", text, textFormat: "mrkdwn", blocks } };
-    const terminal = ["proposal_ready", "ready_for_review", "failed", "cancelled",
-      "interrupted", "timed_out"].includes(state);
     await input.producer.enqueue({ intent, providerRequest,
       phase: terminal ? "terminal" : state === "running" ? "running" : "received",
       frozenDeadline: row.deadline_at.toISOString() });

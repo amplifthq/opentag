@@ -11,7 +11,7 @@ describe("AgentSessionProfile", () => {
         sourceEventId: "Ev1",
         receivedAt: "2026-06-29T00:00:00.000Z",
         actor: { provider: "slack", providerUserId: "U123", handle: "octocat" },
-        target: { mention: "@opentag", agentId: "opentag" },
+        target: { mention: "@opentag" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: [],
         permissions: [{ scope: "repo:write", reason: "edit the local checkout" }],

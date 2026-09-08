@@ -124,6 +124,7 @@ function runtimeFetch(input: { runnerMissing?: boolean } = {}): {
             targets: [{
               projectTargetId: "target_1",
               bindingDigest: `sha256:${"a".repeat(64)}`,
+              bindingGeneration: 1,
               provider: "github",
               owner: "acme",
               repo: "demo",

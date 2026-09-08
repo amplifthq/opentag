@@ -198,6 +198,7 @@ describe("OpenTag Control V1 version and capability negotiation", () => {
         {
           projectTargetId: "target_a",
           bindingDigest: digest,
+          bindingGeneration: 1,
           provider: "github",
           owner: "acme",
           repo: "alpha",
@@ -207,6 +208,7 @@ describe("OpenTag Control V1 version and capability negotiation", () => {
         {
           projectTargetId: "target_b",
           bindingDigest: otherDigest,
+          bindingGeneration: 1,
           provider: "github",
           owner: "acme",
           repo: "beta",
@@ -1812,7 +1814,6 @@ describe("runner registration and credential re-provision", () => {
     requestId: "req_pair_1",
     operationId: "op_pair_1",
     runnerId: "runner_1",
-    displayName: "Private runner",
     capabilities: ["relay.lifecycle.v1", "relay.readiness.v1"],
   } as const;
 
@@ -2457,6 +2458,7 @@ describe("ReceiptEnvelope V1", () => {
           {
             projectTargetId: "target_1",
             bindingDigest: digest,
+            bindingGeneration: 1,
             state: "ready",
           },
         ],

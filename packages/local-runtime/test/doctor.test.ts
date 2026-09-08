@@ -136,6 +136,7 @@ async function runCodexDoctor(
             targets: options.repositoryFree ? [] : [{
               projectTargetId: "target_1",
               bindingDigest: `sha256:${"a".repeat(64)}`,
+              bindingGeneration: 1,
               provider: "github",
               owner: "acme",
               repo: "demo",
@@ -389,6 +390,7 @@ describe("local-runtime doctor", () => {
               targets: [{
                 projectTargetId: "target_1",
                 bindingDigest: `sha256:${"a".repeat(64)}`,
+                bindingGeneration: 1,
                 provider: "github",
                 owner: "acme",
                 repo: "demo",

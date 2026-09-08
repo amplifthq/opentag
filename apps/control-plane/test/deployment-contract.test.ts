@@ -198,7 +198,7 @@ describe("Control Plane deployment contract", () => {
       expect(dockerfile).toContain(`COPY packages/${workspace} packages/${workspace}`);
     }
     expect(dockerfile).toContain(
-      "pnpm --filter @opentag/control-plane^... build",
+      "pnpm --workspace-concurrency=1 --filter @opentag/control-plane^... build",
     );
     expect(dockerfile).toContain('CMD ["node", "apps/control-plane/dist/index.js", "serve"]');
     for (const forbidden of ["cloudflare", "wrangler", "sqlite", "redis", "kafka"] ) {

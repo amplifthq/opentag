@@ -131,19 +131,19 @@ describe.skipIf(!TEST_DATABASE_URL)("same-origin console HTTP identity", () => {
       runners: [{ runnerId: "runner_console_http" }],
     });
 
-    const presence = await application.fetch(
+    const teammates = await application.fetch(
+      new Request("http://control.test/api/console/teammates", {
+        headers: { cookie: cookie?.split(";")[0] ?? "" },
+      }),
+    );
+    expect(teammates.status).toBe(200);
+    expect(await teammates.json()).toEqual([]);
+    const retiredPresence = await application.fetch(
       new Request("http://control.test/api/console/presence", {
         headers: { cookie: cookie?.split(";")[0] ?? "" },
       }),
     );
-    expect(presence.status).toBe(200);
-    expect(await presence.json()).toEqual({
-      presence: {
-        state: "setup_required",
-        reason: "No active Slack installation and binding are configured.",
-        agents: [],
-      },
-    });
+    expect(retiredPresence.status).toBe(404);
 
     const targets = await application.fetch(
       new Request("http://control.test/api/console/project-targets", {
@@ -156,30 +156,17 @@ describe.skipIf(!TEST_DATABASE_URL)("same-origin console HTTP identity", () => {
     const slackBindingDigest = `sha256:${"a".repeat(64)}`;
     const installedAt = new Date("2026-08-15T11:00:00.000Z");
     await fixture.pool.query(
-      `INSERT INTO cp_source_app_installation(
-         organization_id,installation_id,source_app_id,app_instance_id,binding_digest,
-         credential_generation,credential_generation_digest,state,created_at,updated_at)
-       VALUES('org_console_http','installation_console_http','slack','A_CONSOLE',$1,1,$2,
-         'active',$3,$3)`,
-      [slackBindingDigest, `sha256:${"b".repeat(64)}`, installedAt],
-    );
-    await fixture.pool.query(
-      `INSERT INTO cp_source_binding(
-         organization_id,binding_id,installation_id,binding_digest,state,created_at,updated_at)
+      `INSERT INTO cp_slack_binding(
+         organization_id,binding_id,installation_id,binding_digest,state,
+         credential_generation,credential_generation_digest,route_identity,
+         team_id,app_id,channel_id,bot_user_id,member_user_ids,operator_user_ids,
+         admin_user_ids,signing_secret_ref,bot_token_ref,project_target_id,
+         publication_mode,created_at,updated_at)
        VALUES('org_console_http','binding_console_http','installation_console_http',$1,
-         'active',$2,$2)`,
-      [slackBindingDigest, installedAt],
-    );
-    await fixture.pool.query(
-      `INSERT INTO cp_slack_installation(
-         organization_id,installation_id,binding_id,project_target_id,publication_mode,
-         team_id,app_id,channel_id,bot_user_id,signing_secret_ref,member_user_ids,
-         operator_user_ids,admin_user_ids,bot_token_ref,route_identity,created_at,updated_at)
-       VALUES('org_console_http','installation_console_http','binding_console_http',
-         'target_console_http','proposal_only','T_CONSOLE','A_CONSOLE','C_CONSOLE',
-         'U_APP','env:SLACK_SIGNING_SECRET',ARRAY['U1'],ARRAY['U1'],ARRAY['U1'],
-         'env:SLACK_BOT_TOKEN','route_console_http',$1,$1)`,
-      [installedAt],
+         'active',1,$2,'route_console_http','T_CONSOLE','A_CONSOLE','C_CONSOLE',
+         'U_APP',ARRAY['U1'],ARRAY['U1'],ARRAY['U1'],'env:SLACK_SIGNING_SECRET',
+         'env:SLACK_BOT_TOKEN','target_console_http','proposal_only',$3,$3)`,
+      [slackBindingDigest, `sha256:${"b".repeat(64)}`, installedAt],
     );
 
     const evidence = await application.fetch(

@@ -15,7 +15,7 @@ const slackEvent: OpenTagEvent = {
   sourceEventId: "EvSlackProfile",
   receivedAt: "2026-06-24T00:00:00.000Z",
   actor: { provider: "slack", providerUserId: "U456", handle: "U456", organizationId: "T123" },
-  target: { mention: "@opentag", agentId: "opentag" },
+  target: { mention: "@opentag" },
   command: { rawText: "fix this", intent: "fix", args: {} },
   context: [],
   permissions: [{ scope: "repo:write", reason: "edit the local checkout" }],

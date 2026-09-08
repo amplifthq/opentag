@@ -115,7 +115,7 @@ export const OpenTagSourceThreadProjectionPresentationSchema = z.object({
   summary: CredentialSafePresentationTextSchema,
   runOutcome: z.enum(["pending", "succeeded", "failed", "cancelled", "interrupted", "timed_out"]),
   controls: z.array(z.object({
-    kind: z.enum(["status", "cancel", "approve", "reject", "publication_approve"]),
+    kind: z.enum(["status", "cancel", "approve", "reject", "effect_approve"]),
     actionId: CredentialSafePresentationTextSchema,
     generation: z.number().int().positive()
   }).strict()).max(4),

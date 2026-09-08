@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-09-04
 - Decision owners: OpenTag maintainers
+- Refined by: ADR 0006 for effect execution, evidence, and persistence shape
 
 ## Decision
 

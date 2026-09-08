@@ -24,7 +24,6 @@ function registrationRequest(
     requestId: "request_register_runner_1",
     operationId,
     runnerId: "runner_1",
-    displayName: "Build runner",
     capabilities: [
       "relay.claim-fence.v1",
       "relay.hosted-admission.v1",
@@ -45,31 +44,21 @@ async function bindSlackProjectTarget(input: {
   const now = new Date("2026-08-15T06:02:00.000Z");
   const installationId = `installation_${input.suffix}`;
   const bindingId = `binding_${input.suffix}`;
-  const bindingDigest = `sha256:${input.suffix.padEnd(64, "a").slice(0, 64)}`;
+  const bindingDigest = `sha256:${"a".repeat(64)}`;
   await input.pool.query(
-    `INSERT INTO cp_source_app_installation(
-       organization_id,installation_id,source_app_id,app_instance_id,binding_digest,
-       credential_generation,credential_generation_digest,state,created_at,updated_at)
-     VALUES($1,$2,'slack',$3,$4,1,$5,'active',$6,$6)`,
-    [input.organizationId, installationId, `app_${input.suffix}`, bindingDigest,
-      `sha256:${input.suffix.padEnd(64, "b").slice(0, 64)}`, now],
-  );
-  await input.pool.query(
-    `INSERT INTO cp_source_binding(
-       organization_id,binding_id,installation_id,binding_digest,state,created_at,updated_at)
-     VALUES($1,$2,$3,$4,'active',$5,$5)`,
-    [input.organizationId, bindingId, installationId, bindingDigest, now],
-  );
-  await input.pool.query(
-    `INSERT INTO cp_slack_installation(
-       organization_id,installation_id,binding_id,project_target_id,publication_mode,
-       team_id,app_id,channel_id,bot_user_id,signing_secret_ref,member_user_ids,
-       operator_user_ids,admin_user_ids,bot_token_ref,route_identity,created_at,updated_at)
-     VALUES($1,$2,$3,$4,'proposal_only',$5,$6,$7,$8,'env:SLACK_SIGNING_SECRET',
-       ARRAY['U1'],ARRAY['U1'],ARRAY['U1'],'env:SLACK_BOT_TOKEN',$9,$10,$10)`,
-    [input.organizationId, installationId, bindingId, input.projectTargetId,
+    `INSERT INTO cp_slack_binding(
+       organization_id,binding_id,installation_id,binding_digest,state,
+       credential_generation,credential_generation_digest,route_identity,
+       team_id,app_id,channel_id,bot_user_id,member_user_ids,operator_user_ids,
+       admin_user_ids,signing_secret_ref,bot_token_ref,project_target_id,
+       publication_mode,created_at,updated_at)
+     VALUES($1,$2,$3,$4,'active',1,$5,$6,$7,$8,$9,$10,ARRAY['U1'],ARRAY['U1'],
+       ARRAY['U1'],'env:SLACK_SIGNING_SECRET','env:SLACK_BOT_TOKEN',$11,
+       'proposal_only',$12,$12)`,
+    [input.organizationId, bindingId, installationId, bindingDigest,
+      `sha256:${"b".repeat(64)}`, `route_${input.suffix}`,
       `T_${input.suffix}`, `A_${input.suffix}`, `C_${input.suffix}`,
-      `U_APP_${input.suffix}`, `route_${input.suffix}`, now],
+      `U_APP_${input.suffix}`, input.projectTargetId, now],
   );
 }
 
@@ -424,6 +413,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Runner Directory PostgreSQL module", () => 
         {
           projectTargetId: "target_1",
           bindingDigest: targetBindingDigest,
+          bindingGeneration: 1,
           state: "ready" as const,
         },
       ],
@@ -476,10 +466,32 @@ describe.skipIf(!TEST_DATABASE_URL)("Runner Directory PostgreSQL module", () => 
         {
           projectTargetId: "target_1",
           bindingDigest: targetBindingDigest,
+          bindingGeneration: 1,
           owner: "acme",
           repo: "demo",
         },
       ],
+    });
+
+    await expect(directory.upsertProjectTarget(targetCommand)).resolves.toMatchObject({
+      kind: "upserted",
+      context: { targets: [{ bindingDigest: targetBindingDigest, bindingGeneration: 1 }] },
+    });
+    const changedTarget = { ...target, defaultBranch: "trunk" };
+    const changedBindingDigest = await computeGitHubProjectTargetBindingDigestV1(changedTarget);
+    await expect(directory.upsertProjectTarget({
+      principal: authenticated.principal,
+      request: {
+        ...targetCommand.request,
+        requestId: "request_target_2",
+        target: changedTarget,
+      },
+    })).resolves.toMatchObject({
+      kind: "upserted",
+      context: { targets: [{
+        bindingDigest: changedBindingDigest,
+        bindingGeneration: 2,
+      }] },
     });
   });
 

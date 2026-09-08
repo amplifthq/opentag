@@ -22,7 +22,7 @@ the rebuild).
 | `apps/control-plane/src/**` | Newly authored | Node/Hono application, domain modules, PostgreSQL state, jobs, identity, and static-console serving |
 | `apps/control-plane/web/**` | Newly authored | Minimal OpenTag operator console; no imported template components or assets |
 | `apps/control-plane/test/**` | Newly authored | Unit and real-PostgreSQL behavior corpus |
-| `apps/control-plane/migrations/**` | Newly authored, reviewed SQL | Append-only PostgreSQL migration corpus |
+| `apps/control-plane/migrations/**` | Newly authored, reviewed SQL | Fresh PostgreSQL baseline; future releases may add forward-only migrations |
 | `apps/control-plane/Dockerfile` | Newly authored | One non-root Node OCI image for every process role |
 | `deploy/compose/**` | Newly authored | PostgreSQL-only self-hosting profile and configuration example |
 | `packages/control-protocol/**` | Extracted from public OpenTag source | Focused public package; Core remains an identity-equal compatibility re-export |

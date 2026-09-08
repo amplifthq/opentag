@@ -6,6 +6,8 @@ import {
   projectTargetRefFromEvent,
   sanitizeCredentialLikeValue,
   computeControlPayloadDigestV1,
+  AttemptWorkspaceAttestationV1Schema,
+  AttemptInterruptionEvidenceV1Schema,
   type OpenTagEvent,
   type OpenTagRun,
   type OpenTagRunResult,
@@ -482,30 +484,33 @@ export async function executeClaimedRun(
     return true;
   }
   let latestWorkspaceAttestation = hostedAuthority?.workspaceAttestation;
+  const synchronizeAcceptedLease = async () => {
+    const acceptedLeaseExpiresAt = await hostedAuthority
+      ?.readAcceptedLeaseExpiresAt?.();
+    if (!acceptedLeaseExpiresAt || hostedLeaseRevoked) return;
+    const acceptedDeadline = Date.parse(acceptedLeaseExpiresAt);
+    if (!Number.isFinite(acceptedDeadline) || (hostedLeaseDeadline !== undefined
+      && acceptedDeadline < hostedLeaseDeadline)) return;
+    if (latestWorkspaceAttestation) {
+      latestWorkspaceAttestation = {
+        ...latestWorkspaceAttestation,
+        leaseExpiresAt: acceptedLeaseExpiresAt,
+      };
+    }
+    if (
+      Number.isFinite(acceptedDeadline)
+      && hostedLeaseDeadline !== undefined
+      && acceptedDeadline > hostedLeaseDeadline
+    ) {
+      hostedLeaseDeadline = acceptedDeadline;
+      armHostedLeaseDeadline?.();
+    }
+  };
   if (heartbeatIntervalMs > 0) {
     heartbeatHandle = setInterval(() => {
       if (heartbeatInFlight) return;
       heartbeatInFlight = input.client.heartbeat(runId, lease)
-        .then(async () => {
-          const acceptedLeaseExpiresAt = await hostedAuthority
-            ?.readAcceptedLeaseExpiresAt?.();
-          if (!acceptedLeaseExpiresAt || hostedLeaseRevoked) return;
-          if (latestWorkspaceAttestation) {
-            latestWorkspaceAttestation = {
-              ...latestWorkspaceAttestation,
-              leaseExpiresAt: acceptedLeaseExpiresAt,
-            };
-          }
-          const acceptedDeadline = Date.parse(acceptedLeaseExpiresAt);
-          if (
-            Number.isFinite(acceptedDeadline)
-            && hostedLeaseDeadline !== undefined
-            && acceptedDeadline > hostedLeaseDeadline
-          ) {
-            hostedLeaseDeadline = acceptedDeadline;
-            armHostedLeaseDeadline?.();
-          }
-        })
+        .then(synchronizeAcceptedLease)
         .catch(requestExecutorCancel)
         .finally(() => {
           heartbeatInFlight = undefined;
@@ -540,6 +545,7 @@ export async function executeClaimedRun(
       {
         runId,
         attemptId: claimed.attemptId,
+        assertExecutionCurrent: hostedExecutionIsCurrent,
         ...(hostedAuthority?.credentialId && hostedAuthority.attemptNumber
           && hostedAuthority.fencingTokenDigest
           ? { attemptAuthority: {
@@ -646,7 +652,8 @@ export async function executeClaimedRun(
             observedAt: new Date().toISOString(),
             metadata: {
               toolCallId: report.toolCallId,
-              assurance: "reported",
+              assurance: report.localWriteObservation ? "local_observation" : "reported",
+              ...(report.localWriteObservation ? { localWriteObservation: report.localWriteObservation } : {}),
               ...(report.reportedOutcome ? { agentReportedOutcome: report.reportedOutcome } : {})
             }
           });
@@ -659,12 +666,22 @@ export async function executeClaimedRun(
       },
       {
         emit: async (event) => {
-          const safeEvent = sanitizeCredentialLikeValue(event, { secrets: [lease.fencingToken] });
-          if (safeEvent.workspaceAttestation) {
+          // Protocol evidence is validated, not rewritten by display redaction.
+          // Strict schemas reject arbitrary fields; the coordinator still checks authority.
+          const { workspaceAttestation, interruptionEvidence, ...presentation } = event;
+          const workspace = workspaceAttestation === undefined ? undefined
+            : AttemptWorkspaceAttestationV1Schema.safeParse(workspaceAttestation);
+          const interruption = interruptionEvidence === undefined ? undefined
+            : AttemptInterruptionEvidenceV1Schema.safeParse(interruptionEvidence);
+          if (workspace?.success === false || interruption?.success === false) {
+            throw new Error("executor_lifecycle_evidence_invalid");
+          }
+          const safeEvent = sanitizeCredentialLikeValue(presentation, { secrets: [lease.fencingToken] });
+          if (workspace?.success) {
             latestWorkspaceAttestation = {
-              ...safeEvent.workspaceAttestation,
+              ...workspace.data,
               leaseExpiresAt: latestWorkspaceAttestation?.leaseExpiresAt
-                ?? safeEvent.workspaceAttestation.leaseExpiresAt,
+                ?? workspace.data.leaseExpiresAt,
             };
           }
           const progressMessage = hostedAuthority
@@ -677,9 +694,10 @@ export async function executeClaimedRun(
               message: progressMessage,
               at: safeEvent.at,
               ...(latestWorkspaceAttestation ? { workspaceAttestation: latestWorkspaceAttestation } : {}),
-              ...(safeEvent.interruptionEvidence
-                ? { interruptionEvidence: safeEvent.interruptionEvidence } : {}),
+              ...(interruption?.success
+                ? { interruptionEvidence: interruption.data } : {}),
             });
+            await synchronizeAcceptedLease();
           } catch (error) {
             if (runNoLongerClaimed(error)) {
               requestExecutorCancel(error);

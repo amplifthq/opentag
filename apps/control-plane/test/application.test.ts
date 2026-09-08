@@ -224,12 +224,12 @@ describe("Control Plane Fetch application", () => {
     expect(response.headers.get("permissions-policy")).toContain("camera=()");
   });
 
-  it("serves Agent Presence only through an authenticated tenant-scoped read", async () => {
-    const presence = vi.fn(async (principal: { organizationId: string }) => ({
-      state: "available" as const,
-      reason: `ready for ${principal.organizationId}`,
-      agents: [],
-    }));
+  it("serves Teammates only through the new authenticated tenant-scoped read", async () => {
+    const listTeammates = vi.fn(async (principal: { organizationId: string }) => ([{
+      teammateId: `binding_${principal.organizationId}`,
+      displayName: "Release teammate",
+      workState: "ready" as const,
+    }]));
     const application = createControlPlaneApplication({
       capabilities,
       readiness: { check: async () => ({ ready: true }) },
@@ -249,31 +249,34 @@ describe("Control Plane Fetch application", () => {
               }
             : { kind: "invalid_credential" as const },
         } as never,
-        reads: { presence } as never,
+        reads: { listTeammates } as never,
       },
     });
 
     const unauthorized = await application.fetch(
-      new Request("http://control.test/api/console/presence"),
+      new Request("http://control.test/api/console/teammates"),
     );
     expect(unauthorized.status).toBe(401);
-    expect(presence).not.toHaveBeenCalled();
+    expect(listTeammates).not.toHaveBeenCalled();
 
     const authorized = await application.fetch(new Request(
-      "http://control.test/api/console/presence",
+      "http://control.test/api/console/teammates",
       { headers: { cookie: "opentag_session=session_1" } },
     ));
     expect(authorized.status).toBe(200);
-    expect(await authorized.json()).toEqual({
-      presence: {
-        state: "available",
-        reason: "ready for org_1",
-        agents: [],
-      },
-    });
-    expect(presence).toHaveBeenCalledWith(expect.objectContaining({
+    expect(await authorized.json()).toEqual([{
+      teammateId: "binding_org_1",
+      displayName: "Release teammate",
+      workState: "ready",
+    }]);
+    expect(listTeammates).toHaveBeenCalledWith(expect.objectContaining({
       organizationId: "org_1",
     }));
+    const retired = await application.fetch(new Request(
+      "http://control.test/api/console/presence",
+      { headers: { cookie: "opentag_session=session_1" } },
+    ));
+    expect(retired.status).toBe(404);
   });
 
   it("returns a bounded retry response when console login is throttled", async () => {

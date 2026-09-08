@@ -110,22 +110,23 @@ flowchart LR
 Slack is the only Source App in the supported team profile. GitHub is a Project
 Target plus an optional publication and evidence provider; it is not a second
 request inbox. One paired Runner is the execution owner. The Control Plane owns
-the canonical Run, Attempt, lease, approval, delivery journal, and terminal
-assessment.
+the canonical Work, Attempt, lease, approval, Effect evidence, channel
+projection, and terminal assessment.
 
-The console exposes Agent Presence as a read-only projection of facts that
-already exist: active Slack binding, Project Target, fresh Runner readiness, and
-the binding's current Run. It adds no second lifecycle or mutable presence state.
+The console exposes each active Slack binding as a long-lived Teammate. Its work
+state is derived from facts that already exist: Project Target, fresh Runner
+readiness, and the binding's current Work. It adds no Teammate table, second
+lifecycle, or mutable presence state.
 
-## Presence states
+## Teammate work states
 
 | State | What it means |
 | --- | --- |
-| `available` | Slack binding, Project Target, Runner, and fresh readiness all exist. |
+| `ready` | The Teammate's Project Target, Runner, and fresh readiness all exist. |
 | `queued` | A request is durably waiting for the paired Runner. |
 | `working` | The current fenced Attempt is assigned or running on a ready Runner. |
 | `needs_attention` | A decision, reconciliation, or conflicting active work needs a human. |
-| `offline` | The binding exists, but the Runner has no fresh readiness receipt. |
+| `runner_offline` | The Teammate remains in Slack, but its Runner has no fresh readiness receipt. |
 | `setup_required` | The Slack binding, Project Target, or Runner is incomplete. |
 
 These states are projections, not commands. They cannot claim, retry, cancel, or

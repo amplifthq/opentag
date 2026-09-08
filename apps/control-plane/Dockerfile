@@ -31,7 +31,9 @@ COPY packages/github packages/github
 COPY packages/governance packages/governance
 COPY packages/source-app-runtime packages/source-app-runtime
 COPY packages/slack packages/slack
-RUN corepack pnpm --filter @opentag/control-plane^... build
+# Package builds force-rebuild shared TypeScript references; they must not race
+# while reading and rewriting the same declaration files (same as root build).
+RUN corepack pnpm --workspace-concurrency=1 --filter @opentag/control-plane^... build
 RUN corepack pnpm --filter @opentag/control-plane build
 RUN npm pkg delete devDependencies --prefix apps/control-plane
 RUN corepack pnpm --filter @opentag/control-plane \

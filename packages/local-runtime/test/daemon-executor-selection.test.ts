@@ -17,7 +17,7 @@ function eventWithExecutorHint(executorHint?: string): OpenTagEvent {
     sourceEventId: "EvSlackSelection",
     receivedAt: "2026-06-29T00:00:00.000Z",
     actor: { provider: "slack", providerUserId: "U123", handle: "alice", organizationId: "T123" },
-    target: { mention: "@opentag", agentId: "opentag", ...(executorHint ? { executorHint } : {}) },
+    target: { mention: "@opentag", ...(executorHint ? { executorHint } : {}) },
     command: { rawText: "fix this", intent: "fix", args: {} },
     context: [],
     permissions: [{ scope: "repo:write", reason: "edit the bound checkout" }],

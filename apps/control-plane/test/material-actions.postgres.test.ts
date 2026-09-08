@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
 import { classifyAttemptMaterialActionCancellationTruth,
-  classifyAttemptMaterialActionTruth } from "../src/modules/hosted-runs/material-actions.js";
+  classifyAttemptMaterialActionTruth, areAttemptLocalWritesResolved } from "../src/modules/hosted-runs/material-actions.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
 import {
   hostedAdmissionFixture,
@@ -81,6 +81,73 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       attemptId: "attempt_without_material_receipt",
     });
     expect(truth).toMatchObject({ kind: "started_or_ambiguous" });
+  });
+
+  it("accepts only scoped local readback and retains the original unknown receipt", async () => {
+    const hosted = createHostedRunCoordinator({ pool: fixture.pool, clock: { now: () => now },
+      leaseDurationMs: 60_000, idFactory: () => "attempt_local_write", tokenFactory: () => "fence_local_write",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture });
+    const admission = await hostedAdmissionFixture({ runId: "run_local_write", suffix: "97",
+      organizationId: principal.organizationId, runnerId: principal.runnerId, permissionActions: ["workspace.write"] });
+    await hosted.admit({ runId: "run_local_write", admission: admission.admission, policy: admission.policy });
+    const claimed = await hosted.claim({ principal, request: hostedClaimRequest({
+      operationId: "claim_local_write", requestId: "claim_local_write", credentialId: principal.credentialId }) });
+    if (claimed.kind !== "claimed") throw new Error("local claim missing");
+    const claim = claimed.claim; const sha = (c: string) => `sha256:${c.repeat(64)}`;
+    const attestation = { workspaceId: "workspace_local", workspacePathDigest: sha("1"),
+      repositoryPathDigest: sha("2"), worktreeIdentityDigest: sha("3"), baseRevision: "a".repeat(40),
+      currentRevision: "a".repeat(40), currentTree: "b".repeat(40), workspaceStateDigest: sha("4"),
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number, fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      credentialId: principal.credentialId, leaseExpiresAt: claim.attempt.leaseExpiresAt };
+    await fixture.pool.query("UPDATE cp_hosted_attempt SET workspace_attestation=$2 WHERE run_id=$1", [claim.runId, attestation]);
+    const targetFingerprint = sha("5"); const workspaceAttestationDigest = await computeControlPayloadDigestV1(attestation);
+    const actionDescriptorDigest = await computeControlPayloadDigestV1("workspace.write");
+    const authorization = await authorizeHostedMaterialActionFixture({ pool: fixture.pool, clock: { now: () => now },
+      principal, runId: claim.runId, attempt: claim.attempt, actionId: "action_local_write", actionDescriptor: "workspace.write",
+      targetFingerprint, policySnapshotRef: admission.policy.payload.snapshotId, policySnapshotDigest: admission.policy.receiptDigest,
+      workspaceAttestationDigest, suffix: "local_write" });
+    const coordinator = createMaterialActionCoordinator({ pool: fixture.pool, clock: { now: () => now } });
+    await expect(coordinator.begin({ principal, fencingToken: claim.attempt.fencingToken, runId: claim.runId,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number, actionId: "action_local_write",
+      actionDescriptor: "workspace.write", actionDescriptorDigest, targetFingerprint,
+      policySnapshotRef: admission.policy.payload.snapshotId, policySnapshotDigest: admission.policy.receiptDigest,
+      workspaceAttestationDigest, authority: authorization.authority, idempotencyKey: "begin_local_write" }))
+      .resolves.toEqual({ kind: "begun" });
+    const proof = { kind: "local_workspace_write_observation_v1" as const, workspaceId: attestation.workspaceId,
+      workspacePathDigest: attestation.workspacePathDigest, worktreeIdentityDigest: attestation.worktreeIdentityDigest,
+      targetFingerprint, filePathDigest: sha("6"), expectedContentDigest: sha("7"), observedContentDigest: sha("7"), byteLength: 3 };
+    const receiptFor = async (id: string, observation?: typeof proof, predecessor?: string) => {
+      const payload = { actionId: "action_local_write", actionDescriptor: "workspace.write" as const,
+        actionDescriptorDigest, idempotencyKey: "begin_local_write", provider: observation ? "local_workspace" : "acp",
+        connectionRef: "local_write", targetFingerprint, operationId: id, requestDigest: sha("8"),
+        actionPayloadDigest: await computeControlPayloadDigestV1(observation ?? {}),
+        ...(observation ? { outcome: "succeeded" as const, reasonCode: "local_write_observed" as const, localWriteObservation: observation }
+          : { outcome: "outcome_unknown" as const, reasonCode: "provider_receipt_missing" as const, nextAction: "observe", owner: "runner" }),
+        observedAt: now.toISOString() };
+      const base = { schemaVersion: 1 as const, protocolVersion: "1.0" as const, receiptKind: "material_action" as const,
+        receiptId: id, organizationId: principal.organizationId, operationId: id,
+        requiredCapabilities: ["relay.material-receipt.v1"] as ["relay.material-receipt.v1"],
+        producer: { kind: "local_opentag" as const, id: principal.runnerId },
+        identity: { namespace: "opentag.control.receipt/material-action/v1", parts: [principal.organizationId, claim.runId, claim.attempt.id, "action_local_write", id] },
+        observedAt: now.toISOString(), runId: claim.runId,
+        attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch, fencingTokenDigest: claim.attempt.fencingTokenDigest },
+        payload, payloadDigest: await computeMaterialActionPayloadDigestV1(payload),
+        ...(predecessor ? { predecessorReceiptDigests: [predecessor] } : {}) };
+      return MaterialActionReceiptEnvelopeV1Schema.parse({ ...base, receiptDigest: await computeMaterialActionReceiptDigestV1(base) });
+    };
+    const scope = { organizationId: principal.organizationId, runId: claim.runId, attemptId: claim.attempt.id };
+    const unknown = await receiptFor("local_unknown");
+    await expect(coordinator.record({ principal, fencingToken: claim.attempt.fencingToken, receipt: unknown })).resolves.toMatchObject({ kind: "recorded" });
+    expect(await areAttemptLocalWritesResolved(fixture.pool, scope)).toBe(false);
+    const wrong = await receiptFor("local_wrong", { ...proof, workspaceId: "other_workspace" }, unknown.receiptDigest);
+    await expect(coordinator.record({ principal, fencingToken: claim.attempt.fencingToken, receipt: wrong })).resolves.toEqual({ kind: "conflict" });
+    const observed = await receiptFor("local_observed", proof, unknown.receiptDigest);
+    await expect(coordinator.record({ principal, fencingToken: claim.attempt.fencingToken, receipt: observed })).resolves.toMatchObject({ kind: "recorded" });
+    expect(await areAttemptLocalWritesResolved(fixture.pool, scope)).toBe(true);
+    expect((await fixture.pool.query("SELECT outcome FROM cp_material_action_receipt WHERE run_id=$1 ORDER BY receipt_id", [claim.runId])).rows)
+      .toEqual([{ outcome: "succeeded" }, { outcome: "outcome_unknown" }]);
+    await expect(classifyAttemptMaterialActionTruth(fixture.pool, scope)).resolves.toMatchObject({ kind: "started_or_ambiguous" });
+    await hosted.cancelRun({ organizationId: principal.organizationId, runId: claim.runId, reason: "fixture_complete" });
   });
 
   it("keeps an append-only receipt chain and reconciles the current evidence", async () => {
@@ -349,7 +416,7 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
     });
     const rows = await fixture.pool.query<{ receipt_id: string }>(
       `SELECT receipt_id FROM cp_material_action_receipt
-       WHERE organization_id = $1 ORDER BY created_at, receipt_id`,
+       WHERE organization_id = $1 AND run_id='run_material' ORDER BY created_at, receipt_id`,
       ["org_material"],
     );
     expect(rows.rows.map((row) => row.receipt_id)).toEqual([

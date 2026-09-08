@@ -1,7 +1,6 @@
 # @opentag/store
 
-Durable SQLite state for the paired OpenTag Runner, plus the Control Plane's
-provider-delivery journal.
+Durable SQLite state for the paired OpenTag Runner.
 
 ## Install
 
@@ -41,5 +40,5 @@ const repo = createPairedRunnerRepository(drizzle(sqlite));
 ## Stability
 
 The paired schema is internal durability authority for the OpenTag Runner. It
-is not an embedded dispatcher API and does not accept legacy local-runtime
-databases.
+does not contain provider-delivery or Slack-installation state, is not an
+embedded dispatcher API, and does not accept legacy local-runtime databases.

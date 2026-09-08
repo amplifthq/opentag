@@ -3,6 +3,8 @@
 - Status: Accepted; managed-service portions deferred 2026-09-02
 - Date: 2026-08-15
 - Decision owners: OpenTag maintainers
+- Partially superseded by: ADR 0006; checked-in SQL and behavior-level
+  PostgreSQL tests replace the unused parallel Drizzle schema authority
 
 ## Context
 

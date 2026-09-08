@@ -15,7 +15,7 @@ const slackEvent: OpenTagEvent = {
   sourceEventId: "Ev123",
   receivedAt: "2026-06-24T00:00:00.000Z",
   actor: { provider: "slack", providerUserId: "U123", handle: "alice", organizationId: "T123" },
-  target: { mention: "@opentag", agentId: "opentag" },
+  target: { mention: "@opentag" },
   command: { rawText: "fix the flaky test", intent: "fix", args: {} },
   context: [
     { provider: "slack", kind: "message", uri: "slack://team/T123/channel/C123/message/1710000000.000100", visibility: "organization" },

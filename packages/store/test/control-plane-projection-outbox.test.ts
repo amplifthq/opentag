@@ -1,11 +1,18 @@
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { RunnerReadinessReceiptEnvelopeV1Schema } from "@opentag/core";
-import { describe, expect, it } from "vitest";
+import { RunnerReadinessReceiptEnvelopeV1Schema, type HostedClaimRequestV1 } from "@opentag/core";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { canonicalSha256Json } from "../src/canonical-json.js";
 import { ControlPlaneProjectionOutboxValidationError, createPairedRunnerRepository, } from "../src/repository.js";
 import { migratePairedRunnerSchema } from "../src/schema.js";
 const NOW = new Date("2026-08-08T00:00:00.000Z");
+const tempDirs: string[] = [];
+afterEach(async () => {
+    await Promise.all(tempDirs.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
 function withProjectionDigests<T extends {
     payload: unknown;
     payloadDigest?: string;
@@ -66,11 +73,47 @@ function repository(sqlite = new Database(":memory:")) {
     migratePairedRunnerSchema(sqlite);
     return { sqlite, repo: createPairedRunnerRepository(drizzle(sqlite)) };
 }
+type Repository = ReturnType<typeof createPairedRunnerRepository>;
+async function enqueueAndClaim(
+    repo: Repository,
+    envelope: ReturnType<typeof readiness>,
+    now: Date,
+) {
+    await repo.enqueueControlPlaneProjection({ destinationId: "cloud", envelope, now });
+    const claimed = await repo.claimDueControlPlaneProjections({
+        destinationId: "cloud",
+        organizationId: envelope.organizationId,
+        leaseOwner: "pump",
+        leaseSeconds: 30,
+        now,
+    });
+    const entry = claimed.entries.find((candidate) => candidate.receiptId === envelope.receiptId);
+    if (!entry?.leaseToken) throw new Error("expected readiness lease");
+    return entry;
+}
+async function acknowledgeReadiness(
+    repo: Repository,
+    envelope: ReturnType<typeof readiness>,
+    now: Date,
+) {
+    const leased = await enqueueAndClaim(repo, envelope, now);
+    return repo.acknowledgeControlPlaneProjection({
+        destinationId: "cloud",
+        organizationId: envelope.organizationId,
+        receiptId: envelope.receiptId,
+        leaseToken: leased.leaseToken!,
+        httpStatus: 201,
+        now,
+    });
+}
 describe("runner readiness outbox", () => {
     it("creates only the readiness-shaped schema and initializes idempotently", () => {
         const sqlite = new Database(":memory:");
         migratePairedRunnerSchema(sqlite);
         migratePairedRunnerSchema(sqlite);
+        expect(sqlite.prepare(
+            "SELECT version, state FROM opentag_paired_runner_schema WHERE singleton = 1",
+        ).get()).toEqual({ version: 2, state: "ready" });
         const table = sqlite.prepare(`
       SELECT sql FROM sqlite_master
       WHERE type = 'table' AND name = 'control_plane_projection_outbox'
@@ -80,6 +123,10 @@ describe("runner readiness outbox", () => {
         const columns = sqlite.prepare("PRAGMA table_info(control_plane_projection_outbox)").all() as Array<{
             name: string;
         }>;
+        const deleteGuard = sqlite.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'control_plane_projection_outbox_delete_guard'
+    `).get() as { sql: string };
         expect(table.sql).toContain("'runner_readiness'");
         expect(table.sql).not.toContain("'completion_assessment'");
         expect(table.sql).not.toContain("'callback_provider_observation'");
@@ -89,6 +136,8 @@ describe("runner readiness outbox", () => {
             "depends_on_receipt_id",
             "requires_lifecycle_operation_id",
         ]));
+        expect(deleteGuard.sql).toContain("OLD.state = 'acknowledged'");
+        expect(deleteGuard.sql).toContain("newer.state = 'acknowledged'");
         const tables = (sqlite.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -103,13 +152,51 @@ describe("runner readiness outbox", () => {
             "hosted_claim_operations",
             "hosted_lifecycle_operations",
             "hosted_run_imports",
+            "local_effect_attempts",
             "opentag_paired_runner_schema",
-            "opentag_schema_migrations",
-            "run_events",
             "runs",
-            "source_deliveries",
             "work_threads",
         ]);
+        sqlite.close();
+    });
+    it("fails closed on a version-1 paired schema marker", () => {
+        const sqlite = new Database(":memory:");
+        migratePairedRunnerSchema(sqlite);
+        sqlite.prepare(
+            "UPDATE opentag_paired_runner_schema SET version = 1 WHERE singleton = 1",
+        ).run();
+        expect(() => migratePairedRunnerSchema(sqlite))
+            .toThrow("paired_runner_schema_incompatible");
+        expect(sqlite.prepare(
+            "SELECT version, state FROM opentag_paired_runner_schema WHERE singleton = 1",
+        ).get()).toEqual({ version: 1, state: "ready" });
+        sqlite.close();
+    });
+    it("stores the handled proposal marker as one immutable pair", () => {
+        const sqlite = new Database(":memory:");
+        migratePairedRunnerSchema(sqlite);
+        sqlite.prepare(`INSERT INTO runs(
+          id,event_id,status,event_json,routing_rejections_json,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?)`).run(
+            "run_1", "event_1", "succeeded", "{}", "[]",
+            NOW.toISOString(), NOW.toISOString(),
+        );
+        expect(() => sqlite.prepare(`UPDATE runs
+          SET proposal_settlement_candidate_id='candidate_1' WHERE id='run_1'`).run())
+            .toThrow();
+        sqlite.prepare(`UPDATE runs SET
+          proposal_settlement_candidate_id='candidate_1',
+          proposal_settlement_handled_at=? WHERE id='run_1'`).run(NOW.toISOString());
+        expect(sqlite.prepare(`SELECT
+          proposal_settlement_candidate_id AS candidateId,
+          proposal_settlement_handled_at AS handledAt
+          FROM runs WHERE id='run_1'`).get()).toEqual({
+            candidateId: "candidate_1", handledAt: NOW.toISOString(),
+        });
+        expect(() => sqlite.prepare(`UPDATE runs SET
+          proposal_settlement_candidate_id='candidate_2',
+          proposal_settlement_handled_at=? WHERE id='run_1'`).run(NOW.toISOString()))
+            .toThrow("runs_proposal_settlement_immutable");
         sqlite.close();
     });
     it("leaves an unmarked existing database unchanged", () => {
@@ -216,6 +303,229 @@ describe("runner readiness outbox", () => {
             organizationId: "org_1",
             runnerId: "runner_other",
         })).resolves.toBeNull();
+        sqlite.close();
+    });
+    it("retains exactly one acknowledged readiness across sustained refresh", async () => {
+        const { sqlite, repo } = repository();
+        let maximumRows = 0;
+        for (let index = 0; index < 256; index += 1) {
+            const now = new Date(NOW.getTime() + index * 1000);
+            const envelope = readiness({ suffix: String(index), observedAt: now.toISOString() });
+            await expect(acknowledgeReadiness(repo, envelope, now)).resolves.toMatchObject({
+                outcome: "acknowledged",
+                entry: { receiptId: envelope.receiptId, state: "acknowledged" },
+            });
+            const { count } = sqlite.prepare(
+                "SELECT COUNT(*) AS count FROM control_plane_projection_outbox",
+            ).get() as { count: number };
+            maximumRows = Math.max(maximumRows, count);
+        }
+        expect(maximumRows).toBe(1);
+        expect(sqlite.prepare(`
+      SELECT receipt_id AS receiptId, state
+      FROM control_plane_projection_outbox
+    `).get()).toEqual({ receiptId: "receipt_readiness_255", state: "acknowledged" });
+        expect(() => sqlite.prepare(`
+      DELETE FROM control_plane_projection_outbox
+      WHERE receipt_id = 'receipt_readiness_255'
+    `).run()).toThrow("control_plane_projection_outbox_delete_forbidden");
+        sqlite.close();
+    });
+    it("retains the freshest observed readiness when acknowledgements arrive out of order", async () => {
+        const { sqlite, repo } = repository();
+        const freshest = readiness({ suffix: "freshest", observedAt: "2026-08-08T00:00:10.000Z" });
+        const delayedOlder = readiness({ suffix: "delayed", observedAt: "2026-08-08T00:00:00.000Z" });
+        await acknowledgeReadiness(repo, freshest, new Date("2026-08-08T00:00:10.000Z"));
+        await expect(acknowledgeReadiness(
+            repo,
+            delayedOlder,
+            new Date("2026-08-08T00:00:20.000Z"),
+        )).resolves.toMatchObject({
+            outcome: "acknowledged",
+            entry: { receiptId: delayedOlder.receiptId },
+        });
+        expect(sqlite.prepare(`
+      SELECT receipt_id AS receiptId, state
+      FROM control_plane_projection_outbox
+    `).all()).toEqual([{ receiptId: freshest.receiptId, state: "acknowledged" }]);
+        sqlite.close();
+    });
+    it("prunes only superseded acknowledgement while preserving every unresolved state", async () => {
+        const { sqlite, repo } = repository();
+        const old = readiness({ suffix: "old", observedAt: "2026-08-08T00:00:00.000Z" });
+        await acknowledgeReadiness(repo, old, new Date("2026-08-08T00:00:00.000Z"));
+
+        const leasedEnvelope = readiness({ suffix: "leased", observedAt: "2026-08-08T00:00:01.000Z" });
+        await enqueueAndClaim(repo, leasedEnvelope, new Date("2026-08-08T00:00:01.000Z"));
+
+        const attentionEnvelope = readiness({ suffix: "attention", observedAt: "2026-08-08T00:00:02.000Z" });
+        const attentionLease = await enqueueAndClaim(
+            repo,
+            attentionEnvelope,
+            new Date("2026-08-08T00:00:02.000Z"),
+        );
+        await repo.markControlPlaneProjectionAttention({
+            destinationId: "cloud",
+            organizationId: "org_1",
+            receiptId: attentionEnvelope.receiptId,
+            leaseToken: attentionLease.leaseToken!,
+            reasonCode: "manual_attention",
+            now: new Date("2026-08-08T00:00:02.100Z"),
+        });
+
+        const pendingEnvelope = readiness({ suffix: "pending", observedAt: "2026-08-08T00:00:02.500Z" });
+        const pendingLease = await enqueueAndClaim(
+            repo,
+            pendingEnvelope,
+            new Date("2026-08-08T00:00:02.500Z"),
+        );
+        await repo.retryControlPlaneProjection({
+            destinationId: "cloud",
+            organizationId: "org_1",
+            receiptId: pendingEnvelope.receiptId,
+            leaseToken: pendingLease.leaseToken!,
+            nextAttemptAt: "2026-08-08T00:01:00.000Z",
+            reasonCode: "transport_failed",
+            now: new Date("2026-08-08T00:00:02.600Z"),
+        });
+
+        const current = readiness({ suffix: "current", observedAt: "2026-08-08T00:00:03.000Z" });
+        await acknowledgeReadiness(repo, current, new Date("2026-08-08T00:00:03.000Z"));
+        expect(sqlite.prepare(`
+      SELECT receipt_id AS receiptId, state
+      FROM control_plane_projection_outbox
+      ORDER BY receipt_id
+    `).all()).toEqual([
+            { receiptId: attentionEnvelope.receiptId, state: "attention" },
+            { receiptId: current.receiptId, state: "acknowledged" },
+            { receiptId: leasedEnvelope.receiptId, state: "leased" },
+            { receiptId: pendingEnvelope.receiptId, state: "pending" },
+        ]);
+        expect(sqlite.prepare(`
+      SELECT COUNT(*) AS count FROM control_plane_projection_outbox
+      WHERE state = 'acknowledged'
+    `).get()).toEqual({ count: 1 });
+        expect(() => sqlite.prepare(`
+      DELETE FROM control_plane_projection_outbox
+      WHERE receipt_id = ?
+    `).run(pendingEnvelope.receiptId)).toThrow("control_plane_projection_outbox_delete_forbidden");
+        sqlite.close();
+    });
+    it("rolls acknowledgement and retention back together, then replays after lease recovery and restart", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "opentag-readiness-retention-"));
+        tempDirs.push(directory);
+        const path = join(directory, "store.sqlite");
+        const old = readiness({ suffix: "old", observedAt: "2026-08-08T00:00:00.000Z" });
+        const newer = readiness({ suffix: "new", observedAt: "2026-08-08T00:00:10.000Z" });
+
+        const firstSqlite = new Database(path);
+        const first = repository(firstSqlite).repo;
+        await acknowledgeReadiness(first, old, new Date("2026-08-08T00:00:00.000Z"));
+        const lostResponseLease = await enqueueAndClaim(
+            first,
+            newer,
+            new Date("2026-08-08T00:00:10.000Z"),
+        );
+        firstSqlite.exec(`CREATE TRIGGER abort_readiness_retention
+      BEFORE DELETE ON control_plane_projection_outbox
+      BEGIN SELECT RAISE(ABORT, 'injected readiness retention failure'); END;`);
+        await expect(first.acknowledgeControlPlaneProjection({
+            destinationId: "cloud",
+            organizationId: "org_1",
+            receiptId: newer.receiptId,
+            leaseToken: lostResponseLease.leaseToken!,
+            httpStatus: 201,
+            now: new Date("2026-08-08T00:00:11.000Z"),
+        })).rejects.toThrow("injected readiness retention failure");
+        expect(firstSqlite.prepare(`
+      SELECT receipt_id AS receiptId, state, lease_token AS leaseToken
+      FROM control_plane_projection_outbox
+      ORDER BY receipt_id
+    `).all()).toEqual([
+            { receiptId: newer.receiptId, state: "leased", leaseToken: lostResponseLease.leaseToken },
+            { receiptId: old.receiptId, state: "acknowledged", leaseToken: null },
+        ]);
+        firstSqlite.exec("DROP TRIGGER abort_readiness_retention");
+        firstSqlite.close();
+
+        const secondSqlite = new Database(path);
+        const second = repository(secondSqlite).repo;
+        await expect(second.recoverExpiredControlPlaneProjectionLeases({
+            destinationId: "cloud",
+            organizationId: "org_1",
+            now: new Date("2026-08-08T00:00:40.000Z"),
+        })).resolves.toMatchObject({ recovered: 1, entries: [{ receiptId: newer.receiptId, state: "pending" }] });
+        const replayLease = await second.claimDueControlPlaneProjections({
+            destinationId: "cloud",
+            organizationId: "org_1",
+            leaseOwner: "pump_after_restart",
+            leaseSeconds: 30,
+            now: new Date("2026-08-08T00:00:40.000Z"),
+        });
+        await expect(second.acknowledgeControlPlaneProjection({
+            destinationId: "cloud",
+            organizationId: "org_1",
+            receiptId: newer.receiptId,
+            leaseToken: replayLease.entries[0]!.leaseToken!,
+            httpStatus: 201,
+            now: new Date("2026-08-08T00:00:41.000Z"),
+        })).resolves.toMatchObject({ outcome: "acknowledged", entry: { receiptId: newer.receiptId } });
+        expect(secondSqlite.prepare(`
+      SELECT receipt_id AS receiptId, state
+      FROM control_plane_projection_outbox
+    `).all()).toEqual([{ receiptId: newer.receiptId, state: "acknowledged" }]);
+        secondSqlite.close();
+    });
+    it("keeps a pending claim request frozen after its acknowledged readiness row is superseded", async () => {
+        const { sqlite, repo } = repository();
+        const old = readiness({ suffix: "claim", observedAt: "2026-08-08T00:00:00.000Z" });
+        await acknowledgeReadiness(repo, old, new Date("2026-08-08T00:00:00.000Z"));
+        const claimRequest: HostedClaimRequestV1 = {
+            schemaVersion: 1,
+            protocolVersion: "1.0",
+            requiredCapabilities: [
+                "relay.claim-fence.v1",
+                "relay.hosted-admission.v1",
+                "relay.hosted-claim.v1",
+                "relay.lifecycle.v1",
+                "relay.readiness.v1",
+                "relay.source-content-redeem.v1",
+            ],
+            requestId: "claim-request-frozen-readiness",
+            operationId: "claim-operation-frozen-readiness",
+            expectedAuthority: {
+                credentialId: "credential_ref_1",
+                registrationGeneration: 1,
+                credentialGeneration: 1,
+                runnerReadinessReceiptId: old.receiptId,
+                runnerReadinessReceiptDigest: old.receiptDigest,
+            },
+        };
+        await repo.beginHostedClaimOperation({
+            destinationId: "cloud",
+            organizationId: "org_1",
+            runnerId: "runner_1",
+            request: claimRequest,
+        });
+        const current = readiness({ suffix: "after-claim", observedAt: "2026-08-08T00:00:10.000Z" });
+        await acknowledgeReadiness(repo, current, new Date("2026-08-08T00:00:10.000Z"));
+
+        expect(sqlite.prepare(`
+      SELECT receipt_id AS receiptId FROM control_plane_projection_outbox
+    `).all()).toEqual([{ receiptId: current.receiptId }]);
+        await expect(repo.getHostedClaimOperationForRetry({
+            destinationId: "cloud",
+            organizationId: "org_1",
+            runnerId: "runner_1",
+        })).resolves.toMatchObject({
+            state: "pending",
+            request: {
+                expectedAuthority: {
+                    runnerReadinessReceiptId: old.receiptId,
+                    runnerReadinessReceiptDigest: old.receiptDigest,
+                },
+            },
+        });
         sqlite.close();
     });
     it("isolates destinations and organizations while claiming", async () => {

@@ -27,11 +27,16 @@ type TokenFactory = () => string;
 
 const UPSERT_PROJECT_TARGET_SQL = `
   INSERT INTO cp_project_target(
-    organization_id, project_target_id, runner_id, binding_digest,
+    organization_id, project_target_id, runner_id, binding_digest, binding_generation,
     provider, owner, repo, default_executor, default_branch, updated_at
-  ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  ) VALUES($1, $2, $3, $4, 1, $5, $6, $7, $8, $9, $10)
   ON CONFLICT (organization_id, project_target_id) DO UPDATE SET
     runner_id = EXCLUDED.runner_id,
+    binding_generation = CASE
+      WHEN cp_project_target.binding_digest = EXCLUDED.binding_digest
+        THEN cp_project_target.binding_generation
+      ELSE cp_project_target.binding_generation + 1
+    END,
     binding_digest = EXCLUDED.binding_digest,
     provider = EXCLUDED.provider,
     owner = EXCLUDED.owner,
@@ -151,13 +156,14 @@ export function createRunnerDirectory(input: {
     const targets = await input.pool.query<{
       project_target_id: string;
       binding_digest: string;
+      binding_generation: number;
       provider: string;
       owner: string;
       repo: string;
       default_executor: string;
       default_branch: string | null;
     }>(
-      `SELECT project_target_id, binding_digest, provider, owner, repo,
+      `SELECT project_target_id, binding_digest, binding_generation, provider, owner, repo,
               default_executor, default_branch
        FROM cp_project_target
        WHERE organization_id = $1 AND runner_id = $2
@@ -177,6 +183,7 @@ export function createRunnerDirectory(input: {
       targets: targets.rows.map((target) => ({
         projectTargetId: target.project_target_id,
         bindingDigest: target.binding_digest,
+        bindingGeneration: target.binding_generation,
         provider: target.provider,
         owner: target.owner,
         repo: target.repo,
@@ -260,14 +267,12 @@ export function createRunnerDirectory(input: {
 
         await client.query(
           `INSERT INTO cp_runner(
-             organization_id, runner_id, display_name,
-             registration_generation, credential_generation,
+             organization_id, runner_id, registration_generation, credential_generation,
              current_credential_id, capabilities, created_at, updated_at
-           ) VALUES($1, $2, $3, 1, 1, $4, $5::jsonb, $6, $6)`,
+           ) VALUES($1, $2, 1, 1, $3, $4::jsonb, $5, $5)`,
           [
             command.organizationId,
             request.runnerId,
-            request.displayName ?? null,
             credentialId,
             JSON.stringify(request.capabilities),
             createdAt,
@@ -564,22 +569,10 @@ export function createRunnerDirectory(input: {
         }
         const slackBinding = await client.query(
           `SELECT 1
-           FROM cp_slack_installation slack
-           JOIN cp_source_app_installation installation
-             ON installation.organization_id = slack.organization_id
-            AND installation.installation_id = slack.installation_id
-            AND installation.source_app_id = 'slack'
-            AND installation.state = 'active'
-           JOIN cp_source_binding binding
-             ON binding.organization_id = slack.organization_id
-            AND binding.binding_id = slack.binding_id
-            AND binding.installation_id = slack.installation_id
-            AND binding.binding_digest = installation.binding_digest
-            AND binding.state = 'active'
-           WHERE slack.organization_id = $1
-             AND slack.project_target_id = $2
+           FROM cp_slack_binding
+           WHERE organization_id=$1 AND project_target_id=$2 AND state='active'
            LIMIT 1
-           FOR SHARE OF slack, installation, binding`,
+           FOR SHARE`,
           [principal.organizationId, target.projectTargetId],
         );
         if (slackBinding.rows.length === 0) {

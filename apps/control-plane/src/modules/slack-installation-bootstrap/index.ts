@@ -7,23 +7,14 @@ import { recordManagementAudit } from "../audit/index.js";
 
 type SecretResolver = { resolve(reference: string): Promise<string> };
 
-type SourceInstallationRow = {
-  source_app_id: string;
-  app_instance_id: string;
+type SlackBindingRow = {
+  installation_id: string;
+  binding_id: string;
   binding_digest: string;
+  state: string;
   credential_generation: number;
   credential_generation_digest: string;
-  state: string;
-};
-type SourceBindingRow = {
-  installation_id: string;
-  binding_digest: string;
-  state: string;
-};
-type SlackInstallationRow = {
-  binding_id: string;
-  project_target_id: string | null;
-  publication_mode: string;
+  route_identity: string;
   team_id: string;
   app_id: string;
   channel_id: string;
@@ -34,7 +25,9 @@ type SlackInstallationRow = {
   admin_user_ids: string[];
   signing_secret_ref: string;
   bot_token_ref: string;
-  route_identity: string;
+  project_target_id: string | null;
+  publication_mode: string;
+  display_name: string;
 };
 
 export type SlackInstallationBootstrapOutcome =
@@ -54,6 +47,7 @@ function bootstrapIdentity(organizationId: string, config: SlackBootstrapConfig)
     organizationId,
     installationId: config.installationId,
     bindingId: config.bindingId,
+    routeIdentity: config.routeIdentity,
     projectTargetId: config.projectTargetId,
     publicationMode: config.publicationMode,
     teamId: config.teamId,
@@ -80,31 +74,21 @@ function secretIsUsable(value: string): boolean {
     && !value.includes("\0") && !value.startsWith("replace-with-");
 }
 
-function exactRows(input: {
-  organizationId: string;
+function exactRow(input: {
   config: SlackBootstrapConfig;
   bindingDigest: string;
   credentialGenerationDigest: string;
-  source: SourceInstallationRow | undefined;
-  binding: SourceBindingRow | undefined;
-  slack: SlackInstallationRow | undefined;
+  row: SlackBindingRow | undefined;
 }): boolean {
   const { config, bindingDigest, credentialGenerationDigest } = input;
-  return canonicalJsonStringify(input.source) === canonicalJsonStringify({
-    source_app_id: "slack",
-    app_instance_id: config.installationId,
+  return canonicalJsonStringify(input.row) === canonicalJsonStringify({
+    installation_id: config.installationId,
+    binding_id: config.bindingId,
     binding_digest: bindingDigest,
+    state: "active",
     credential_generation: 1,
     credential_generation_digest: credentialGenerationDigest,
-    state: "active",
-  }) && canonicalJsonStringify(input.binding) === canonicalJsonStringify({
-    installation_id: config.installationId,
-    binding_digest: bindingDigest,
-    state: "active",
-  }) && canonicalJsonStringify(input.slack) === canonicalJsonStringify({
-    binding_id: config.bindingId,
-    project_target_id: config.projectTargetId,
-    publication_mode: config.publicationMode,
+    route_identity: config.routeIdentity,
     team_id: config.teamId,
     app_id: config.appId,
     channel_id: config.channelId,
@@ -115,10 +99,11 @@ function exactRows(input: {
     admin_user_ids: config.adminUserIds,
     signing_secret_ref: config.signingSecretRef,
     bot_token_ref: config.botTokenRef,
-    route_identity: config.routeIdentity,
+    project_target_id: config.projectTargetId,
+    publication_mode: config.publicationMode,
+    display_name: "OpenTag",
   });
 }
-
 export async function bootstrapSlackInstallation(input: {
   pool: Pool;
   organizationId: string;
@@ -151,38 +136,24 @@ export async function bootstrapSlackInstallation(input: {
       if (!organization.rows[0]?.present) {
         return { kind: "conflict", reason: "organization_missing" } as const;
       }
-      const source = await client.query<SourceInstallationRow>(
-        `SELECT source_app_id,app_instance_id,binding_digest,
-          credential_generation,credential_generation_digest,state
-         FROM cp_source_app_installation
-         WHERE organization_id=$1 AND installation_id=$2 FOR UPDATE`,
-        [input.organizationId, input.config.installationId],
+      const existing = await client.query<SlackBindingRow>(
+        `SELECT installation_id,binding_id,binding_digest,state,credential_generation,
+          credential_generation_digest,route_identity,team_id,app_id,channel_id,bot_user_id,
+          member_user_ids,operator_user_ids,approver_user_id,admin_user_ids,signing_secret_ref,
+          bot_token_ref,project_target_id,publication_mode,display_name
+         FROM cp_slack_binding
+         WHERE (organization_id=$1 AND (installation_id=$2 OR binding_id=$3))
+           OR route_identity=$4 OR (team_id=$5 AND app_id=$6 AND channel_id=$7)
+         ORDER BY organization_id,binding_id FOR UPDATE`,
+        [input.organizationId,input.config.installationId,input.config.bindingId,
+          input.config.routeIdentity,input.config.teamId,input.config.appId,input.config.channelId],
       );
-      const binding = await client.query<SourceBindingRow>(
-        `SELECT installation_id,binding_digest,state
-         FROM cp_source_binding
-         WHERE organization_id=$1 AND binding_id=$2 FOR UPDATE`,
-        [input.organizationId, input.config.bindingId],
-      );
-      const slack = await client.query<SlackInstallationRow>(
-        `SELECT binding_id,project_target_id,publication_mode,
-          team_id,app_id,channel_id,bot_user_id,member_user_ids,operator_user_ids,
-          approver_user_id,admin_user_ids,signing_secret_ref,bot_token_ref,route_identity
-         FROM cp_slack_installation
-         WHERE organization_id=$1 AND installation_id=$2 FOR UPDATE`,
-        [input.organizationId, input.config.installationId],
-      );
-      const existingCount = Number(source.rows.length > 0)
-        + Number(binding.rows.length > 0) + Number(slack.rows.length > 0);
       const now = clock.now();
-      if (existingCount > 0) {
-        if (existingCount !== 3 || !exactRows({
-          organizationId: input.organizationId,
+      if (existing.rowCount !== 0) {
+        if (existing.rowCount !== 1 || !exactRow({
           config: input.config,
           ...identity,
-          source: source.rows[0],
-          binding: binding.rows[0],
-          slack: slack.rows[0],
+          row: existing.rows[0],
         })) {
           return { kind: "conflict", reason: "existing_state_mismatch" } as const;
         }
@@ -198,28 +169,18 @@ export async function bootstrapSlackInstallation(input: {
         });
         return { kind: "replayed", ...identity, credentialGeneration: 1 } as const;
       }
-      await client.query(`INSERT INTO cp_source_app_installation(
-        organization_id,installation_id,source_app_id,app_instance_id,binding_digest,
-        credential_generation,credential_generation_digest,state,created_at,updated_at)
-        VALUES($1,$2,'slack',$2,$3,1,$4,'active',$5,$5)`,
-      [input.organizationId, input.config.installationId, identity.bindingDigest,
-        identity.credentialGenerationDigest, now]);
-      await client.query(`INSERT INTO cp_source_binding(organization_id,binding_id,
-        installation_id,binding_digest,state,created_at,updated_at)
-        VALUES($1,$2,$3,$4,'active',$5,$5)`,
-      [input.organizationId, input.config.bindingId, input.config.installationId,
-        identity.bindingDigest, now]);
-      await client.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,
-        binding_id,project_target_id,publication_mode,team_id,app_id,channel_id,bot_user_id,
-        member_user_ids,operator_user_ids,approver_user_id,admin_user_ids,signing_secret_ref,
-        bot_token_ref,route_identity,created_at,updated_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$17)`,
-      [input.organizationId, input.config.installationId, input.config.bindingId,
-        input.config.projectTargetId, input.config.publicationMode, input.config.teamId,
-        input.config.appId, input.config.channelId, input.config.botUserId,
-        input.config.memberUserIds, input.config.operatorUserIds, input.config.approverUserId,
-        input.config.adminUserIds, input.config.signingSecretRef, input.config.botTokenRef,
-        input.config.routeIdentity, now]);
+      await client.query(`INSERT INTO cp_slack_binding(organization_id,binding_id,
+        installation_id,binding_digest,state,credential_generation,credential_generation_digest,
+        route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,operator_user_ids,
+        approver_user_id,admin_user_ids,signing_secret_ref,bot_token_ref,project_target_id,
+        publication_mode,created_at,updated_at)
+        VALUES($1,$2,$3,$4,'active',1,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$19)`,
+      [input.organizationId,input.config.bindingId,input.config.installationId,
+        identity.bindingDigest,identity.credentialGenerationDigest,input.config.routeIdentity,
+        input.config.teamId,input.config.appId,input.config.channelId,input.config.botUserId,
+        input.config.memberUserIds,input.config.operatorUserIds,input.config.approverUserId,
+        input.config.adminUserIds,input.config.signingSecretRef,input.config.botTokenRef,
+        input.config.projectTargetId,input.config.publicationMode,now]);
       await recordManagementAudit(client, {
         organizationId: input.organizationId,
         actor: { kind: "bootstrap", id: "bootstrap-slack" },

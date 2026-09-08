@@ -99,6 +99,7 @@ function permissionWorkspace(name: string, config: Record<string, string>): stri
 function input(workspace: { kind: "repository" | "scratch"; path: string }, runId = "run_acp") {
   return {
     runId,
+    assertExecutionCurrent: async () => true,
     workspace,
     command: { rawText: "prepare the report", intent: "run" as const, args: {} },
     context: [{ kind: "file", uri: "README.md", visibility: "private" as const, title: "Readme" }],
@@ -249,14 +250,27 @@ describe("ACP executor", () => {
     expect(git(repo, ["show", "opentag/run_acp:acp-output.txt"])).toContain("ACP fixture");
     const prompt = JSON.parse(git(repo, ["show", "opentag/run_acp:acp-prompt.json"]));
     expect(prompt.text).toContain("prepare the report");
+    expect(prompt.text).toContain("Do not run, request, or recommend git add, git commit");
+    expect(prompt.text).toContain("separate exact Effect approval");
     expect(prompt.text).toContain("Do not inspect .env files");
     expect(prompt.text).toContain("github.repository.read");
     expect(prompt.text).not.toContain("Read the selected repository");
   }, 15_000);
 
+  it("does not commit after current execution authority is revoked", async () => {
+    const repo = initRepo(); const initial = git(repo, ["rev-parse", "HEAD"]).trim();
+    const executor = createAcpExecutor({ manifest: manifest("success") });
+    await expect(executor.run({ ...input({ kind: "repository", path: repo }, "run_revoked_commit"),
+      assertExecutionCurrent: async () => false }, { emit: async () => undefined }))
+      .rejects.toThrow("local_commit_authority_expired");
+    expect(git(repo, ["rev-parse", "opentag/run_revoked_commit"]).trim()).toBe(initial);
+    expect(git(repo, ["rev-parse", "HEAD"]).trim()).toBe(initial);
+  });
+
   it("produces proposal evidence in canonical Unicode code-point order", async () => {
     const repo = initRepo();
     const executor = createAcpExecutor({ manifest: manifest("unicode-order") });
+    const attestations: Array<{ currentRevision: string; currentTree: string }> = [];
     const result = await executor.run({
       ...input({ kind: "repository", path: repo }, "run_unicode_order"),
       attemptId: "attempt_unicode_order",
@@ -266,7 +280,10 @@ describe("ACP executor", () => {
         credentialId: "credential_unicode_order",
         leaseExpiresAt: "2099-01-01T00:00:00.000Z",
       },
-    }, { emit: async () => undefined });
+    }, { emit: async event => { if (event.workspaceAttestation) attestations.push(event.workspaceAttestation); } });
+
+    expect(attestations.at(-1)?.currentRevision).toBe(git(repo, ["rev-parse", "opentag/run_unicode_order^{commit}"]).trim());
+    expect(attestations.at(-1)?.currentTree).toBe(git(repo, ["rev-parse", "opentag/run_unicode_order^{tree}"]).trim());
 
     const proposal = result.artifacts?.find((artifact) => artifact.id.endsWith(":proposal-evidence"));
     expect((proposal?.metadata?.proposalEvidence as { changedFiles?: string[] } | undefined)?.changedFiles).toEqual([
@@ -366,6 +383,21 @@ describe("ACP executor", () => {
       outcome: { outcome: "selected", optionId: "reject-once" }
     });
   }, 15_000);
+
+  it.each(["local-write", "local-write-mismatch"])("uses native file readback, not tool success, for %s", async mode => {
+    const repo = initRepo(); const reports: Array<{ outcome: string; provider: string; localWriteObservation?: unknown }> = [];
+    const executor = createAcpExecutor({ manifest: manifest(mode) });
+    await executor.run({ ...input({ kind: "repository", path: repo }, `run_${mode}`),
+      attemptId: `attempt_${mode}`, attemptAuthority: { attemptNumber: 1, fencingTokenDigest: `sha256:${"a".repeat(64)}`,
+        credentialId: "credential_local_write", leaseExpiresAt: "2099-01-01T00:00:00.000Z" },
+      permissionResolver: async () => ({ actionId: "action_local", decision: "allow_once", material: true }),
+      materialActionReporter: async report => { reports.push(report); },
+    }, { emit: async () => undefined });
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.outcome).toBe(mode === "local-write" ? "succeeded" : "unknown");
+    expect(reports[0]?.provider).toBe(mode === "local-write" ? "local_workspace" : "acp");
+    expect(Boolean(reports[0]?.localWriteObservation)).toBe(mode === "local-write");
+  });
 
   it("pauses on the governed resolver and records an unverified ACP material outcome as unknown", async () => {
     const scratch = tempDir("governed");
@@ -834,6 +866,21 @@ describe("ACP executor", () => {
       executor.run(input({ kind: "scratch", path: scratch }, "run_malformed"), { emit: async (event) => void events.push(event.message) })
     ).rejects.toThrow(/ACP agent fixture-agent.*(?:protocol|exit)/i);
     expect(events.join("\n")).toMatch(/ACP diagnostic \(protocol\).*invalid NDJSON/iu);
+    const pid = Number(readFileSync(join(scratch, "acp-child-pid.txt"), "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 15_000);
+
+  it("preserves protocol failure when reporting that failure also fails", async () => {
+    const scratch = tempDir("diagnostic-sink-failure");
+    const executor = createAcpExecutor({ manifest: manifest("malformed-live"), cancelGraceMs: 100 });
+    await expect(executor.run(input({ kind: "scratch", path: scratch }, "run_diagnostic_sink_failure"), {
+      emit: async (event) => {
+        if (event.type === "executor.failed") throw new Error("secondary_sink_failure");
+      },
+    })).rejects.toMatchObject({
+      message: "ACP agent fixture-agent protocol or exit failure.",
+      cause: { message: expect.stringMatching(/invalid NDJSON/iu) },
+    });
     const pid = Number(readFileSync(join(scratch, "acp-child-pid.txt"), "utf8"));
     expect(() => process.kill(pid, 0)).toThrow();
   }, 15_000);

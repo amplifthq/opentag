@@ -54,6 +54,73 @@ from a Slack projection or process log.
 
 ## Procedure
 
+### Read-only recovery of an uncertain Slack projection
+
+Apply `0001_slack_delivery_observation.sql` after the current fresh baseline.
+It adds one nullable `reconciliation_receipt` field, no tables, and a narrowly
+guarded unknown-to-accepted transition. The retired pre-reset migration history
+still has no upgrade path. Take the usual database backup before migration.
+
+New versioned Slack messages carry `opentag_projection_v1` metadata with an
+opaque digest binding the frozen intent, revision/event sequence, target,
+provider binding and rendered request. The metadata contains no command text or
+raw credentials. Recovery requires Slack to return it via `include_all_metadata`;
+missing metadata, missing read permission or unsupported readback remains unknown.
+
+The minute-window observation job schedules durable per-intent jobs and runs at
+most one observation each minute across the installation. It uses only GET:
+`auth.test`, then the specific thread/message. Update lookups use exact timestamp
+bounds; creation lookups require a complete, unique bounded thread observation.
+The adapter verifies the workspace, bot and app, thread/message target, marker,
+text and blocks. Only Slack-added block IDs and default text flags are ignored.
+Extra attachments, altered controls, another version, absent/deleted messages,
+incomplete pagination, malformed or oversized responses never imply success or
+permission to resend. Reads time out after 10 seconds and are bounded to 2 MB.
+
+On an exact observation, the worker rechecks its job lease and the current source
+binding, locks the delivery truth key, and atomically records the observation,
+marks the delivery accepted, and settles the observation job. The immutable
+receipt retains the original unknown evidence, error and timestamp. A stale
+worker, disabled/rotated binding or changed payload cannot settle. Database
+triggers require the active observation lease and forbid receipt rewrites.
+Existing projection dispatch then resumes; an observed anchor also wakes its
+deferred projection. Neither observation nor recovery calls a Slack write API.
+
+Unconfirmed reads retain unknown and retry with bounded backoff (one minute to
+15 minutes, respecting a longer valid `Retry-After`). After 100 attempts the job
+fails visibly and requires operator review; it never clears or retries the
+uncertain delivery. Prior messages without the marker cannot be retroactively
+certified from matching text alone. This path does not recover reactions or
+unthreaded creates, does not revive a Run/Attempt, and does not grant approval.
+
+For acceptance, simulate a provider-accepted write whose response is lost, then
+verify: exactly one write, a matching read observation and immutable receipt,
+and only then a claimable newer projection. Repeat with wrong version/content,
+binding rotation, expired lease, restart, and a settlement rollback. Keep real
+provider canary evidence separate from these deterministic tests.
+
+### A0. Prove durable waiting before admission
+
+1. Establish real readiness, stop the Runner, and let the receipt expire (or be
+   pruned). Do not use a still-fresh receipt to claim offline recovery coverage.
+2. Post one bounded request. Its ingress reservation must remain `pending` with
+   no terminal resolution; its `source_ingress.process` job must remain pending
+   between checks, with `runner_not_ready` as its wait reason. At this point the
+   request is in custody, not an admitted Run or a promise of execution.
+3. Observe more readiness checks than the job's failure-attempt limit. Expected
+   dependency waits must not consume that budget or extend the original eight-hour
+   deadline. Actual processing failures still consume the budget.
+4. Restart the relay while the Runner remains offline. Confirm the same
+   reservation and job survive; do not resend or manually reset the source event.
+5. Start the Runner. Fresh current-generation readiness, the exact target binding
+   generation, and current source authorization must be checked before admission.
+   Confirm one Run is admitted from the original request, then continue with A.
+
+Expired waits close without execution. Deleted source content must not be
+redeemed after recovery. A previously terminally resolved request is not reopened
+by this fix: retain the failed canary record and use a new explicitly requested
+test message. This change adds no tables and requires no schema migration.
+
 ### A. Prove signed ingress and local execution
 
 1. Post a bounded engineering request in the private Slack test channel and
@@ -68,6 +135,44 @@ from a Slack projection or process log.
    discrepancy as the canary outcome.
 
 ### B. Stop at proposal unless a provider action is explicitly authorized
+
+Completion receipts bind the canonical digest of each whole artifact. Candidate
+settlement validates the artifact's internal evidence digest first, then requires
+the whole-artifact digest in the accepted executor receipt. These two digests
+have different purposes and are not interchangeable.
+
+For direct full-file ACP writes of at most 2 MB, the Runner can prepare a scoped
+observation before permission, then read the actual file after the tool update.
+Only an exact expected-content match in the same worktree produces a typed
+`local_workspace_write_observation_v1` receipt. The path is contained, the file
+must be regular with one hard link, and symlink replacement, changing file state,
+outside paths, unknown fields, partial edits and shell commands remain unproven.
+Proof contains digests, length and workspace identity, not local paths or bytes.
+The authenticated Runner is the evidence producer; model success text is not.
+
+Control Plane validates the proof scope/digest against the exact begun action and
+accepted workspace identity. Only a complete set of successful scoped local-write
+observations can satisfy proposal material readiness. Missing, external, failed
+or unknown outcomes still block. Historical unknown receipts remain immutable;
+an accepted observation appends evidence rather than rewriting history. This
+does not change cancellation/negative-start authority or grant external effects.
+
+Local staging and commit are Runner-owned finalization, not model shell
+permissions. The ACP executor edits/verifies and returns; it must not request
+`git add`, `git commit`, `git push`, or PR creation. After the child is confirmed
+stopped, the Runner rechecks current Attempt/fence/lease and the captured linked
+worktree, Git directory, branch and starting HEAD before staging and committing.
+It never stages in the user's primary checkout. Paths are literal and bounded
+to the worktree; redirected index/HEAD metadata and configured clean/process
+filters fail closed. Hooks, signing, fsmonitor, external diff/textconv and
+inherited Git routing variables are not executed during this finalization.
+The local commit uses the OpenTag author identity; failure retains the worktree
+and any staged evidence rather than resetting it or claiming completion.
+
+This does not add `command.execute` to the admission ceiling, does not grant
+agent-selected Git flags, and is not an OS sandbox against other concurrent host
+processes. A local commit is proposal material only: remote push and Draft PR
+creation still require the separate exact Effect approval described below.
 
 The preceding steps prove signed ingress, canonical lifecycle, pairing, and
 local ACP execution without creating a provider-side change. A proposal is not

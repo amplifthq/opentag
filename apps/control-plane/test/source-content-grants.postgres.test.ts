@@ -97,8 +97,6 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
       sourceDeliveryId: "d", sourceMessageId: "m", sourceVersionRef: "s:live:v1",
       purpose: "source_context", contentId: "content_live", payload: { text: "still required" },
       expiresAt: new Date("2026-08-28T00:01:00Z") });
-    await custody.addDependency({ organizationId: "org_a", contentId: "content_live",
-      sourceVersionRef: "s:live:v1", dependencyId: "run_live", terminal: false });
     now = new Date("2026-08-28T00:02:00Z");
     await expect(custody.issueReadGrant({ organizationId: "org_a", runId: "run_live",
       attemptId: "attempt_live", fenceDigest: "fence_live", contentIds: ["content_live"],
@@ -149,7 +147,8 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
     if (claim.kind === "claimed") expect(grants.rows[0]).toMatchObject({ run_id: "run_grant",
       attempt_id: claim.claim.attempt.id, fence_digest: claim.claim.attempt.fencingTokenDigest });
     const persisted = await fixture.pool.query<{ claim: unknown; grant: unknown }>(
-      `SELECT claim, to_jsonb(grant_record) AS grant FROM cp_hosted_claim claim_record
+      `SELECT claim_record.claim, to_jsonb(grant_record) AS grant
+       FROM cp_hosted_attempt claim_record
        JOIN cp_source_content_read_grant grant_record
          ON grant_record.organization_id = claim_record.organization_id
         AND grant_record.run_id = claim_record.run_id
@@ -166,6 +165,10 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
       await expect(hosted.cancelRun({ organizationId: "org_grant",
         runId: claim.claim.runId, reason: "test_cleanup" }))
         .resolves.toEqual({ kind: "cancelled" });
+      expect((await fixture.pool.query<{ terminal_at: Date | null }>(
+        "SELECT terminal_at FROM cp_source_content WHERE organization_id=$1 AND content_id=$2",
+        ["org_grant", "content_grant"],
+      )).rows[0]?.terminal_at).toBeInstanceOf(Date);
     }
 
     const missing = await hostedAdmissionFixture({ runId: "run_grant_missing",

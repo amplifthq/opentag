@@ -1,4 +1,4 @@
-import { buildHostedLifecycleRequestV1, computeControlPayloadDigestV1, computeControlReceiptDigestV1, computeSlackAppMentionSourceIdentityDigestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, computeHostedLifecycleReceiptIdV1, computeHostedLifecycleRequestIdV1, type HostedClaimRequestV1, type HostedClaimV1, type HostedHeartbeatRequestV1, type HostedProgressRequestV1, type HostedRejectStartRequestV1, type HostedRunningRequestV1, type HostedLifecycleReceiptEnvelopeV1, type OpenTagEvent } from "@opentag/core";
+import { buildHostedLifecycleRequestV1, computeControlPayloadDigestV1, computeControlReceiptDigestV1, computeSlackAppMentionSourceIdentityDigestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, computeHostedLifecycleReceiptIdV1, computeHostedLifecycleRequestIdV1, HostedCompleteRequestV1Schema, type HostedClaimRequestV1, type HostedClaimV1, type HostedHeartbeatRequestV1, type HostedProgressRequestV1, type HostedRejectStartRequestV1, type HostedRunningRequestV1, type HostedLifecycleReceiptEnvelopeV1, type OpenTagEvent } from "@opentag/core";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -92,7 +92,7 @@ async function fixture(input: {
         sourceEventId: providerEventId,
         receivedAt: observedAt,
         actor: { provider: "slack", providerUserId: "U1001", handle: "alice", organizationId: "T123" },
-        target: { mention: "@opentag", agentId: "opentag" },
+        target: { mention: "@opentag" },
         command: { rawText: body, intent: "fix", args: {} },
         context: [],
         workItem: {
@@ -487,8 +487,12 @@ async function runningRequest(claim: HostedClaimV1): Promise<HostedRunningReques
         executorCapabilityDigest: claim.authority.executorCapabilityDigest
     }) as HostedRunningRequestV1;
 }
-async function progressRequest(claim: HostedClaimV1): Promise<HostedProgressRequestV1> {
-    const progressDigest = await computeControlPayloadDigestV1({ type: "status", occurredAt: observedAt });
+async function progressRequest(
+    claim: HostedClaimV1,
+    occurredAt = observedAt,
+    evidence: Pick<HostedProgressRequestV1, "workspaceAttestation" | "interruptionEvidence"> = {},
+): Promise<HostedProgressRequestV1> {
+    const progressDigest = await computeControlPayloadDigestV1({ type: "status", occurredAt });
     return await buildHostedLifecycleRequestV1({
         action: "progress",
         organizationId: claim.organizationId,
@@ -501,10 +505,117 @@ async function progressRequest(claim: HostedClaimV1): Promise<HostedProgressRequ
             fencingToken: claim.attempt.fencingToken,
             fencingTokenDigest: claim.attempt.fencingTokenDigest
         },
-        occurredAt: observedAt,
+        occurredAt,
         progressId: `progress_${progressDigest.slice("sha256:".length)}`,
-        progressDigest
+        progressDigest,
+        ...evidence,
     }) as HostedProgressRequestV1;
+}
+async function progressReceipt(input: {
+    claim: HostedClaimV1;
+    request: HostedProgressRequestV1;
+}): Promise<HostedLifecycleReceiptEnvelopeV1> {
+    const payload = {
+        operation: "progress" as const,
+        occurredAt: input.request.occurredAt,
+        progressId: input.request.progressId,
+        progressDigest: input.request.progressDigest,
+        ...(input.request.workspaceAttestation ? { workspaceAttestation: input.request.workspaceAttestation } : {}),
+        ...(input.request.interruptionEvidence ? { interruptionEvidence: input.request.interruptionEvidence } : {}),
+    };
+    const base = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        receiptKind: "attempt_lifecycle" as const,
+        receiptId: await computeHostedLifecycleReceiptIdV1({
+            organizationId: input.claim.organizationId,
+            operationId: input.request.operationId,
+        }),
+        organizationId: input.claim.organizationId,
+        requestId: input.request.requestId,
+        operationId: input.request.operationId,
+        requestDigest: input.request.requestDigest,
+        requiredCapabilities: ["relay.lifecycle.v1"] as const,
+        producer: {
+            kind: "runner" as const,
+            id: input.claim.runnerId,
+            credentialId: input.claim.authority.credentialId,
+        },
+        identity: {
+            namespace: "opentag.control.receipt/attempt-lifecycle/v1" as const,
+            parts: [
+                input.claim.organizationId,
+                input.claim.runId,
+                input.claim.attempt.id,
+                "progress" as const,
+                input.request.operationId,
+            ] as const,
+        },
+        observedAt: input.request.occurredAt,
+        payloadDigest: await computeControlPayloadDigestV1(payload),
+        runId: input.claim.runId,
+        attempt: {
+            attemptId: input.claim.attempt.id,
+            attemptNumber: input.claim.attempt.number,
+            epoch: input.claim.attempt.epoch,
+            fencingTokenDigest: input.claim.attempt.fencingTokenDigest,
+        },
+        payload,
+    };
+    return { ...base, receiptDigest: await computeControlReceiptDigestV1(base) };
+}
+async function claimLifecycleOperation(
+    repo: ReturnType<typeof createPairedRunnerRepository>,
+    operationId: string,
+    now: Date,
+) {
+    const claimed = await repo.claimDueHostedLifecycleOperations({
+        destinationId: "cloud-1",
+        organizationId: "org-1",
+        leaseOwner: "lifecycle-retention-pump",
+        leaseSeconds: 30,
+        now,
+    });
+    const operation = claimed.find((candidate) => candidate.operationId === operationId);
+    if (!operation?.leaseToken) throw new Error("lifecycle operation was not claimable");
+    return operation;
+}
+async function acknowledgeHeartbeat(input: {
+    repo: ReturnType<typeof createPairedRunnerRepository>;
+    claim: HostedClaimV1;
+    expectedLeaseExpiresAt: string;
+    acceptedLeaseExpiresAt: string;
+    now: Date;
+}) {
+    vi.setSystemTime(input.now);
+    const request = await heartbeatRequest({
+        claim: input.claim,
+        expectedLeaseExpiresAt: input.expectedLeaseExpiresAt,
+        occurredAt: input.now.toISOString(),
+    });
+    await input.repo.beginHostedHeartbeatOperation({
+        ...heartbeatAuthority,
+        runId: input.claim.runId,
+        attemptId: input.claim.attempt.id,
+        fencingToken: input.claim.attempt.fencingToken,
+        request,
+    });
+    const operation = await claimLifecycleOperation(input.repo, request.operationId, input.now);
+    const receipt = await heartbeatReceipt({
+        claim: input.claim,
+        request,
+        leaseExpiresAt: input.acceptedLeaseExpiresAt,
+    });
+    const outcome = await input.repo.acknowledgeHostedLifecycleOperation({
+        destinationId: "cloud-1",
+        organizationId: input.claim.organizationId,
+        operationId: request.operationId,
+        leaseToken: operation.leaseToken!,
+        receipt,
+        now: input.now,
+    });
+    if (outcome !== "acknowledged") throw new Error("heartbeat acknowledgement failed");
+    return { operation, receipt, request };
 }
 async function completeHostedExecution(
     repo: ReturnType<typeof createPairedRunnerRepository>,
@@ -548,6 +659,109 @@ async function completeHostedExecution(
         organizationId: claim.organizationId,
         credentialId: claim.authority.credentialId,
         request,
+    });
+}
+function proposalResult(claim: HostedClaimV1, suffix: string) {
+    const changedFiles = [`src/${suffix}.ts`];
+    const evidenceInput = {
+        schemaVersion: 1 as const,
+        kind: "attempt_proposal_evidence" as const,
+        attemptId: claim.attempt.id,
+        attemptNumber: claim.attempt.number,
+        workspaceId: `workspace_${suffix}`,
+        workspacePathDigest: canonicalSha256Json(`workspace:${suffix}`),
+        branch: `opentag/${claim.runId}`,
+        baseRevision: "a".repeat(40),
+        finalRevision: "b".repeat(40),
+        finalTree: "c".repeat(40),
+        diffDigest: canonicalSha256Json(`diff:${suffix}`),
+        changedFilesDigest: canonicalSha256Json(changedFiles),
+        changedFiles,
+        verificationEvidenceDigests: [canonicalSha256Json(`verification:${suffix}`)],
+        limitations: ["No remote publication was attempted."],
+    };
+    const evidenceDigest = canonicalSha256Json(evidenceInput);
+    const artifactInput = {
+        id: `${claim.runId}:proposal-evidence`,
+        type: "patch_summary" as const,
+        kind: "patch" as const,
+        title: "Immutable proposal evidence" as const,
+        uri: `opentag://run/${encodeURIComponent(claim.runId)}/proposal-evidence`,
+        summary: "Attempt-bound proposal evidence captured; completion readiness is not assessed here.",
+        sourceRunId: claim.runId,
+        createdAt: observedAt,
+        metadata: {
+            proposalEvidence: { ...evidenceInput, evidenceDigest },
+            evidenceDigest,
+            readiness: "not_assessed" as const,
+        },
+    };
+    const proposalArtifact = { ...artifactInput, metadata: {
+        ...artifactInput.metadata,
+        artifactDigest: canonicalSha256Json(artifactInput),
+    } };
+    return { conclusion: "success" as const, summary: "done", artifacts: [proposalArtifact] };
+}
+async function acknowledgeCompletion(input: {
+    sqlite: Database.Database;
+    repo: ReturnType<typeof createPairedRunnerRepository>;
+    claim: HostedClaimV1;
+    now: Date;
+}) {
+    const stored = input.sqlite.prepare(`SELECT request_json AS requestJson
+      FROM hosted_lifecycle_operations WHERE run_id=? AND action='complete'`).get(
+        input.claim.runId,
+    ) as { requestJson: string };
+    const request = HostedCompleteRequestV1Schema.parse(JSON.parse(stored.requestJson));
+    const operation = await claimLifecycleOperation(input.repo, request.operationId, input.now);
+    const payload = {
+        operation: "executor_result" as const,
+        occurredAt: request.occurredAt,
+        conclusion: request.conclusion,
+        reasonCode: request.reasonCode,
+        resultDigest: request.resultDigest,
+        artifactDigests: request.artifactDigests,
+        evidenceDigests: request.evidenceDigests,
+    };
+    const base = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        receiptKind: "attempt_lifecycle" as const,
+        receiptId: await computeHostedLifecycleReceiptIdV1({
+            organizationId: input.claim.organizationId,
+            operationId: request.operationId,
+        }),
+        organizationId: input.claim.organizationId,
+        requestId: request.requestId,
+        operationId: request.operationId,
+        requestDigest: request.requestDigest,
+        requiredCapabilities: ["relay.lifecycle.v1"] as const,
+        producer: { kind: "runner" as const, id: input.claim.runnerId,
+            credentialId: input.claim.authority.credentialId },
+        identity: {
+            namespace: "opentag.control.receipt/attempt-lifecycle/v1" as const,
+            parts: [input.claim.organizationId, input.claim.runId, input.claim.attempt.id,
+                "executor_result" as const, request.operationId] as const,
+        },
+        observedAt: request.occurredAt,
+        payloadDigest: await computeControlPayloadDigestV1(payload),
+        runId: input.claim.runId,
+        attempt: {
+            attemptId: input.claim.attempt.id,
+            attemptNumber: input.claim.attempt.number,
+            epoch: input.claim.attempt.epoch,
+            fencingTokenDigest: input.claim.attempt.fencingTokenDigest,
+        },
+        payload,
+    };
+    const receipt = { ...base, receiptDigest: await computeControlReceiptDigestV1(base) };
+    return input.repo.acknowledgeHostedLifecycleOperation({
+        destinationId: "cloud-1",
+        organizationId: input.claim.organizationId,
+        operationId: request.operationId,
+        leaseToken: operation.leaseToken!,
+        receipt,
+        now: input.now,
     });
 }
 function restoreRecoverableHostedAssignment(sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>): void {
@@ -635,6 +849,75 @@ describe("hosted assigned Run import", () => {
         restartedSqlite.prepare("UPDATE hosted_claim_operations SET state='empty' WHERE operation_id=?")
             .run(value.request.operationId);
         await expect(restarted.getHostedSucceededPublicationAuthority(exact)).resolves.toBeNull();
+        restartedSqlite.close();
+    });
+    it("durably marks handled proposals without starving an older deferred completion", async () => {
+        vi.useFakeTimers();
+        const firstAt = new Date(observedAt);
+        vi.setSystemTime(firstAt);
+        const directory = await mkdtemp(join(tmpdir(), "opentag-proposal-settlement-"));
+        tempDirs.push(directory);
+        const path = join(directory, "store.sqlite");
+        const sqlite = new Database(path);
+        migratePairedRunnerSchema(sqlite);
+        const repo = createPairedRunnerRepository(drizzle(sqlite));
+        const older = await fixture({ runId: "proposal-run-a", admissionId: "admission-a",
+            admissionOperationId: "admission-operation-a", claimOperationId: "claim-operation-a",
+            requestId: "claim-request-a", attemptId: "attempt-a", deliveryId: "delivery-a",
+            providerEventId: "event-a", fencingToken: "fence-a" });
+        const newer = await fixture({ runId: "proposal-run-b", admissionId: "admission-b",
+            admissionOperationId: "admission-operation-b", claimOperationId: "claim-operation-b",
+            requestId: "claim-request-b", attemptId: "attempt-b", deliveryId: "delivery-b",
+            providerEventId: "event-b", fencingToken: "fence-b" });
+        for (const [suffix, value] of [["a", older], ["b", newer]] as const) {
+            await begin(repo, value);
+            await repo.importHostedAssignedRun(value);
+            await startHostedExecution(repo, value.claim);
+            await expect(completeHostedExecution(repo, value.claim,
+                proposalResult(value.claim, suffix))).resolves.toBe("completed");
+        }
+        await expect(acknowledgeCompletion({ sqlite, repo, claim: newer.claim, now: firstAt }))
+            .resolves.toBe("acknowledged");
+        const first = await repo.getHostedProposalSettlementForRetry({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+        });
+        expect(first).toMatchObject({ runId: newer.claim.runId,
+            policySnapshotId: newer.claim.authority.admissionPolicySnapshotId,
+            policySnapshotDigest: newer.claim.authority.admissionPolicySnapshotDigest });
+        await expect(repo.markHostedProposalSettlementHandled({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+            runId: first!.runId, candidateId: first!.candidateId, now: firstAt,
+        })).resolves.toBe("handled");
+        await expect(repo.markHostedProposalSettlementHandled({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+            runId: first!.runId, candidateId: first!.candidateId,
+            now: new Date(firstAt.getTime() + 1_000),
+        })).resolves.toBe("replayed");
+        await expect(repo.markHostedProposalSettlementHandled({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+            runId: first!.runId, candidateId: "candidate_wrong", now: firstAt,
+        })).rejects.toMatchObject({ code: "HOSTED_IMPORT_AUTHORITY_CONFLICT" });
+
+        const olderAckAt = new Date(firstAt.getTime() + 31_000);
+        vi.setSystemTime(olderAckAt);
+        await expect(acknowledgeCompletion({ sqlite, repo, claim: older.claim, now: olderAckAt }))
+            .resolves.toBe("acknowledged");
+        const second = await repo.getHostedProposalSettlementForRetry({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+        });
+        expect(second).toMatchObject({ runId: older.claim.runId });
+        await repo.markHostedProposalSettlementHandled({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+            runId: second!.runId, candidateId: second!.candidateId, now: olderAckAt,
+        });
+        sqlite.close();
+
+        const restartedSqlite = new Database(path);
+        migratePairedRunnerSchema(restartedSqlite);
+        const restarted = createPairedRunnerRepository(drizzle(restartedSqlite));
+        await expect(restarted.getHostedProposalSettlementForRetry({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+        })).resolves.toBeNull();
         restartedSqlite.close();
     });
     it("persists only a metadata shell and never stores redeemed execution plaintext", async () => {
@@ -920,7 +1203,6 @@ describe("hosted assigned Run import", () => {
                     .run(value.claim.runId),
                 probe: async (repo: ReturnType<typeof createPairedRunnerRepository>, value: Awaited<ReturnType<typeof fixture>>) => expect(repo.recordHostedProgressLocally({ ...heartbeatAuthority, runId: value.claim.runId,
                     attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
-                    message: "content-free", idempotencyKey: "progress-authority-loss",
                     request: await progressRequest(value.claim) }))
                     .rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT"),
             },
@@ -1028,13 +1310,109 @@ describe("hosted assigned Run import", () => {
         const second = createPairedRunnerRepository(drizzle(secondSqlite));
         await expect(second.getHostedClaimOperationForRetry({ destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1" }))
             .resolves.toMatchObject({ request: value.request, state: "pending" });
+        expect(secondSqlite.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'source_deliveries'
+    `).get()).toBeUndefined();
+        secondSqlite.exec(`CREATE TRIGGER abort_hosted_run_import
+      BEFORE INSERT ON hosted_run_imports
+      BEGIN SELECT RAISE(ABORT, 'injected hosted import failure'); END;`);
+        await expect(second.importHostedAssignedRun(value))
+            .rejects.toThrow("injected hosted import failure");
+        expect(secondSqlite.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM runs) AS runs,
+        (SELECT COUNT(*) FROM attempts) AS attempts,
+        (SELECT COUNT(*) FROM hosted_run_imports) AS imports
+    `).get()).toEqual({ runs: 0, attempts: 0, imports: 0 });
+        await expect(second.getHostedClaimOperationForRetry({ destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1" }))
+            .resolves.toMatchObject({ request: value.request, state: "pending" });
+        secondSqlite.exec("DROP TRIGGER abort_hosted_run_import");
         await second.importHostedAssignedRun(value);
+        expect(secondSqlite.prepare(`
+      SELECT source_provider AS sourceProvider, source_delivery_id AS sourceDeliveryId
+      FROM hosted_run_imports WHERE run_id = ?
+    `).get(value.claim.runId)).toEqual({
+            sourceProvider: "slack",
+            sourceDeliveryId: value.claim.hostedAdmission.deliveryId,
+        });
+        expect(secondSqlite.prepare("SELECT state FROM hosted_claim_operations WHERE operation_id = ?")
+            .get(value.request.operationId)).toEqual({ state: "claimed" });
         secondSqlite.close();
         const thirdSqlite = new Database(path);
         migratePairedRunnerSchema(thirdSqlite);
+        expect(thirdSqlite.prepare("SELECT state FROM hosted_claim_operations WHERE operation_id = ?")
+            .get(value.request.operationId)).toEqual({ state: "claimed" });
         await expect(createPairedRunnerRepository(drizzle(thirdSqlite)).importHostedAssignedRun(value))
             .resolves.toMatchObject({ outcome: "replayed" });
         thirdSqlite.close();
+    });
+    it("retains an exact pending claim across request and empty-response crash windows, then forgets it atomically", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "opentag-empty-claim-recovery-"));
+        tempDirs.push(directory);
+        const path = join(directory, "store.sqlite");
+        const value = await fixture();
+
+        const firstSqlite = new Database(path);
+        migratePairedRunnerSchema(firstSqlite);
+        const first = createPairedRunnerRepository(drizzle(firstSqlite));
+        await begin(first, value);
+        firstSqlite.close();
+
+        const secondSqlite = new Database(path);
+        migratePairedRunnerSchema(secondSqlite);
+        const second = createPairedRunnerRepository(drizzle(secondSqlite));
+        await expect(begin(second, value)).resolves.toMatchObject({
+            outcome: "replayed",
+            operation: { request: value.request, state: "pending" }
+        });
+        secondSqlite.close();
+
+        const thirdSqlite = new Database(path);
+        migratePairedRunnerSchema(thirdSqlite);
+        const third = createPairedRunnerRepository(drizzle(thirdSqlite));
+        await expect(third.getHostedClaimOperationForRetry({
+            destinationId: "cloud-1",
+            organizationId: "org-1",
+            runnerId: "runner-1"
+        })).resolves.toMatchObject({ request: value.request, state: "pending" });
+        await expect(third.acknowledgeHostedClaimEmpty({
+            operationId: value.request.operationId,
+            requestId: "wrong-request"
+        })).rejects.toMatchObject({ code: "HOSTED_CLAIM_OPERATION_CONFLICT" });
+        expect(thirdSqlite.prepare("SELECT state FROM hosted_claim_operations").get())
+            .toEqual({ state: "pending" });
+
+        thirdSqlite.exec(`CREATE TRIGGER abort_empty_claim_cleanup
+      BEFORE DELETE ON hosted_claim_operations
+      BEGIN SELECT RAISE(ABORT, 'injected terminal claim cleanup failure'); END;`);
+        await expect(third.acknowledgeHostedClaimEmpty({
+            operationId: value.request.operationId,
+            requestId: value.request.requestId
+        })).rejects.toThrow("injected terminal claim cleanup failure");
+        expect(thirdSqlite.prepare("SELECT state FROM hosted_claim_operations").get())
+            .toEqual({ state: "pending" });
+        thirdSqlite.exec("DROP TRIGGER abort_empty_claim_cleanup");
+
+        await expect(third.acknowledgeHostedClaimEmpty({
+            operationId: value.request.operationId,
+            requestId: value.request.requestId
+        })).resolves.toMatchObject({ state: "empty", acknowledgedAt: expect.any(String) });
+        expect(thirdSqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations").get())
+            .toEqual({ count: 0 });
+        thirdSqlite.close();
+
+        const fourthSqlite = new Database(path);
+        migratePairedRunnerSchema(fourthSqlite);
+        const fourth = createPairedRunnerRepository(drizzle(fourthSqlite));
+        await expect(fourth.getHostedClaimOperationForRetry({
+            destinationId: "cloud-1",
+            organizationId: "org-1",
+            runnerId: "runner-1"
+        })).resolves.toBeNull();
+        expect(fourthSqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations").get())
+            .toEqual({ count: 0 });
+        fourthSqlite.close();
     });
     it("expires recovery fail-closed, then recovers and starts only the later Cloud attempt", async () => {
         vi.useFakeTimers();
@@ -1289,7 +1667,6 @@ describe("hosted assigned Run import", () => {
             attemptId: value.claim.attempt.id,
             fencingToken: value.claim.attempt.fencingToken,
             executorId: value.claim.executorId,
-            reason: "source redemption failed",
             request: rejectRequest
         };
         sqlite.exec(`CREATE TRIGGER reject_preimport_lifecycle_insert
@@ -1420,7 +1797,6 @@ describe("hosted assigned Run import", () => {
             attemptId: value.claim.attempt.id,
             fencingToken: value.claim.attempt.fencingToken,
             executorId: value.claim.executorId,
-            reason: "executor start failed",
             request: rejectRequest
         });
         const [leasedReject] = await repo.claimDueHostedLifecycleOperations({
@@ -1460,7 +1836,8 @@ describe("hosted assigned Run import", () => {
             ["admission", await fixture({ runId: "run-2", claimOperationId: "claim-op-2", requestId: "request-2", attemptId: "attempt-2", deliveryId: "delivery-2", providerEventId: "790", fencingToken: "fence-2" }), "HOSTED_IMPORT_ADMISSION_CONFLICT"],
             ["operation", await fixture({ runId: "run-2", admissionId: "admission-2", claimOperationId: "claim-op-2", requestId: "request-2", attemptId: "attempt-2", deliveryId: "delivery-2", providerEventId: "790", fencingToken: "fence-2" }), "HOSTED_IMPORT_OPERATION_CONFLICT"],
             ["attempt", await fixture({ runId: "run-2", admissionId: "admission-2", admissionOperationId: "admission-op-2", claimOperationId: "claim-op-2", requestId: "request-2", deliveryId: "delivery-2", providerEventId: "790", fencingToken: "fence-2" }), "HOSTED_IMPORT_ATTEMPT_CONFLICT"],
-            ["fence", await fixture({ runId: "run-2", admissionId: "admission-2", admissionOperationId: "admission-op-2", claimOperationId: "claim-op-2", requestId: "request-2", attemptId: "attempt-2", deliveryId: "delivery-2", providerEventId: "790" }), "HOSTED_IMPORT_FENCE_CONFLICT"]
+            ["fence", await fixture({ runId: "run-2", admissionId: "admission-2", admissionOperationId: "admission-op-2", claimOperationId: "claim-op-2", requestId: "request-2", attemptId: "attempt-2", deliveryId: "delivery-2", providerEventId: "790" }), "HOSTED_IMPORT_FENCE_CONFLICT"],
+            ["source delivery", await fixture({ runId: "run-2", admissionId: "admission-2", admissionOperationId: "admission-op-2", claimOperationId: "claim-op-2", requestId: "request-2", attemptId: "attempt-2", providerEventId: "790", body: "different source payload", fencingToken: "fence-2" }), "HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT"]
         ];
         for (const [, collision, code] of cases) {
             const sqlite = new Database(":memory:");
@@ -1472,6 +1849,7 @@ describe("hosted assigned Run import", () => {
             await begin(repo, collision);
             await expect(repo.importHostedAssignedRun(collision)).rejects.toMatchObject({ code });
             expect(sqlite.prepare("SELECT COUNT(*) count FROM runs").get()).toEqual({ count: 1 });
+            expect(sqlite.prepare("SELECT COUNT(*) count FROM hosted_run_imports").get()).toEqual({ count: 1 });
             sqlite.close();
         }
     });
@@ -1497,6 +1875,8 @@ describe("hosted assigned Run import", () => {
         const proposed = await fixture({ claimOperationId: "claim-op-2", requestId: "request-2" });
         await expect(begin(repo, proposed)).resolves.toMatchObject({ outcome: "replayed", operation: { request: first.request } });
         await repo.acknowledgeHostedClaimEmpty({ operationId: first.request.operationId, requestId: first.request.requestId });
+        expect(sqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations").get())
+            .toEqual({ count: 0 });
         await expect(begin(repo, proposed)).resolves.toMatchObject({ outcome: "created", operation: { request: proposed.request } });
         await expect(repo.beginHostedClaimOperation({
             destinationId: "other-cloud",
@@ -1504,6 +1884,33 @@ describe("hosted assigned Run import", () => {
             runnerId: "runner-1",
             request: { ...proposed.request, requestId: "drifted" }
         })).rejects.toMatchObject({ code: "HOSTED_CLAIM_OPERATION_CONFLICT" });
+        expect(sqlite.prepare("SELECT state FROM hosted_claim_operations").get())
+            .toEqual({ state: "pending" });
+    });
+    it("keeps retained claim rows at zero across sustained empty polling", async () => {
+        const sqlite = new Database(":memory:");
+        migratePairedRunnerSchema(sqlite);
+        const repo = createPairedRunnerRepository(drizzle(sqlite));
+        let maximumRetained = 0;
+        for (let index = 0; index < 512; index += 1) {
+            const claimRequest = request(`empty-operation-${index}`, `empty-request-${index}`);
+            await repo.beginHostedClaimOperation({
+                destinationId: "cloud-1",
+                organizationId: "org-1",
+                runnerId: "runner-1",
+                request: claimRequest
+            });
+            await repo.acknowledgeHostedClaimEmpty({
+                operationId: claimRequest.operationId,
+                requestId: claimRequest.requestId
+            });
+            const row = sqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations")
+                .get() as { count: number };
+            maximumRetained = Math.max(maximumRetained, row.count);
+        }
+        expect(maximumRetained).toBe(0);
+        expect(sqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations").get())
+            .toEqual({ count: 0 });
     });
     it("terminally abandons only an authoritative pending-operation rejection", async () => {
         const sqlite = new Database(":memory:");
@@ -1511,11 +1918,24 @@ describe("hosted assigned Run import", () => {
         const repo = createPairedRunnerRepository(drizzle(sqlite));
         const value = await fixture();
         await begin(repo, value);
+        sqlite.exec(`CREATE TRIGGER abort_abandoned_claim_cleanup
+      BEFORE DELETE ON hosted_claim_operations
+      BEGIN SELECT RAISE(ABORT, 'injected abandoned claim cleanup failure'); END;`);
+        await expect(repo.abandonHostedClaimOperation({
+            operationId: value.request.operationId,
+            requestId: value.request.requestId,
+            reasonCode: "stale_control_authority"
+        })).rejects.toThrow("injected abandoned claim cleanup failure");
+        expect(sqlite.prepare("SELECT state FROM hosted_claim_operations").get())
+            .toEqual({ state: "pending" });
+        sqlite.exec("DROP TRIGGER abort_abandoned_claim_cleanup");
         await expect(repo.abandonHostedClaimOperation({
             operationId: value.request.operationId,
             requestId: value.request.requestId,
             reasonCode: "stale_control_authority"
         })).resolves.toMatchObject({ state: "empty", terminalReasonCode: "stale_control_authority" });
+        expect(sqlite.prepare("SELECT COUNT(*) AS count FROM hosted_claim_operations").get())
+            .toEqual({ count: 0 });
         await expect(repo.getHostedClaimOperationForRetry({
             destinationId: "cloud-1",
             organizationId: "org-1",
@@ -1632,7 +2052,7 @@ describe("hosted heartbeat lease authority", () => {
         await expect(repo.completeHostedRunLocally({
             ...completion,
             request: alternateRequest,
-        })).rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_OPERATION_CONFLICT" });
+        })).rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_IDEMPOTENCY_CONFLICT" });
         expect(sqlite.prepare("SELECT status FROM runs WHERE id = ?").get(value.claim.runId))
             .toEqual({ status: "succeeded" });
         expect(sqlite.prepare("SELECT action, state FROM hosted_lifecycle_operations WHERE action = 'complete'").get())
@@ -1956,5 +2376,381 @@ describe("hosted heartbeat lease authority", () => {
             .get(value.claim.attempt.id)).toEqual({ lease_expires_at: "2026-08-10T00:04:00.000Z" });
         expect(sqlite.prepare("SELECT state FROM hosted_lifecycle_operations WHERE operation_id = ?")
             .get(nextRequest.operationId)).toEqual({ state: "leased" });
+    });
+    it.each([false, true])("bounds acknowledged heartbeat and progress history across restart (evidence=%s)", async (withEvidence) => {
+        vi.useFakeTimers();
+        const directory = await mkdtemp(join(tmpdir(), "opentag-lifecycle-retention-"));
+        tempDirs.push(directory);
+        const path = join(directory, "store.sqlite");
+        const initialNow = new Date("2026-08-10T00:01:00.000Z");
+        const initialLease = "2026-08-10T00:10:00.000Z";
+        vi.setSystemTime(initialNow);
+        const value = await fixture({ leaseExpiresAt: initialLease });
+        const firstSqlite = new Database(path);
+        migratePairedRunnerSchema(firstSqlite);
+        const first = createPairedRunnerRepository(drizzle(firstSqlite));
+        await begin(first, value);
+        await first.importHostedAssignedRun(value);
+        await startHostedExecution(first, value.claim);
+
+        let acceptedLease = initialLease;
+        let maximumHeartbeats = 0;
+        for (let index = 0; index < 128; index += 1) {
+            const now = new Date(initialNow.getTime() + (index + 1) * 1000);
+            const nextLease = new Date(Date.parse(initialLease) + (index + 1) * 60_000).toISOString();
+            await acknowledgeHeartbeat({
+                repo: first,
+                claim: value.claim,
+                expectedLeaseExpiresAt: acceptedLease,
+                acceptedLeaseExpiresAt: nextLease,
+                now,
+            });
+            acceptedLease = nextLease;
+            const { count } = firstSqlite.prepare(`
+        SELECT COUNT(*) AS count FROM hosted_lifecycle_operations
+        WHERE action = 'heartbeat'
+      `).get() as { count: number };
+            maximumHeartbeats = Math.max(maximumHeartbeats, count);
+        }
+        expect(maximumHeartbeats).toBe(1);
+        expect(firstSqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "heartbeat", state: "acknowledged", sequence: 129 },
+        ]);
+        firstSqlite.close();
+
+        const progressAt = new Date(initialNow.getTime() + 129_000);
+        vi.setSystemTime(progressAt);
+        const secondSqlite = new Database(path);
+        migratePairedRunnerSchema(secondSqlite);
+        const second = createPairedRunnerRepository(drizzle(secondSqlite));
+        await expect(second.getHostedExecutionLease({
+            ...heartbeatAuthority,
+            runId: value.claim.runId,
+            attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken,
+        })).resolves.toEqual({ leaseExpiresAt: acceptedLease });
+        const request = await progressRequest(value.claim, progressAt.toISOString(), withEvidence ? {
+            workspaceAttestation: {
+                workspaceId: "workspace-1", workspacePathDigest: digestA,
+                repositoryPathDigest: digestA, worktreeIdentityDigest: digestA,
+                baseRevision: "a".repeat(40), currentRevision: "a".repeat(40),
+                currentTree: "b".repeat(40), workspaceStateDigest: digestB,
+                attemptId: value.claim.attempt.id, attemptNumber: value.claim.attempt.number,
+                fencingTokenDigest: value.claim.attempt.fencingTokenDigest,
+                credentialId: value.claim.authority.credentialId, leaseExpiresAt: acceptedLease,
+            },
+            interruptionEvidence: {
+                state: "interrupted_evidence", runId: value.claim.runId,
+                attemptId: value.claim.attempt.id, attemptNumber: value.claim.attempt.number,
+                workspaceId: "workspace-1", workspacePathDigest: digestA,
+                fencingTokenDigest: value.claim.attempt.fencingTokenDigest,
+                reason: "cancelled", observedAt: progressAt.toISOString(),
+                processStop: "unconfirmed", materialOutcome: "outcome_unknown",
+            },
+        } : {});
+        const progressInput = {
+            ...heartbeatAuthority,
+            runId: value.claim.runId,
+            attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken,
+            request,
+        };
+        await expect(second.recordHostedProgressLocally(progressInput)).resolves.toMatchObject({
+            outcome: "recorded",
+            operation: { action: "progress", state: "pending", sequence: 130 },
+        });
+        secondSqlite.close();
+
+        const thirdSqlite = new Database(path);
+        migratePairedRunnerSchema(thirdSqlite);
+        const third = createPairedRunnerRepository(drizzle(thirdSqlite));
+        await expect(third.recordHostedProgressLocally(progressInput)).resolves.toMatchObject({
+            outcome: "duplicate",
+            operation: { operationId: request.operationId, state: "pending", sequence: 130 },
+        });
+        const operation = await claimLifecycleOperation(third, request.operationId, progressAt);
+        await expect(third.acknowledgeHostedLifecycleOperation({
+            destinationId: "cloud-1",
+            organizationId: value.claim.organizationId,
+            operationId: request.operationId,
+            leaseToken: operation.leaseToken!,
+            receipt: await progressReceipt({ claim: value.claim, request }),
+            now: progressAt,
+        })).resolves.toBe("acknowledged");
+        expect(thirdSqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "progress", state: "acknowledged", sequence: 130 },
+        ]);
+        await expect(third.recordHostedProgressLocally(progressInput)).resolves.toMatchObject({
+            outcome: "duplicate",
+            operation: { operationId: request.operationId, state: "acknowledged", sequence: 130 },
+        });
+        const heartbeatAfterProgressAt = new Date(initialNow.getTime() + 130_000);
+        if (request.workspaceAttestation) {
+            const tampered = structuredClone(request);
+            tampered.workspaceAttestation!.workspaceStateDigest = digestA;
+            await expect(third.recordHostedProgressLocally({ ...progressInput, request: tampered }))
+                .rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_OPERATION_INVALID" });
+            const changedRequest = await buildHostedLifecycleRequestV1({
+                organizationId: value.claim.organizationId, runnerId: value.claim.runnerId,
+                runId: value.claim.runId, action: "progress", ...tampered,
+            }) as HostedProgressRequestV1;
+            await expect(third.recordHostedProgressLocally({ ...progressInput, request: changedRequest }))
+                .rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_IDEMPOTENCY_CONFLICT" });
+        }
+        const latestHeartbeat = await acknowledgeHeartbeat({
+            repo: third,
+            claim: value.claim,
+            expectedLeaseExpiresAt: acceptedLease,
+            acceptedLeaseExpiresAt: new Date(Date.parse(acceptedLease) + 60_000).toISOString(),
+            now: heartbeatAfterProgressAt,
+        });
+        await expect(third.recordHostedProgressLocally({
+            ...heartbeatAuthority,
+            runId: value.claim.runId,
+            attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken,
+            request,
+        })).rejects.toMatchObject({ code: "HOSTED_LIFECYCLE_SIGNAL_ORDER_CONFLICT" });
+        expect(thirdSqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "heartbeat", state: "acknowledged", sequence: 131 },
+        ]);
+        expect(() => thirdSqlite.prepare(`
+      DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
+    `).run(latestHeartbeat.request.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
+        const nextProgressAt = new Date(heartbeatAfterProgressAt.getTime() + 1_000);
+        vi.setSystemTime(nextProgressAt);
+        const nextProgress = await progressRequest(value.claim, nextProgressAt.toISOString());
+        await expect(third.recordHostedProgressLocally({
+            ...progressInput, request: nextProgress,
+        })).resolves.toMatchObject({ outcome: "recorded",
+            operation: { sequence: 132, state: "pending" } });
+        thirdSqlite.close();
+    });
+    it("rolls successor acknowledgement and retention back together, then replays after restart", async () => {
+        vi.useFakeTimers();
+        const directory = await mkdtemp(join(tmpdir(), "opentag-lifecycle-retention-crash-"));
+        tempDirs.push(directory);
+        const path = join(directory, "store.sqlite");
+        const initialNow = new Date("2026-08-10T00:01:00.000Z");
+        const initialLease = "2026-08-10T00:10:00.000Z";
+        vi.setSystemTime(initialNow);
+        const value = await fixture({ leaseExpiresAt: initialLease });
+        const firstSqlite = new Database(path);
+        migratePairedRunnerSchema(firstSqlite);
+        const first = createPairedRunnerRepository(drizzle(firstSqlite));
+        await begin(first, value);
+        await first.importHostedAssignedRun(value);
+        await startHostedExecution(first, value.claim);
+        const firstHeartbeat = await acknowledgeHeartbeat({
+            repo: first,
+            claim: value.claim,
+            expectedLeaseExpiresAt: initialLease,
+            acceptedLeaseExpiresAt: "2026-08-10T00:11:00.000Z",
+            now: new Date("2026-08-10T00:01:10.000Z"),
+        });
+
+        const secondHeartbeatAt = new Date("2026-08-10T00:01:20.000Z");
+        vi.setSystemTime(secondHeartbeatAt);
+        const secondRequest = await heartbeatRequest({
+            claim: value.claim,
+            expectedLeaseExpiresAt: "2026-08-10T00:11:00.000Z",
+            occurredAt: secondHeartbeatAt.toISOString(),
+        });
+        await first.beginHostedHeartbeatOperation({
+            ...heartbeatAuthority,
+            runId: value.claim.runId,
+            attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken,
+            request: secondRequest,
+        });
+        const lostResponseLease = await claimLifecycleOperation(
+            first,
+            secondRequest.operationId,
+            secondHeartbeatAt,
+        );
+        const secondReceipt = await heartbeatReceipt({
+            claim: value.claim,
+            request: secondRequest,
+            leaseExpiresAt: "2026-08-10T00:12:00.000Z",
+        });
+        expect(() => firstSqlite.prepare(`
+      DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
+    `).run(firstHeartbeat.request.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
+        firstSqlite.exec(`CREATE TRIGGER abort_lifecycle_retention
+      BEFORE DELETE ON hosted_lifecycle_operations
+      BEGIN SELECT RAISE(ABORT, 'injected lifecycle retention failure'); END;`);
+        await expect(first.acknowledgeHostedLifecycleOperation({
+            destinationId: "cloud-1",
+            organizationId: value.claim.organizationId,
+            operationId: secondRequest.operationId,
+            leaseToken: lostResponseLease.leaseToken!,
+            receipt: secondReceipt,
+            now: secondHeartbeatAt,
+        })).rejects.toThrow("injected lifecycle retention failure");
+        expect(firstSqlite.prepare(`
+      SELECT lease_expires_at AS leaseExpiresAt FROM attempts WHERE id = ?
+    `).get(value.claim.attempt.id)).toEqual({ leaseExpiresAt: "2026-08-10T00:11:00.000Z" });
+        expect(firstSqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "heartbeat", state: "acknowledged", sequence: 2 },
+            { action: "heartbeat", state: "leased", sequence: 3 },
+        ]);
+        firstSqlite.exec("DROP TRIGGER abort_lifecycle_retention");
+        firstSqlite.close();
+
+        const restartedAt = new Date("2026-08-10T00:01:50.000Z");
+        vi.setSystemTime(restartedAt);
+        const secondSqlite = new Database(path);
+        migratePairedRunnerSchema(secondSqlite);
+        const second = createPairedRunnerRepository(drizzle(secondSqlite));
+        await expect(second.recoverExpiredHostedLifecycleOperations({
+            destinationId: "cloud-1",
+            organizationId: "org-1",
+            now: restartedAt,
+        })).resolves.toBe(1);
+        const replay = await claimLifecycleOperation(second, secondRequest.operationId, restartedAt);
+        await expect(second.acknowledgeHostedLifecycleOperation({
+            destinationId: "cloud-1",
+            organizationId: value.claim.organizationId,
+            operationId: secondRequest.operationId,
+            leaseToken: replay.leaseToken!,
+            receipt: secondReceipt,
+            now: restartedAt,
+        })).resolves.toBe("acknowledged");
+        expect(secondSqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "heartbeat", state: "acknowledged", sequence: 3 },
+        ]);
+        expect(secondSqlite.prepare(`
+      SELECT lease_expires_at AS leaseExpiresAt FROM attempts WHERE id = ?
+    `).get(value.claim.attempt.id)).toEqual({ leaseExpiresAt: "2026-08-10T00:12:00.000Z" });
+        secondSqlite.close();
+    });
+    it.each(["pending", "leased"])("does not bypass ordinary %s progress for renewal", async (state) => {
+        vi.useFakeTimers();
+        const now = new Date("2026-08-10T00:01:00.000Z");
+        vi.setSystemTime(now);
+        const sqlite = new Database(":memory:");
+        migratePairedRunnerSchema(sqlite);
+        const repo = createPairedRunnerRepository(drizzle(sqlite));
+        const value = await fixture({ leaseExpiresAt: "2026-08-10T00:10:00.000Z" });
+        await begin(repo, value);
+        await repo.importHostedAssignedRun(value);
+        await startHostedExecution(repo, value.claim);
+        const request = await progressRequest(value.claim, now.toISOString());
+        await repo.recordHostedProgressLocally({ ...heartbeatAuthority,
+            runId: value.claim.runId, attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken, request });
+        if (state === "leased") await claimLifecycleOperation(repo, request.operationId, now);
+        const heartbeat = await buildHostedLifecycleRequestV1({ action: "heartbeat",
+            organizationId: value.claim.organizationId, runnerId: value.claim.runnerId,
+            runId: value.claim.runId, attempt: { attemptId: value.claim.attempt.id,
+                attemptNumber: 1, epoch: 1, fencingToken: value.claim.attempt.fencingToken,
+                fencingTokenDigest: value.claim.attempt.fencingTokenDigest },
+            occurredAt: new Date(now.getTime() + 1).toISOString(),
+            expectedLeaseExpiresAt: value.claim.attempt.leaseExpiresAt }) as HostedHeartbeatRequestV1;
+        await repo.beginHostedHeartbeatOperation({ ...heartbeatAuthority,
+            runId: value.claim.runId, attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken, request: heartbeat });
+        const claimable = await repo.claimDueHostedLifecycleOperations({ destinationId: "cloud-1",
+            organizationId: "org-1", leaseOwner: "worker", leaseSeconds: 30, now });
+        expect(claimable.map((entry) => entry.action)).toEqual(state === "pending" ? ["progress"] : []);
+        sqlite.close();
+    });
+
+    it("retains blocked progress while permitting attention-safe renewal", async () => {
+        vi.useFakeTimers();
+        const now = new Date("2026-08-10T00:01:00.000Z");
+        vi.setSystemTime(now);
+        const sqlite = new Database(":memory:");
+        migratePairedRunnerSchema(sqlite);
+        const repo = createPairedRunnerRepository(drizzle(sqlite));
+        const value = await fixture({ leaseExpiresAt: "2026-08-10T00:10:00.000Z" });
+        await begin(repo, value);
+        await repo.importHostedAssignedRun(value);
+        await startHostedExecution(repo, value.claim);
+        const heartbeat = await acknowledgeHeartbeat({
+            repo,
+            claim: value.claim,
+            expectedLeaseExpiresAt: "2026-08-10T00:10:00.000Z",
+            acceptedLeaseExpiresAt: "2026-08-10T00:11:00.000Z",
+            now: new Date("2026-08-10T00:01:10.000Z"),
+        });
+        const progressAt = new Date("2026-08-10T00:01:20.000Z");
+        vi.setSystemTime(progressAt);
+        const request = await progressRequest(value.claim, progressAt.toISOString());
+        await repo.recordHostedProgressLocally({
+            ...heartbeatAuthority,
+            runId: value.claim.runId,
+            attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken,
+            request,
+        });
+        const progress = await claimLifecycleOperation(repo, request.operationId, progressAt);
+        await expect(repo.markHostedLifecycleOperationAttention({
+            destinationId: "cloud-1",
+            organizationId: "org-1",
+            operationId: progress.operationId,
+            leaseToken: progress.leaseToken!,
+            reasonCode: "outcome_unknown",
+            now: progressAt,
+        })).resolves.toBe("attention");
+        expect(sqlite.prepare(`
+      SELECT action, state, sequence
+      FROM hosted_lifecycle_operations
+      ORDER BY sequence
+    `).all()).toEqual([
+            { action: "running", state: "acknowledged", sequence: 1 },
+            { action: "heartbeat", state: "acknowledged", sequence: 2 },
+            { action: "progress", state: "attention", sequence: 3 },
+        ]);
+        expect(() => sqlite.prepare(`
+      DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
+    `).run(heartbeat.request.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
+        expect(() => sqlite.prepare(`
+      DELETE FROM hosted_lifecycle_operations WHERE operation_id = ?
+    `).run(progress.operationId)).toThrow("hosted_lifecycle_operations_delete_forbidden");
+        const later = new Date("2026-08-10T00:01:30.000Z");
+        vi.setSystemTime(later);
+        const queued = await progressRequest(value.claim, later.toISOString());
+        await repo.recordHostedProgressLocally({ ...heartbeatAuthority,
+            runId: value.claim.runId, attemptId: value.claim.attempt.id,
+            fencingToken: value.claim.attempt.fencingToken, request: queued });
+        const renewed = await acknowledgeHeartbeat({ repo, claim: value.claim,
+            expectedLeaseExpiresAt: "2026-08-10T00:11:00.000Z",
+            acceptedLeaseExpiresAt: "2026-08-10T00:12:00.000Z",
+            now: new Date("2026-08-10T00:01:40.000Z") });
+        expect(renewed.request.expectedLeaseExpiresAt).toBe("2026-08-10T00:11:00.000Z");
+        expect(sqlite.prepare("SELECT state FROM hosted_lifecycle_operations WHERE operation_id=?")
+            .get(progress.operationId)).toEqual({ state: "attention" });
+        expect(sqlite.prepare("SELECT state FROM hosted_lifecycle_operations WHERE operation_id=?")
+            .get(queued.operationId)).toEqual({ state: "pending" });
+        expect(await repo.claimDueHostedLifecycleOperations({ destinationId: "cloud-1",
+            organizationId: "org-1", leaseOwner: "still-blocked", leaseSeconds: 30,
+            now: new Date("2026-08-10T00:01:41.000Z") })).toEqual([]);
+        sqlite.close();
     });
 });

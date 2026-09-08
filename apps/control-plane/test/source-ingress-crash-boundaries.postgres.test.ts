@@ -10,11 +10,11 @@ const digest = (value: string) => `sha256:${createHash("sha256").update(value).d
 const bindingDigest = digest("binding_1");
 const generationDigest = digest("generation_1");
 const sourceApp = (): SourceAppDefinition<unknown, unknown, unknown> => ({
-  appId: "fixture-source", protocol: "opentag.channel.v1",
+  appId: "slack", protocol: "opentag.channel.v1",
   capabilities: { threads: true, messageUpdate: true, reactions: false,
     interactiveActions: false, attachments: "metadata", authenticatedDeletion: true,
     stableSourceVersions: true },
-  installation: { organizationId: "org_a", appInstanceId: "instance_1", bindingDigest,
+  installation: { organizationId: "org_a", appInstanceId: "install_1", bindingDigest,
     credentialGeneration: 1, credentialGenerationDigest: generationDigest },
   ingress: { verify: async (input) => input, normalize: () => null },
   context: { readThread: async () => ({ messages: [], truncated: false, decodedBytes: 0 }) },
@@ -33,13 +33,15 @@ describe.skipIf(!TEST_DATABASE_URL)("Source ingress transaction crash boundaries
     await fixture.migrate();
     await fixture.pool.query("INSERT INTO cp_organization VALUES($1,$2,$3)", ["org_a", "A", now]);
     await fixture.pool.query(
-      `INSERT INTO cp_source_app_installation VALUES(
-        $1,$2,$3,$4,$5,$6,$7,'active',$8,$8)`,
-      ["org_a", "install_1", "fixture-source", "instance_1", bindingDigest, 1, generationDigest, now],
-    );
-    await fixture.pool.query(
-      `INSERT INTO cp_source_binding VALUES($1,$2,$3,$4,'active',$5,$5)`,
-      ["org_a", "binding_1", "install_1", bindingDigest, now],
+      `INSERT INTO cp_slack_binding(
+         organization_id,binding_id,installation_id,binding_digest,state,
+         credential_generation,credential_generation_digest,route_identity,
+         team_id,app_id,channel_id,bot_user_id,member_user_ids,
+         signing_secret_ref,bot_token_ref,created_at,updated_at)
+       VALUES($1,$2,$3,$4,'active',1,$5,$6,$7,$8,$9,$10,ARRAY[$11],$12,$13,$14,$14)`,
+      ["org_a", "binding_1", "install_1", bindingDigest, generationDigest,
+        "route_org_a", "T_ORG_A", "A_ORG_A", "C_ORG_A", "U_APP_ORG_A",
+        "U_MEMBER_ORG_A", "secret://org_a/signing", "secret://org_a/bot", now],
     );
   });
   afterEach(async () => fixture.close());

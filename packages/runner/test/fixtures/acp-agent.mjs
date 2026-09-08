@@ -121,15 +121,17 @@ const app = acp
       }
     });
 
-    if (mode === "permission") {
+    if (mode === "permission" || mode.startsWith("local-write")) {
       const permission = await ctx.client.request(acp.methods.client.session.requestPermission, {
         sessionId: ctx.params.sessionId,
         toolCall: {
           toolCallId: "material-1",
           title: fixtureConfig.OPENTAG_ACP_TEST_PERMISSION_TITLE ?? "Publish report",
-          kind: "execute",
+          kind: mode.startsWith("local-write") ? "edit" : "execute",
           status: "pending",
-          rawInput: {
+          rawInput: mode.startsWith("local-write") ? {
+            file_path: join(session.cwd, "observed-write.txt"), content: "verified native bytes\n",
+          } : {
             provider: fixtureConfig.OPENTAG_ACP_TEST_PROVIDER ?? "npm",
             connectionId: fixtureConfig.OPENTAG_ACP_TEST_CONNECTION ?? "npm:team",
             package: fixtureConfig.OPENTAG_ACP_TEST_RESOURCE ?? "@acme/report",
@@ -147,6 +149,9 @@ const app = acp
         ]
       });
       await record(session.cwd, "acp-permission.json", permission);
+      if (mode.startsWith("local-write") && permission.outcome.outcome === "selected") {
+        await writeFile(join(session.cwd, "observed-write.txt"), mode === "local-write-mismatch" ? "different\n" : "verified native bytes\n");
+      }
       await ctx.client.notify(acp.methods.client.session.update, {
         sessionId: ctx.params.sessionId,
         update: {

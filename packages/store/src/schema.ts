@@ -26,6 +26,8 @@ export const runs = sqliteTable("runs", {
     triggeredByActionJson: text("triggered_by_action_json"),
     sourceProposalId: text("source_proposal_id"),
     sourceApplyPlanId: text("source_apply_plan_id"),
+    proposalSettlementCandidateId: text("proposal_settlement_candidate_id"),
+    proposalSettlementHandledAt: text("proposal_settlement_handled_at"),
     repoProvider: text("repo_provider"),
     repoOwner: text("repo_owner"),
     repoName: text("repo_name"),
@@ -50,7 +52,13 @@ export const runs = sqliteTable("runs", {
     repoIdx: index("runs_repo_idx").on(table.repoProvider, table.repoOwner, table.repoName),
     workThreadIdx: index("runs_work_thread_idx").on(table.workThreadId),
     workThreadAuthorityIdx: index("runs_work_thread_authority_idx").on(table.workThreadId, table.createdAt, table.id),
-    conversationIdx: index("runs_conversation_idx").on(table.conversationKey)
+    conversationIdx: index("runs_conversation_idx").on(table.conversationKey),
+    proposalSettlementIdx: index("runs_proposal_settlement_idx")
+        .on(table.status, table.proposalSettlementCandidateId, table.updatedAt, table.id),
+    proposalSettlementShapeCheck: check("runs_proposal_settlement_shape_check", sql `(
+        (${table.proposalSettlementCandidateId} IS NULL AND ${table.proposalSettlementHandledAt} IS NULL)
+        OR (${table.proposalSettlementCandidateId} IS NOT NULL AND ${table.proposalSettlementHandledAt} IS NOT NULL)
+      )`)
 }));
 
 export const attempts = sqliteTable("attempts", {
@@ -78,6 +86,8 @@ export const attempts = sqliteTable("attempts", {
 
 export const hostedRunImports = sqliteTable("hosted_run_imports", {
     runId: text("run_id").primaryKey(),
+    sourceProvider: text("source_provider").notNull(),
+    sourceDeliveryId: text("source_delivery_id").notNull(),
     admissionId: text("admission_id").notNull(),
     admissionOperationId: text("admission_operation_id").notNull(),
     claimOperationId: text("claim_operation_id").notNull(),
@@ -98,6 +108,7 @@ export const hostedRunImports = sqliteTable("hosted_run_imports", {
     authorityJson: text("authority_json").notNull(),
     importedAt: text("imported_at").notNull()
 }, (table) => ({
+    sourceDeliveryIdx: uniqueIndex("hosted_run_imports_source_delivery_idx").on(table.sourceProvider, table.sourceDeliveryId),
     admissionIdx: uniqueIndex("hosted_run_imports_admission_idx").on(table.admissionId),
     claimOperationIdx: uniqueIndex("hosted_run_imports_claim_operation_idx").on(table.claimOperationId),
     attemptIdx: uniqueIndex("hosted_run_imports_attempt_idx").on(table.attemptId),
@@ -156,6 +167,45 @@ export const hostedAttemptImports = sqliteTable("hosted_attempt_imports", {
     runIdx: index("hosted_attempt_imports_run_idx").on(table.runId)
 }));
 
+export const localEffectAttempts = sqliteTable("local_effect_attempts", {
+    acquireRequestId: text("acquire_request_id").primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    runnerId: text("runner_id").notNull(),
+    runnerGeneration: integer("runner_generation").notNull(),
+    acquireJournalDigest: text("acquire_journal_digest").notNull(),
+    acquireRequestJson: text("acquire_request_json").notNull(),
+    state: text("state").notNull(),
+    permitKind: text("permit_kind"),
+    permitId: text("permit_id"),
+    effectId: text("effect_id"),
+    effectAttemptNumber: integer("effect_attempt_number"),
+    localJournalDigest: text("local_journal_digest"),
+    permitJson: text("permit_json"),
+    providerIoBegunAt: text("provider_io_begun_at"),
+    evidenceId: text("evidence_id"),
+    evidenceDigest: text("evidence_digest"),
+    evidenceJson: text("evidence_json"),
+    acknowledgementDigest: text("acknowledgement_digest"),
+    acknowledgementJson: text("acknowledgement_json"),
+    attentionReasonCode: text("attention_reason_code"),
+    executorLeaseOwner: text("executor_lease_owner"),
+    executorLeaseToken: text("executor_lease_token"),
+    executorLeaseExpiresAt: text("executor_lease_expires_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    acknowledgedAt: text("acknowledged_at")
+}, (table) => ({
+    journalIdx: uniqueIndex("local_effect_attempts_journal_idx").on(table.acquireJournalDigest),
+    permitIdx: uniqueIndex("local_effect_attempts_permit_idx").on(table.permitId),
+    effectAttemptIdx: uniqueIndex("local_effect_attempts_effect_attempt_idx")
+        .on(table.effectId, table.effectAttemptNumber),
+    recoveryIdx: index("local_effect_attempts_recovery_idx")
+        .on(table.organizationId, table.runnerId, table.runnerGeneration, table.state,
+            table.executorLeaseExpiresAt, table.createdAt),
+    retentionIdx: index("local_effect_attempts_retention_idx")
+        .on(table.state, table.acknowledgedAt)
+}));
+
 export const hostedLifecycleOperations = sqliteTable("hosted_lifecycle_operations", {
     destinationId: text("destination_id").notNull(),
     organizationId: text("organization_id").notNull(),
@@ -198,33 +248,6 @@ export const hostedLifecycleOperations = sqliteTable("hosted_lifecycle_operation
     sequenceIdx: uniqueIndex("hosted_lifecycle_operations_sequence_idx").on(table.destinationId, table.organizationId, table.runId, table.attemptId, table.sequence),
     dueIdx: index("hosted_lifecycle_operations_due_idx").on(table.destinationId, table.organizationId, table.state, table.nextAttemptAt, table.createdAt),
     attemptIdx: index("hosted_lifecycle_operations_attempt_idx").on(table.runId, table.attemptId, table.state)
-}));
-
-export const runEvents = sqliteTable("run_events", {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    runId: text("run_id").notNull(),
-    type: text("type").notNull(),
-    visibility: text("visibility").notNull().default("audit"),
-    importance: text("importance").notNull().default("normal"),
-    message: text("message"),
-    payloadJson: text("payload_json").notNull(),
-    progressIdempotencyDigest: text("progress_idempotency_digest"),
-    createdAt: text("created_at").notNull()
-}, (table) => ({
-    runIdx: index("run_events_run_idx").on(table.runId),
-    routingLatestIdx: index("run_events_routing_latest_idx").on(table.runId, table.type, table.id),
-    progressIdempotencyIdx: uniqueIndex("run_events_progress_idempotency_idx").on(table.runId, table.progressIdempotencyDigest)
-}));
-
-export const sourceDeliveries = sqliteTable("source_deliveries", {
-    source: text("source").notNull(),
-    deliveryId: text("delivery_id").notNull(),
-    runId: text("run_id").notNull(),
-    eventId: text("event_id").notNull(),
-    createdAt: text("created_at").notNull()
-}, (table) => ({
-    pk: primaryKey({ columns: [table.source, table.deliveryId] }),
-    runIdx: index("source_deliveries_run_idx").on(table.runId)
 }));
 
 export const workThreads = sqliteTable("work_threads", {
@@ -290,15 +313,7 @@ export const controlPlaneProjectionOutbox = sqliteTable("control_plane_projectio
       )`)
 }));
 
-const PAIRED_RUNNER_SCHEMA_VERSION = 1;
-const PAIRED_RUNNER_SCHEMA_MIGRATIONS = [
-  "2026-08-08-control-plane-projection-outbox-v1",
-  "2026-08-10-hosted-attempt-import-v1",
-  "2026-08-10-hosted-claim-authority-shell-v1",
-  "2026-08-10-hosted-execution-start-v1",
-  "2026-08-10-hosted-lifecycle-operation-v1",
-  "2026-08-10-hosted-run-import-v1",
-] as const;
+const PAIRED_RUNNER_SCHEMA_VERSION = 2;
 
 const PAIRED_RUNNER_SCHEMA_SQL = `
 CREATE TABLE attempts (
@@ -435,8 +450,123 @@ CREATE TABLE hosted_lifecycle_operations (
         )
       );
 
+CREATE TABLE local_effect_attempts (
+        acquire_request_id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        runner_generation INTEGER NOT NULL CHECK (runner_generation > 0),
+        acquire_journal_digest TEXT NOT NULL,
+        acquire_request_json TEXT NOT NULL CHECK (
+          json_valid(acquire_request_json) AND json_type(acquire_request_json) = 'object'
+        ),
+        state TEXT NOT NULL CHECK (state IN (
+          'acquire_pending', 'permit_accepted', 'provider_io_begun',
+          'evidence_pending', 'acknowledged', 'attention'
+        )),
+        permit_kind TEXT CHECK (permit_kind IS NULL OR permit_kind IN ('execute', 'reconcile')),
+        permit_id TEXT,
+        effect_id TEXT,
+        effect_attempt_number INTEGER CHECK (
+          effect_attempt_number IS NULL OR effect_attempt_number > 0
+        ),
+        local_journal_digest TEXT,
+        permit_json TEXT CHECK (
+          permit_json IS NULL OR (json_valid(permit_json) AND json_type(permit_json) = 'object')
+        ),
+        provider_io_begun_at TEXT,
+        evidence_id TEXT,
+        evidence_digest TEXT,
+        evidence_json TEXT CHECK (
+          evidence_json IS NULL OR (json_valid(evidence_json) AND json_type(evidence_json) = 'object')
+        ),
+        acknowledgement_digest TEXT,
+        acknowledgement_json TEXT CHECK (
+          acknowledgement_json IS NULL
+          OR (json_valid(acknowledgement_json) AND json_type(acknowledgement_json) = 'object')
+        ),
+        attention_reason_code TEXT,
+        executor_lease_owner TEXT,
+        executor_lease_token TEXT,
+        executor_lease_expires_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        acknowledged_at TEXT,
+        CHECK (
+          (permit_id IS NULL
+            AND permit_kind IS NULL AND effect_id IS NULL
+            AND effect_attempt_number IS NULL
+            AND local_journal_digest IS NULL AND permit_json IS NULL)
+          OR (permit_id IS NOT NULL
+            AND permit_kind IS NOT NULL AND effect_id IS NOT NULL
+            AND effect_attempt_number IS NOT NULL
+            AND local_journal_digest IS NOT NULL AND permit_json IS NOT NULL)
+        ),
+        CHECK (
+          (evidence_id IS NULL AND evidence_digest IS NULL AND evidence_json IS NULL)
+          OR (evidence_id IS NOT NULL AND evidence_digest IS NOT NULL AND evidence_json IS NOT NULL)
+        ),
+        CHECK (
+          (acknowledgement_digest IS NULL AND acknowledgement_json IS NULL AND acknowledged_at IS NULL)
+          OR (acknowledgement_digest IS NOT NULL AND acknowledgement_json IS NOT NULL AND acknowledged_at IS NOT NULL)
+        ),
+        CHECK (
+          (executor_lease_owner IS NULL AND executor_lease_token IS NULL
+            AND executor_lease_expires_at IS NULL)
+          OR (executor_lease_owner IS NOT NULL AND executor_lease_token IS NOT NULL
+            AND executor_lease_expires_at IS NOT NULL)
+        ),
+        CHECK (
+          length(acquire_journal_digest) = 71
+          AND substr(acquire_journal_digest, 1, 7) = 'sha256:'
+          AND substr(acquire_journal_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          AND (local_journal_digest IS NULL OR (
+            length(local_journal_digest) = 71 AND substr(local_journal_digest, 1, 7) = 'sha256:'
+            AND substr(local_journal_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          ))
+          AND (evidence_digest IS NULL OR (
+            length(evidence_digest) = 71 AND substr(evidence_digest, 1, 7) = 'sha256:'
+            AND substr(evidence_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          ))
+          AND (acknowledgement_digest IS NULL OR (
+            length(acknowledgement_digest) = 71
+            AND substr(acknowledgement_digest, 1, 7) = 'sha256:'
+            AND substr(acknowledgement_digest, 8) NOT GLOB '*[^0-9a-f]*'
+          ))
+        ),
+        CHECK (
+          (state = 'acquire_pending'
+            AND permit_id IS NULL AND evidence_id IS NULL
+            AND acknowledgement_digest IS NULL AND provider_io_begun_at IS NULL
+            AND attention_reason_code IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'permit_accepted'
+            AND permit_id IS NOT NULL AND evidence_id IS NULL
+            AND acknowledgement_digest IS NULL AND provider_io_begun_at IS NULL
+            AND attention_reason_code IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'provider_io_begun'
+            AND permit_id IS NOT NULL AND evidence_id IS NULL
+            AND acknowledgement_digest IS NULL AND provider_io_begun_at IS NOT NULL
+            AND attention_reason_code IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'evidence_pending'
+            AND permit_id IS NOT NULL AND evidence_id IS NOT NULL
+            AND acknowledgement_digest IS NULL
+            AND attention_reason_code IS NULL AND acknowledged_at IS NULL)
+          OR (state = 'acknowledged'
+            AND permit_id IS NOT NULL AND evidence_id IS NOT NULL
+            AND acknowledgement_digest IS NOT NULL
+            AND attention_reason_code IS NULL AND acknowledged_at IS NOT NULL
+            AND executor_lease_token IS NULL)
+          OR (state = 'attention'
+            AND permit_id IS NOT NULL AND evidence_id IS NOT NULL
+            AND acknowledgement_digest IS NOT NULL
+            AND attention_reason_code IS NOT NULL AND acknowledged_at IS NOT NULL
+            AND executor_lease_token IS NULL)
+        )
+      );
+
 CREATE TABLE hosted_run_imports (
         run_id TEXT PRIMARY KEY,
+        source_provider TEXT NOT NULL,
+        source_delivery_id TEXT NOT NULL,
         admission_id TEXT NOT NULL,
         admission_operation_id TEXT NOT NULL,
         claim_operation_id TEXT NOT NULL,
@@ -468,23 +598,6 @@ CREATE TABLE opentag_paired_runner_schema (
           OR (state = 'ready' AND fingerprint IS NOT NULL))
       );
 
-CREATE TABLE opentag_schema_migrations (
-        id TEXT PRIMARY KEY,
-        applied_at TEXT NOT NULL
-      );
-
-CREATE TABLE run_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        run_id TEXT NOT NULL,
-        type TEXT NOT NULL,
-        visibility TEXT NOT NULL DEFAULT 'audit',
-        importance TEXT NOT NULL DEFAULT 'normal',
-        message TEXT,
-        payload_json TEXT NOT NULL,
-        progress_idempotency_digest TEXT,
-        created_at TEXT NOT NULL
-      );
-
 CREATE TABLE runs (
         id TEXT PRIMARY KEY,
         event_id TEXT NOT NULL UNIQUE,
@@ -500,6 +613,8 @@ CREATE TABLE runs (
         triggered_by_action_json TEXT,
         source_proposal_id TEXT,
         source_apply_plan_id TEXT,
+        proposal_settlement_candidate_id TEXT,
+        proposal_settlement_handled_at TEXT,
         repo_provider TEXT,
         repo_owner TEXT,
         repo_name TEXT,
@@ -515,16 +630,11 @@ CREATE TABLE runs (
         routing_executor_ids_json TEXT,
         routing_rejections_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-CREATE TABLE source_deliveries (
-        source TEXT NOT NULL,
-        delivery_id TEXT NOT NULL,
-        run_id TEXT NOT NULL,
-        event_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (source, delivery_id)
+        updated_at TEXT NOT NULL,
+        CONSTRAINT runs_proposal_settlement_shape_check CHECK (
+          (proposal_settlement_candidate_id IS NULL AND proposal_settlement_handled_at IS NULL)
+          OR (proposal_settlement_candidate_id IS NOT NULL AND proposal_settlement_handled_at IS NOT NULL)
+        )
       );
 
 CREATE TABLE work_threads (
@@ -616,15 +726,29 @@ CREATE UNIQUE INDEX hosted_run_imports_fence_idx
 CREATE UNIQUE INDEX hosted_run_imports_source_idx
         ON hosted_run_imports(source_identity_digest);
 
+CREATE UNIQUE INDEX hosted_run_imports_source_delivery_idx
+        ON hosted_run_imports(source_provider, source_delivery_id);
+
+CREATE UNIQUE INDEX local_effect_attempts_effect_attempt_idx
+        ON local_effect_attempts(effect_id, effect_attempt_number);
+
+CREATE UNIQUE INDEX local_effect_attempts_journal_idx
+        ON local_effect_attempts(acquire_journal_digest);
+
+CREATE UNIQUE INDEX local_effect_attempts_permit_idx
+        ON local_effect_attempts(permit_id);
+
+CREATE INDEX local_effect_attempts_recovery_idx
+        ON local_effect_attempts(
+          organization_id, runner_id, runner_generation, state,
+          executor_lease_expires_at, created_at
+        );
+
+CREATE INDEX local_effect_attempts_retention_idx
+        ON local_effect_attempts(state, acknowledged_at);
+
 CREATE INDEX hosted_run_imports_work_thread_idx
         ON hosted_run_imports(work_thread_id);
-
-CREATE UNIQUE INDEX run_events_progress_idempotency_idx
-        ON run_events(run_id, progress_idempotency_digest);
-
-CREATE INDEX run_events_routing_latest_idx ON run_events(run_id, type, id);
-
-CREATE INDEX run_events_run_idx ON run_events(run_id);
 
 CREATE INDEX runs_claim_queue_idx ON runs(status, created_at, id);
 
@@ -634,6 +758,9 @@ CREATE INDEX runs_lease_recovery_idx ON runs(status, lease_expires_at, created_a
 
 CREATE INDEX runs_repo_idx ON runs(repo_provider, repo_owner, repo_name);
 
+CREATE INDEX runs_proposal_settlement_idx
+        ON runs(status, proposal_settlement_candidate_id, updated_at, id);
+
 CREATE INDEX runs_runner_idx ON runs(assigned_runner_id);
 
 CREATE INDEX runs_status_idx ON runs(status);
@@ -642,7 +769,17 @@ CREATE INDEX runs_work_thread_authority_idx ON runs(work_thread_id, created_at, 
 
 CREATE INDEX runs_work_thread_idx ON runs(work_thread_id);
 
-CREATE INDEX source_deliveries_run_idx ON source_deliveries(run_id);
+CREATE TRIGGER runs_proposal_settlement_immutable_guard
+      BEFORE UPDATE OF proposal_settlement_candidate_id, proposal_settlement_handled_at
+      ON runs
+      WHEN OLD.proposal_settlement_candidate_id IS NOT NULL
+        AND (
+          NEW.proposal_settlement_candidate_id IS NOT OLD.proposal_settlement_candidate_id
+          OR NEW.proposal_settlement_handled_at IS NOT OLD.proposal_settlement_handled_at
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'runs_proposal_settlement_immutable');
+      END;
 
 CREATE INDEX work_threads_current_assessment_idx
         ON work_threads(current_assessment_id);
@@ -652,6 +789,34 @@ CREATE UNIQUE INDEX work_threads_scope_canonical_key_idx
 
 CREATE TRIGGER control_plane_projection_outbox_delete_guard
       BEFORE DELETE ON control_plane_projection_outbox
+      WHEN (
+        OLD.receipt_kind = 'runner_readiness'
+        AND OLD.state = 'acknowledged'
+        AND EXISTS (
+          SELECT 1
+          FROM control_plane_projection_outbox newer
+          WHERE newer.destination_id = OLD.destination_id
+            AND newer.organization_id = OLD.organization_id
+            AND newer.runner_id = OLD.runner_id
+            AND newer.receipt_kind = OLD.receipt_kind
+            AND newer.state = 'acknowledged'
+            AND (
+              json_extract(newer.envelope_json, '$.payload.observedAt')
+                > json_extract(OLD.envelope_json, '$.payload.observedAt')
+              OR (
+                json_extract(newer.envelope_json, '$.payload.observedAt')
+                  = json_extract(OLD.envelope_json, '$.payload.observedAt')
+                AND newer.created_at > OLD.created_at
+              )
+              OR (
+                json_extract(newer.envelope_json, '$.payload.observedAt')
+                  = json_extract(OLD.envelope_json, '$.payload.observedAt')
+                AND newer.created_at = OLD.created_at
+                AND newer.receipt_id > OLD.receipt_id
+              )
+            )
+        )
+      ) IS NOT TRUE
       BEGIN
         SELECT RAISE(ABORT, 'control_plane_projection_outbox_delete_forbidden');
       END;
@@ -854,6 +1019,24 @@ CREATE TRIGGER hosted_claim_authority_shell_immutable_guard
 
 CREATE TRIGGER hosted_lifecycle_operations_delete_guard
       BEFORE DELETE ON hosted_lifecycle_operations
+      WHEN (
+        OLD.state = 'acknowledged'
+        AND OLD.action IN ('heartbeat', 'progress')
+        AND EXISTS (
+          SELECT 1
+          FROM hosted_lifecycle_operations successor
+          WHERE successor.destination_id = OLD.destination_id
+            AND successor.organization_id = OLD.organization_id
+            AND successor.runner_id = OLD.runner_id
+            AND successor.credential_id = OLD.credential_id
+            AND successor.run_id = OLD.run_id
+            AND successor.attempt_id = OLD.attempt_id
+            AND successor.attempt_number = OLD.attempt_number
+            AND successor.fencing_token_digest = OLD.fencing_token_digest
+            AND successor.state = 'acknowledged'
+            AND successor.sequence > OLD.sequence
+        )
+      ) IS NOT TRUE
       BEGIN
         SELECT RAISE(ABORT, 'hosted_lifecycle_operations_delete_forbidden');
       END;
@@ -877,6 +1060,113 @@ CREATE TRIGGER hosted_run_imports_immutable_update_guard
       BEFORE UPDATE ON hosted_run_imports
       BEGIN
         SELECT RAISE(ABORT, 'hosted_run_imports_immutable');
+      END;
+
+CREATE TRIGGER local_effect_attempts_delete_guard
+      BEFORE DELETE ON local_effect_attempts
+      WHEN OLD.state NOT IN ('acquire_pending', 'acknowledged')
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_delete_forbidden');
+      END;
+
+CREATE TRIGGER local_effect_attempts_identity_immutable_guard
+      BEFORE UPDATE OF
+        acquire_request_id, organization_id, runner_id, runner_generation,
+        acquire_journal_digest, acquire_request_json, created_at
+      ON local_effect_attempts
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_identity_immutable');
+      END;
+
+CREATE TRIGGER local_effect_attempts_permit_immutable_guard
+      BEFORE UPDATE OF
+        permit_kind, permit_id, effect_id, effect_attempt_number,
+        local_journal_digest, permit_json
+      ON local_effect_attempts
+      WHEN OLD.permit_id IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_permit_immutable');
+      END;
+
+CREATE TRIGGER local_effect_attempts_evidence_immutable_guard
+      BEFORE UPDATE OF evidence_id, evidence_digest, evidence_json
+      ON local_effect_attempts
+      WHEN OLD.evidence_id IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_evidence_immutable');
+      END;
+
+CREATE TRIGGER local_effect_attempts_ack_immutable_guard
+      BEFORE UPDATE OF acknowledgement_digest, acknowledgement_json,
+        attention_reason_code, acknowledged_at
+      ON local_effect_attempts
+      WHEN OLD.acknowledgement_digest IS NOT NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_ack_immutable');
+      END;
+
+CREATE TRIGGER local_effect_attempts_lease_guard
+      BEFORE UPDATE OF executor_lease_owner, executor_lease_token,
+        executor_lease_expires_at
+      ON local_effect_attempts
+      WHEN (
+        (
+          OLD.executor_lease_token IS NULL
+          AND NEW.executor_lease_owner IS NOT NULL
+          AND NEW.executor_lease_token IS NOT NULL
+          AND NEW.executor_lease_expires_at > NEW.updated_at
+        )
+        OR (
+          OLD.executor_lease_token IS NOT NULL
+          AND OLD.executor_lease_expires_at <= NEW.updated_at
+          AND NEW.executor_lease_owner IS NOT NULL
+          AND NEW.executor_lease_token IS NOT NULL
+          AND NEW.executor_lease_token <> OLD.executor_lease_token
+          AND NEW.executor_lease_expires_at > NEW.updated_at
+        )
+        OR (
+          OLD.executor_lease_token IS NOT NULL
+          AND NEW.executor_lease_token = OLD.executor_lease_token
+          AND NEW.executor_lease_owner = OLD.executor_lease_owner
+          AND NEW.executor_lease_expires_at > OLD.executor_lease_expires_at
+        )
+        OR (
+          OLD.executor_lease_token IS NOT NULL
+          AND NEW.executor_lease_owner IS NULL
+          AND NEW.executor_lease_token IS NULL
+          AND NEW.executor_lease_expires_at IS NULL
+          AND NEW.state IN ('acknowledged', 'attention')
+        )
+      ) IS NOT TRUE
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_lease_invalid');
+      END;
+
+CREATE TRIGGER local_effect_attempts_transition_guard
+      BEFORE UPDATE OF state, provider_io_begun_at
+      ON local_effect_attempts
+      WHEN (
+        NEW.updated_at >= OLD.updated_at
+        AND (
+          (OLD.state = 'acquire_pending' AND NEW.state = 'permit_accepted')
+          OR (OLD.state = 'permit_accepted' AND NEW.state = 'provider_io_begun')
+          OR (OLD.state = 'permit_accepted' AND NEW.state = 'evidence_pending'
+            AND (
+              json_extract(NEW.evidence_json, '$.evidence.kind') = 'not_started'
+              OR (
+                json_extract(NEW.evidence_json, '$.evidence.kind') = 'attention'
+                AND json_extract(NEW.evidence_json, '$.evidence.reasonCode')
+                  = 'local.reconciliation-permit-expired-before-observation'
+                AND NEW.permit_kind = 'reconcile'
+              )
+            ))
+          OR (OLD.state = 'provider_io_begun' AND NEW.state = 'evidence_pending'
+            AND json_extract(NEW.evidence_json, '$.evidence.kind') <> 'not_started')
+          OR (OLD.state = 'evidence_pending' AND NEW.state IN ('acknowledged', 'attention'))
+        )
+      ) IS NOT TRUE
+      BEGIN
+        SELECT RAISE(ABORT, 'local_effect_attempts_transition_invalid');
       END;
 `;
 
@@ -911,15 +1201,6 @@ function validatePairedRunnerSchema(sqlite: Database.Database): void {
   ) {
     throw new Error("paired_runner_schema_incompatible");
   }
-  const migrationIds = (sqlite.prepare(
-    "SELECT id FROM opentag_schema_migrations ORDER BY id",
-  ).all() as Array<{ id: string }>).map(({ id }) => id);
-  if (
-    JSON.stringify(migrationIds)
-      !== JSON.stringify([...PAIRED_RUNNER_SCHEMA_MIGRATIONS].sort())
-  ) {
-    throw new Error("paired_runner_schema_incompatible");
-  }
 }
 
 /**
@@ -947,12 +1228,6 @@ export function migratePairedRunnerSchema(sqlite: Database.Database): void {
   sqlite.transaction(() => {
     sqlite.exec(PAIRED_RUNNER_SCHEMA_SQL);
     const initializedAt = new Date().toISOString();
-    const insertMigration = sqlite.prepare(
-      "INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)",
-    );
-    for (const migrationId of PAIRED_RUNNER_SCHEMA_MIGRATIONS) {
-      insertMigration.run(migrationId, initializedAt);
-    }
     sqlite.prepare(`
       INSERT INTO opentag_paired_runner_schema(
         singleton, version, state, fingerprint, initialized_at

@@ -206,6 +206,12 @@ describe("OpenTag CLI Hosted Control V1 pairing", () => {
         operationId: "operation_pair",
         runnerId: "runner_local",
         requiredCapabilities: ["relay.registration.v1"],
+        capabilities: expect.arrayContaining([
+          "relay.claim-fence.v1", "relay.hosted-admission.v1", "relay.hosted-claim.v1",
+          "relay.lifecycle.v1", "relay.readiness.v1", "relay.source-content-redeem.v1",
+          "relay.material-receipt.v1", "relay.permission.v1", "relay.effect-authority.v1",
+          "relay.repository-binding.v1",
+        ]),
       }),
     );
     expect(createControlClient).toHaveBeenNthCalledWith(3, expect.objectContaining({

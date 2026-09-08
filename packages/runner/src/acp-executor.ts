@@ -30,7 +30,6 @@ import {
   attestAttemptWorkspace,
   changedFiles,
   cleanupInternalArtifacts,
-  commitRunChanges,
   createRunWorktree,
   deleteRunBranch,
   executionPathForAttempt,
@@ -39,6 +38,8 @@ import {
 } from "./git.js";
 import { createExecutorRunResult, type ProposalEvidence } from "./result.js";
 import { scrubEnvironment, type RunnerSecurityPolicy } from "./security.js";
+import { assertLocalCommitAuthority, captureLocalCommitTarget, commitIsolatedRunChanges, createLocalGitRunner } from "./local-commit.js";
+import { prepareLocalWriteObservation } from "./local-write-observation.js";
 
 const DEFAULT_CANCEL_GRACE_MS = 1_000;
 const DEFAULT_READINESS_TIMEOUT_MS = 3_000;
@@ -377,7 +378,10 @@ function promptForRun(input: ExecutorRunInput): string {
   else lines.push(...input.permissions.map((permission) => `- ${permission.scope}`));
   lines.push(
     "",
-    "OpenTag owns source-control publication and external material actions. Work only inside the supplied session cwd and request permission through ACP when required."
+    "OpenTag owns source-control publication and external material actions. Work only inside the supplied session cwd and request permission through ACP when required.",
+    "Do not run, request, or recommend git add, git commit, git push, or gh pr create.",
+    "After editing and verification, finish your response. The Runner stages and commits locally after you stop; do not wait for or request shell permission to do that yourself.",
+    "Local staging/commit does not publish anything. Remote push and Draft PR creation require a separate exact Effect approval."
   );
   return lines.join("\n");
 }
@@ -825,6 +829,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       let worktreeCreated = false;
       let changedFileCount: number | undefined;
       let workspaceAttestation: import("./git.js").AttemptWorkspaceAttestation | undefined;
+      let localCommitTarget: Awaited<ReturnType<typeof captureLocalCommitTarget>> | undefined;
       try {
         const preflight = await runPreflight();
         if (!preflight.ready) {
@@ -877,6 +882,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 leaseExpiresAt: input.attemptAuthority.leaseExpiresAt });
             }
           }
+          localCommitTarget = await captureLocalCommitTarget({ runner,
+            workspacePath: executionPath, repositoryPath: workspace.path, branch: branchName });
           if (workspaceAttestation) {
             await sink.emit({
               type: "executor.started",
@@ -944,7 +951,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         }
 
         const output: string[] = [];
-        const governedActions = new Map<string, { resolution: ExecutorPermissionResolution; reported: boolean }>();
+        const governedActions = new Map<string, { resolution: ExecutorPermissionResolution; reported: boolean;
+          observeWrite?: Awaited<ReturnType<typeof prepareLocalWriteObservation>> }>();
         const childOutput = strictAcpOutput(Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>);
         const stream = acp.ndJsonStream(
           Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
@@ -1002,6 +1010,10 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                     at: new Date().toISOString(), workspaceAttestation });
                 }
                 const permissionWorkspaceAttestation = workspaceAttestation;
+                const observeWrite = workspace.kind === "repository" && permissionWorkspaceAttestation
+                  ? await prepareLocalWriteObservation({ rawInput: ctx.params.toolCall.rawInput,
+                    operation: target.operation, targetFingerprint: target.targetFingerprint,
+                    workspacePath: executionPath, attestation: permissionWorkspaceAttestation }) : undefined;
                 const resolution = await governedResolver({
                   toolCallId: request.toolCall.toolCallId,
                   title: request.toolCall.title,
@@ -1036,7 +1048,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   return permissionResponseForDecision({ decision: "deny" }, requestOptions);
                 }
                 if (resolution.decision !== "deny" && !resolution.reconciled && resolution.material) {
-                  governedActions.set(request.toolCall.toolCallId, { resolution, reported: false });
+                  governedActions.set(request.toolCall.toolCallId, { resolution, reported: false, observeWrite });
                 }
                 if (resolution.reconciled) {
                   await sink.emit({
@@ -1090,12 +1102,16 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                     const governed = governedActions.get(message.update.toolCallId);
                     if (governed && !governed.reported && (message.update.status === "completed" || message.update.status === "failed")) {
                       try {
+                        const localWriteObservation = message.update.status === "completed"
+                          && input.assertExecutionCurrent && await input.assertExecutionCurrent()
+                          ? await governed.observeWrite?.() : undefined;
                         await input.materialActionReporter?.({
                           actionId: governed.resolution.actionId,
                           toolCallId: message.update.toolCallId,
-                          provider: "acp",
+                          provider: localWriteObservation ? "local_workspace" : "acp",
                           receiptRef: `acp:${session.sessionId}:${message.update.toolCallId}`,
-                          outcome: "unknown",
+                          outcome: localWriteObservation ? "succeeded" : "unknown",
+                          ...(localWriteObservation ? { localWriteObservation } : {}),
                           reportedOutcome: message.update.status
                         });
                         governed.reported = true;
@@ -1136,8 +1152,12 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 ...(stderr ? [`stderr=${stderr}`] : [])
               ].join("; "),
               at: new Date().toISOString()
+            }).catch(() => {
+              console.warn("ACP failure diagnostic delivery failed; original failure retained.");
             });
-            throw new AcpPublicFailure(`ACP agent ${manifest.id} protocol or exit failure.`);
+            throw new AcpPublicFailure(`ACP agent ${manifest.id} protocol or exit failure.`, {
+              cause: new Error(cause || reason),
+            });
           }
         }
 
@@ -1154,8 +1174,13 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           });
         }
 
+        const finalizationRunner = createLocalGitRunner(runner);
+        const localCommitIsCurrent = async () => !active.cancelRequested && (input.assertExecutionCurrent
+          ? await input.assertExecutionCurrent() : !input.attemptAuthority);
         if (workspace.kind === "repository" && stopReason === "end_turn") {
-          const cleaned = await cleanupInternalArtifacts({ runner, workspacePath: executionPath });
+          if (!terminationObserved || !localCommitTarget) throw new Error("local_commit_executor_not_stopped");
+          await assertLocalCommitAuthority({ runner, target: localCommitTarget, assertCurrent: localCommitIsCurrent });
+          const cleaned = await cleanupInternalArtifacts({ runner: finalizationRunner, workspacePath: executionPath });
           if (cleaned.length) {
             await sink.emit({
               type: "executor.progress",
@@ -1165,21 +1190,34 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           }
         }
 
-        const files = workspace.kind === "repository" ? await changedFiles({ runner, workspacePath: executionPath }) : [];
+        const files = workspace.kind === "repository" ? await changedFiles({ runner: finalizationRunner, workspacePath: executionPath }) : [];
         changedFileCount = files.length;
         if (workspace.kind === "repository" && stopReason === "end_turn" && files.length > 0) {
-          await commitRunChanges({ runner, workspacePath: executionPath, message: `OpenTag run ${input.runId}` });
+          if (!terminationObserved || !localCommitTarget) throw new Error("local_commit_executor_not_stopped");
+          await commitIsolatedRunChanges({ runner, target: localCommitTarget, message: `OpenTag run ${input.runId}`,
+            assertCurrent: localCommitIsCurrent,
+          });
         }
         let proposalEvidence: ProposalEvidence | undefined;
         let proposalVerification: NonNullable<OpenTagRunResult["verification"]> | undefined;
         if (workspace.kind === "repository" && stopReason === "end_turn"
           && workspaceAttestation && input.attemptId && input.attemptAuthority) {
-          const finalRevisionResult = await runner.run("git", ["rev-parse", "HEAD^{commit}"], { cwd: executionPath });
-          const finalTreeResult = await runner.run("git", ["rev-parse", "HEAD^{tree}"], { cwd: executionPath });
-          const diffResult = await runner.run("git", ["diff", "--binary",
+          if (!input.assertExecutionCurrent || !await input.assertExecutionCurrent() || active.cancelRequested) {
+            throw new Error("local_commit_authority_expired");
+          }
+          workspaceAttestation = await attestAttemptWorkspace({ runner: finalizationRunner,
+            workspacePath: executionPath, repositoryPath: workspace.path,
+            workspaceId: workspaceAttestation.workspaceId, baseRevision: workspaceAttestation.baseRevision,
+            attemptId: input.attemptId, attemptNumber: input.attemptAuthority.attemptNumber,
+            fencingTokenDigest: input.attemptAuthority.fencingTokenDigest,
+            credentialId: input.attemptAuthority.credentialId,
+            leaseExpiresAt: workspaceAttestation.leaseExpiresAt });
+          const finalRevisionResult = await finalizationRunner.run("git", ["rev-parse", "HEAD^{commit}"], { cwd: executionPath });
+          const finalTreeResult = await finalizationRunner.run("git", ["rev-parse", "HEAD^{tree}"], { cwd: executionPath });
+          const diffResult = await finalizationRunner.run("git", ["diff", "--binary",
             workspaceAttestation.baseRevision, finalRevisionResult.stdout.trim(), "--"],
           { cwd: executionPath });
-          const diffCheckResult = await runner.run("git", ["diff", "--check",
+          const diffCheckResult = await finalizationRunner.run("git", ["diff", "--check",
             workspaceAttestation.baseRevision, finalRevisionResult.stdout.trim(), "--"],
           { cwd: executionPath });
           if (finalRevisionResult.exitCode !== 0 || finalTreeResult.exitCode !== 0
@@ -1234,7 +1272,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         await sink.emit({
           type: result.conclusion === "success" ? "executor.completed" : "executor.failed",
           message: `${manifest.label} stopped with ${stopReason}`,
-          at: new Date().toISOString()
+          at: new Date().toISOString(),
+          ...(workspaceAttestation ? { workspaceAttestation } : {}),
         });
         return result;
       } catch (error) {
@@ -1243,6 +1282,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
             type: "executor.failed",
             message: `ACP agent ${manifest.id} failed`,
             at: new Date().toISOString()
+          }).catch(() => {
+            console.warn("ACP failure diagnostic delivery failed; original failure retained.");
           });
         }
         throw error;

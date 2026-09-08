@@ -173,6 +173,7 @@ or fencing generations.
 
 - [ADR 0003: Node/PostgreSQL Control Plane](./adr/0003-node-postgresql-control-plane.md)
 - [ADR 0004: Slack Persistent Presence](./adr/0004-always-on-channel-ingress-local-execution.md)
+- [ADR 0006: Presence-first effect authority](./adr/0006-presence-first-effect-authority.md)
 - [Relay security hardening](./relay-security-hardening.md)
 - [Control Plane deployment](./control-plane-deployment.md)
 - [ACP agent integration](./acp-agent-integration.md)

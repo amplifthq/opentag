@@ -3,6 +3,7 @@ import {
   buildHostedLifecycleRequestV1,
   canonicalJsonStringify,
   computeHostedClaimFencingTokenDigestV1,
+  computeControlPayloadDigestV1,
   type HostedClaimV1,
 } from "@opentag/control-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -276,7 +277,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       organizationId: claim.organizationId, runnerId: claim.runnerId, runId: claim.runId,
       attempt, occurredAt: now.toISOString(), conclusion: "success",
       reasonCode: "executor_success", resultDigest: `sha256:${"5".repeat(64)}`,
-      artifactDigests: [artifact.metadata.artifactDigest],
+      artifactDigests: [await computeControlPayloadDigestV1(artifact)],
       evidenceDigests: artifact.metadata.proposalEvidence.verificationEvidenceDigests,
       workspaceAttestation: attestation });
     await service.lifecycle({ principal, runId: claim.runId, action: "complete", request: complete });
@@ -378,9 +379,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     await fixture.pool.query(
       `INSERT INTO cp_hosted_attempt(organization_id, run_id, attempt_number,
          attempt_id, runner_id, credential_id, fencing_token_digest,
+         claim_operation_id, claim_request_digest, claim,
          lease_expires_at, material_start_state, state, claimed_at, updated_at)
        SELECT organization_id, run_id, 2, 'attempt_candidate_exact_alternate',
-         runner_id, credential_id, fencing_token_digest, lease_expires_at,
+         runner_id, credential_id, fencing_token_digest,
+         'operation_candidate_exact_alternate', claim_request_digest, claim, lease_expires_at,
          material_start_state, state, claimed_at, updated_at
        FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2
          AND attempt_number = 1`, [claim.organizationId, claim.runId]);
@@ -579,8 +582,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     expect(claims).toHaveLength(2);
     expect(claims[1]).toEqual(claims[0]);
     const persisted = await fixture.pool.query<{ claim: unknown }>(
-      `SELECT claim FROM cp_hosted_claim
-       WHERE organization_id = $1 AND operation_id = $2`,
+      `SELECT claim FROM cp_hosted_attempt
+       WHERE organization_id = $1 AND claim_operation_id = $2`,
       [principal.organizationId, command.request.operationId],
     );
     expect(JSON.stringify(persisted.rows[0]?.claim)).not.toContain(
@@ -589,6 +592,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     expect(JSON.stringify(persisted.rows[0]?.claim)).toContain(
       claims[0]?.attempt.fencingTokenDigest,
     );
+    await expect(fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET claim_request_digest='changed'
+       WHERE organization_id=$1 AND claim_operation_id=$2`,
+      [principal.organizationId, command.request.operationId],
+    )).rejects.toThrow(/hosted_attempt_claim_immutable/iu);
   });
 
   it("fails closed when a stored claim cannot be hydrated by the current fencing authority", async () => {
@@ -670,10 +678,19 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       [principal.organizationId, first.claim.runId],
     );
     await fixture.pool.query(
-      `UPDATE cp_hosted_claim SET claim = claim - 'sourceContentGrant'
-       WHERE organization_id = $1 AND operation_id = $2`,
-      [principal.organizationId, request.operationId],
+      "ALTER TABLE cp_hosted_attempt DISABLE TRIGGER cp_hosted_attempt_claim_immutable",
     );
+    try {
+      await fixture.pool.query(
+        `UPDATE cp_hosted_attempt SET claim = claim - 'sourceContentGrant'
+         WHERE organization_id = $1 AND claim_operation_id = $2`,
+        [principal.organizationId, request.operationId],
+      );
+    } finally {
+      await fixture.pool.query(
+        "ALTER TABLE cp_hosted_attempt ENABLE TRIGGER cp_hosted_attempt_claim_immutable",
+      );
+    }
 
     await expect(service.claim({ principal, request: hostedClaimRequest({
       operationId: "operation_legacy_claim_different_poll",
@@ -718,10 +735,19 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       const claimed = await service.claim({ principal, request: original });
       if (claimed.kind !== "claimed") throw new Error("claim failed");
       await fixture.pool.query(
-        `UPDATE cp_hosted_claim SET claim = $3::jsonb
-         WHERE organization_id = $1 AND operation_id = $2`,
-        [principal.organizationId, original.operationId, JSON.stringify(malformedClaim)],
+        "ALTER TABLE cp_hosted_attempt DISABLE TRIGGER cp_hosted_attempt_claim_immutable",
       );
+      try {
+        await fixture.pool.query(
+          `UPDATE cp_hosted_attempt SET claim = $3::jsonb
+           WHERE organization_id = $1 AND claim_operation_id = $2`,
+          [principal.organizationId, original.operationId, JSON.stringify(malformedClaim)],
+        );
+      } finally {
+        await fixture.pool.query(
+          "ALTER TABLE cp_hosted_attempt ENABLE TRIGGER cp_hosted_attempt_claim_immutable",
+        );
+      }
 
       await expect(coordinator().claim({ principal, request: hostedClaimRequest({
         operationId: `operation_legacy_${suffix}_other`,
@@ -730,7 +756,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       await expect(coordinator().claim({ principal, request: original }))
         .resolves.toEqual({ kind: "conflict", reason: "authority_mismatch" });
       expect(JSON.stringify((await fixture.pool.query(
-        `SELECT claim FROM cp_hosted_claim WHERE organization_id = $1 AND operation_id = $2`,
+        `SELECT claim FROM cp_hosted_attempt
+         WHERE organization_id = $1 AND claim_operation_id = $2`,
         [principal.organizationId, original.operationId],
       )).rows[0]?.claim)).toBe(JSON.stringify(malformedClaim));
       await expect(service.inspect({ organizationId: principal.organizationId,
@@ -750,14 +777,28 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     const first = await service.claim({ principal, request });
     if (first.kind !== "claimed") throw new Error("claim failed");
     await fixture.pool.query(
-      `UPDATE cp_hosted_claim SET claim = claim - 'sourceContentGrant'
-       WHERE operation_id = $1`,
-      [request.operationId]);
+      "ALTER TABLE cp_hosted_attempt DISABLE TRIGGER cp_hosted_attempt_claim_immutable",
+    );
+    try {
+      await fixture.pool.query(
+        `UPDATE cp_hosted_attempt SET claim = claim - 'sourceContentGrant'
+         WHERE claim_operation_id = $1`,
+        [request.operationId],
+      );
+    } finally {
+      await fixture.pool.query(
+        "ALTER TABLE cp_hosted_attempt ENABLE TRIGGER cp_hosted_attempt_claim_immutable",
+      );
+    }
     await fixture.pool.query(
       `INSERT INTO cp_hosted_attempt(organization_id, run_id, attempt_number,
          attempt_id, runner_id, credential_id, fencing_token_digest,
-         lease_expires_at, material_start_state, state, claimed_at, updated_at)
-       VALUES($1,$2,2,$3,$4,$5,$6,$7,'open','claimed',$8,$8)`,
+         claim_operation_id, claim_request_digest, claim, lease_expires_at,
+         material_start_state, state, claimed_at, updated_at)
+       SELECT $1,$2,2,$3,$4,$5,$6,'operation_legacy_later',
+         'request_digest_legacy_later',claim,$7,'open','claimed',$8,$8
+       FROM cp_hosted_attempt
+       WHERE organization_id=$1 AND run_id=$2 AND attempt_number=1`,
       [principal.organizationId, first.claim.runId, "attempt_legacy_later",
         principal.runnerId, principal.credentialId, `sha256:${"7".repeat(64)}`,
         "2026-08-15T08:00:00.000Z", now]);

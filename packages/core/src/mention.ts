@@ -1,5 +1,5 @@
 import type {
-  AgentTarget,
+  MentionTarget,
   CommandParseDiagnostic,
   CommandReference,
   OpenTagCommand,
@@ -28,7 +28,7 @@ const KNOWN_FLAGS = new Set([
 ]);
 const SINGLE_VALUE_FLAGS = new Set(["approval", "executor", "line", "network", "range", "runner", "timeout"]);
 const APPROVAL_VALUES = new Set<NonNullable<NonNullable<OpenTagCommand["parsed"]>["approval"]>>(["auto", "required", "never"]);
-const EXECUTOR_HINTS = new Set<AgentTarget["executorHint"]>(["claude-code", "codex", "cursor", "opencode", "hermes", "openclaw", "custom"]);
+const EXECUTOR_HINTS = new Set<MentionTarget["executorHint"]>(["claude-code", "codex", "cursor", "opencode", "hermes", "openclaw", "custom"]);
 const PERMISSION_SCOPES = new Set<PermissionGrant["scope"]>([
   "repo:read",
   "repo:write",
@@ -451,11 +451,11 @@ function enumValueForFlag<T extends string>(
 function executorHintFromFlags(
   flags: Record<string, CommandFlagValue>,
   diagnostics: CommandParseDiagnostic[]
-): AgentTarget["executorHint"] | undefined {
+): MentionTarget["executorHint"] | undefined {
   const value = stringValuesForFlag(flags, "executor").at(-1)?.toLowerCase();
   if (!value) return undefined;
-  if (EXECUTOR_HINTS.has(value as AgentTarget["executorHint"])) {
-    return value as AgentTarget["executorHint"];
+  if (EXECUTOR_HINTS.has(value as MentionTarget["executorHint"])) {
+    return value as MentionTarget["executorHint"];
   }
   diagnostics.push({
     level: "warning",

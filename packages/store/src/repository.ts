@@ -1,14 +1,16 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
-import { AgentAccessProfileSnapshotSchema, AttemptSchema, ActionHintSchema, canonicalJsonStringify, computeControlPayloadDigestV1, computeHostedLifecycleRequestDigestV1, computeHostedLifecycleRequestIdV1, computeHostedLifecycleOperationIdV1, computeHostedLifecycleReceiptIdV1, computeHostedClaimFencingTokenDigestV1, ContextPacketSchema, conversationKeyFromEvent, defaultRunEventMetadata, OpenTagEventSchema, OpenTagRunResultSchema, PolicySnapshotProvenanceSchema, containsCredentialLikeData, isCredentialFieldName, sanitizeCredentialLikeValue, projectTargetRefFromEvent, protocolRunFieldsFromEvent, RunnerReadinessReceiptEnvelopeV1Schema, HostedClaimRequestV1Schema, HostedClaimV1Schema, HostedHeartbeatRequestV1Schema, HostedProgressRequestV1Schema, HostedRejectStartRequestV1Schema, HostedRunningRequestV1Schema, HostedCompleteRequestV1Schema, HostedLifecycleRequestV1Schema, HostedLifecycleReceiptEnvelopeV1Schema, WorkThreadSchema, verifyHostedAdmissionEnvelopeDigestV1, verifyHostedClaimFencingTokenDigestV1, verifyHostedLifecycleReceiptV1, type HostedClaimRequestV1, type HostedClaimV1, type HostedCompleteRequestV1, type HostedHeartbeatRequestV1, type HostedProgressRequestV1, type HostedRejectStartRequestV1, type HostedRunningRequestV1, type HostedLifecycleActionV1, type HostedLifecycleRequestV1, type HostedLifecycleReceiptEnvelopeV1, type OpenTagEvent, type OpenTagRun, type OpenTagRunResult, type RunEventImportance, type RunEventVisibility, type RunnerReadinessReceiptEnvelopeV1, type WorkThread } from "@opentag/core";
+import { AgentAccessProfileSnapshotSchema, AttemptSchema, ActionHintSchema, canonicalJsonStringify, computeControlPayloadDigestV1, computeHostedLifecycleRequestDigestV1, hostedLifecycleRequestDigestInputV1, hostedLifecycleReceiptPayloadV1, computeHostedLifecycleRequestIdV1, computeHostedLifecycleOperationIdV1, computeHostedLifecycleReceiptIdV1, computeHostedClaimFencingTokenDigestV1, ContextPacketSchema, conversationKeyFromEvent, OpenTagEventSchema, OpenTagRunResultSchema, PolicySnapshotProvenanceSchema, containsCredentialLikeData, isCredentialFieldName, sanitizeCredentialLikeValue, projectTargetRefFromEvent, protocolRunFieldsFromEvent, RunnerReadinessReceiptEnvelopeV1Schema, HostedClaimRequestV1Schema, HostedClaimV1Schema, HostedHeartbeatRequestV1Schema, HostedProgressRequestV1Schema, HostedRejectStartRequestV1Schema, HostedRunningRequestV1Schema, HostedCompleteRequestV1Schema, HostedLifecycleRequestV1Schema, HostedLifecycleReceiptEnvelopeV1Schema, WorkThreadSchema, verifyHostedAdmissionEnvelopeDigestV1, verifyHostedClaimFencingTokenDigestV1, verifyHostedLifecycleReceiptV1, type HostedClaimRequestV1, type HostedClaimV1, type HostedCompleteRequestV1, type HostedHeartbeatRequestV1, type HostedProgressRequestV1, type HostedRejectStartRequestV1, type HostedRunningRequestV1, type HostedLifecycleActionV1, type HostedLifecycleRequestV1, type HostedLifecycleReceiptEnvelopeV1, type OpenTagEvent, type OpenTagRun, type OpenTagRunResult, type RunnerReadinessReceiptEnvelopeV1, type WorkThread } from "@opentag/core";
 
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, notExists, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, lte, ne, notExists, or, sql } from "drizzle-orm";
 
 import { alias } from "drizzle-orm/sqlite-core";
 
 import { canonicalSha256Json } from "./canonical-json.js";
 
-import { attempts, controlPlaneProjectionOutbox, hostedAttemptImports, hostedClaimOperations, hostedLifecycleOperations, hostedRunImports, runEvents, sourceDeliveries, runs, workThreads } from "./schema.js";
+import { createLocalEffectJournalRepository } from "./effect-journal.js";
+
+import { attempts, controlPlaneProjectionOutbox, hostedAttemptImports, hostedClaimOperations, hostedLifecycleOperations, hostedRunImports, runs, workThreads } from "./schema.js";
 
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 
@@ -115,7 +117,7 @@ export class HostedImportConflictError extends Error {
 
 export class HostedLifecycleOperationConflictError extends Error {
     override readonly name = "HostedLifecycleOperationConflictError";
-    constructor(readonly code: "HOSTED_LIFECYCLE_OPERATION_INVALID" | "HOSTED_LIFECYCLE_OPERATION_CONFLICT" | "HOSTED_LIFECYCLE_PREDECESSOR_NOT_ACKNOWLEDGED" | "HOSTED_LIFECYCLE_ATOMIC_API_REQUIRED") {
+    constructor(readonly code: "HOSTED_LIFECYCLE_OPERATION_INVALID" | "HOSTED_LIFECYCLE_OPERATION_CONFLICT" | "HOSTED_LIFECYCLE_IDEMPOTENCY_CONFLICT" | "HOSTED_LIFECYCLE_DEPENDENCY_INVALID" | "HOSTED_LIFECYCLE_SIGNAL_ORDER_CONFLICT" | "HOSTED_LIFECYCLE_PREDECESSOR_NOT_ACKNOWLEDGED" | "HOSTED_LIFECYCLE_ATOMIC_API_REQUIRED") {
         super(code);
     }
 }
@@ -610,72 +612,6 @@ function hostedLifecycleOperationFromRow(row: typeof hostedLifecycleOperations.$
     };
 }
 
-function hostedLifecycleRequestDigestSync(input: {
-    organizationId: string;
-    runnerId: string;
-    runId: string;
-    action: HostedLifecycleActionV1;
-    request: HostedLifecycleRequestV1;
-}): string {
-    const { request } = input;
-    const common = {
-        operation: input.action,
-        organizationId: input.organizationId,
-        runnerId: input.runnerId,
-        runId: input.runId,
-        schemaVersion: request.schemaVersion,
-        protocolVersion: request.protocolVersion,
-        requiredCapabilities: request.requiredCapabilities,
-        attempt: {
-            attemptId: request.attempt.attemptId,
-            attemptNumber: request.attempt.attemptNumber,
-            epoch: request.attempt.epoch,
-            fencingTokenDigest: request.attempt.fencingTokenDigest,
-        },
-        occurredAt: request.occurredAt,
-    };
-    const actionFields = input.action === "heartbeat"
-        ? {
-            expectedLeaseExpiresAt: HostedHeartbeatRequestV1Schema.parse(request).expectedLeaseExpiresAt,
-        }
-        : input.action === "running"
-            ? (() => {
-                const value = request as Extract<HostedLifecycleRequestV1, {
-                    executorCapabilityDigest: string;
-                }>;
-                return {
-                    executorId: value.executorId,
-                    executorCapabilityDigest: value.executorCapabilityDigest,
-                    ...(value.runTimeoutMs ? { runTimeoutMs: value.runTimeoutMs } : {}),
-                };
-            })()
-            : input.action === "reject-start"
-                ? (() => {
-                    const value = request as Extract<HostedLifecycleRequestV1, {
-                        reasonCode: string;
-                        executorId: string;
-                    }>;
-                    return { executorId: value.executorId, reasonCode: value.reasonCode };
-                })()
-                : input.action === "progress"
-                    ? (() => {
-                        const value = request as Extract<HostedLifecycleRequestV1, {
-                            progressId: string;
-                        }>;
-                        return { progressId: value.progressId, progressDigest: value.progressDigest };
-                    })()
-                    : (() => {
-                        const value = HostedCompleteRequestV1Schema.parse(request);
-                        return {
-                            conclusion: value.conclusion,
-                            reasonCode: value.reasonCode,
-                            resultDigest: value.resultDigest,
-                            artifactDigests: value.artifactDigests,
-                            evidenceDigests: value.evidenceDigests,
-                        };
-                    })();
-    return canonicalSha256Json({ ...common, ...actionFields });
-}
 
 function validAcknowledgedLifecycleDependency(row: typeof hostedLifecycleOperations.$inferSelect): boolean {
     try {
@@ -689,13 +625,13 @@ function validAcknowledgedLifecycleDependency(row: typeof hostedLifecycleOperati
             : action === "complete"
                 ? "executor_result"
                 : action;
-        const expectedRequestDigest = hostedLifecycleRequestDigestSync({
+        const expectedRequestDigest = canonicalSha256Json(hostedLifecycleRequestDigestInputV1({
             organizationId: row.organizationId,
             runnerId: row.runnerId,
             runId: row.runId,
             action,
             request,
-        });
+        }));
         const expectedOperationId = computeHostedLifecycleOperationIdV1(expectedRequestDigest);
         const expectedRequestId = `req_${canonicalSha256Json({
             purpose: "opentag-hosted-lifecycle-request-id-v1",
@@ -706,64 +642,12 @@ function validAcknowledgedLifecycleDependency(row: typeof hostedLifecycleOperati
             organizationId: row.organizationId,
             operationId: expectedOperationId,
         }).slice("sha256:".length)}`;
-        const expectedPayload = action === "heartbeat"
-            ? {
-                operation: expectedOperation,
-                occurredAt: request.occurredAt,
-                leaseExpiresAt: (receipt.payload as {
-                    leaseExpiresAt: string;
-                }).leaseExpiresAt,
-            }
-            : action === "running"
-                ? (() => {
-                    const value = request as Extract<HostedLifecycleRequestV1, {
-                        executorCapabilityDigest: string;
-                    }>;
-                    return {
-                        operation: expectedOperation,
-                        occurredAt: value.occurredAt,
-                        executorId: value.executorId,
-                        executorCapabilityDigest: value.executorCapabilityDigest,
-                        ...(value.runTimeoutMs ? { runTimeoutMs: value.runTimeoutMs } : {}),
-                    };
-                })()
-                : action === "reject-start"
-                    ? (() => {
-                        const value = request as Extract<HostedLifecycleRequestV1, {
-                            reasonCode: string;
-                            executorId: string;
-                        }>;
-                        return {
-                            operation: expectedOperation,
-                            occurredAt: value.occurredAt,
-                            executorId: value.executorId,
-                            reasonCode: value.reasonCode,
-                        };
-                    })()
-                    : action === "progress"
-                        ? (() => {
-                            const value = request as Extract<HostedLifecycleRequestV1, {
-                                progressId: string;
-                            }>;
-                            return {
-                                operation: expectedOperation,
-                                occurredAt: value.occurredAt,
-                                progressId: value.progressId,
-                                progressDigest: value.progressDigest,
-                            };
-                        })()
-                        : (() => {
-                            const value = HostedCompleteRequestV1Schema.parse(request);
-                            return {
-                                operation: expectedOperation,
-                                occurredAt: value.occurredAt,
-                                conclusion: value.conclusion,
-                                reasonCode: value.reasonCode,
-                                resultDigest: value.resultDigest,
-                                artifactDigests: value.artifactDigests,
-                                evidenceDigests: value.evidenceDigests,
-                            };
-                        })();
+        const expectedPayload = hostedLifecycleReceiptPayloadV1({
+            action, request,
+            ...(receipt.payload.operation === "heartbeat"
+                ? { heartbeatLeaseExpiresAt: receipt.payload.leaseExpiresAt } : {}),
+        });
+        if (!expectedPayload) return false;
         const { receiptDigest: _receiptDigest, ...receiptWithoutDigest } = receipt;
         return row.requestJson === canonicalJsonStringify(request)
             && row.receiptJson === canonicalJsonStringify(receipt)
@@ -813,13 +697,6 @@ function validAcknowledgedLifecycleDependency(row: typeof hostedLifecycleOperati
     catch {
         return false;
     }
-}
-
-function progressIdempotencyDigest(idempotencyKey: string): string {
-    return createHash("sha256")
-        .update("opentag.progress-idempotency.v1\0", "utf8")
-        .update(idempotencyKey, "utf8")
-        .digest("hex");
 }
 
 function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
@@ -911,25 +788,6 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
         if (payload && payload.fencingToken !== canonicalFencingToken) {
             hostedExecutionPayloads.delete(attemptId);
         }
-    }
-    function runEventValues(input: {
-        runId: string;
-        type: string;
-        payload: unknown;
-        createdAt?: string;
-        visibility?: RunEventVisibility;
-        importance?: RunEventImportance;
-        message?: string;
-    }): typeof runEvents.$inferInsert {
-        return {
-            runId: input.runId,
-            type: input.type,
-            visibility: input.visibility ?? defaultRunEventMetadata(input.type).visibility,
-            importance: input.importance ?? defaultRunEventMetadata(input.type).importance,
-            message: input.message ?? null,
-            payloadJson: JSON.stringify(input.payload),
-            createdAt: input.createdAt ?? nowIso()
-        };
     }
     async function attemptFencingTokensForRun(runId: string): Promise<string[]> {
         const knownAttempts = await db
@@ -1095,8 +953,30 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 && existing.businessKeyDigest === input.businessKeyDigest
                 && existing.requestJson === input.requestJson;
             if (!exact)
-                throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_OPERATION_CONFLICT");
+                throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_IDEMPOTENCY_CONFLICT");
             return { outcome: "replayed", operation: hostedLifecycleOperationFromRow(existing) };
+        }
+        if (input.action === "heartbeat" || input.action === "progress") {
+            const highWater = tx.select().from(hostedLifecycleOperations).where(and(
+                ...scope,
+                eq(hostedLifecycleOperations.runId, input.runId),
+                eq(hostedLifecycleOperations.attemptId, input.request.attempt.attemptId),
+                eq(hostedLifecycleOperations.attemptNumber, input.request.attempt.attemptNumber),
+                eq(hostedLifecycleOperations.fencingTokenDigest, input.request.attempt.fencingTokenDigest),
+                eq(hostedLifecycleOperations.state, "acknowledged"),
+                inArray(hostedLifecycleOperations.action, ["heartbeat", "progress"])
+            )).orderBy(desc(hostedLifecycleOperations.sequence)).limit(1).get();
+            if (highWater) {
+                if (!validAcknowledgedLifecycleDependency(highWater)) {
+                    throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_DEPENDENCY_INVALID");
+                }
+                const highWaterRequest = HostedLifecycleRequestV1Schema.parse(
+                    JSON.parse(highWater.requestJson)
+                );
+                if (input.request.occurredAt <= highWaterRequest.occurredAt) {
+                    throw new HostedLifecycleOperationConflictError("HOSTED_LIFECYCLE_SIGNAL_ORDER_CONFLICT");
+                }
+            }
         }
         const terminal = tx.select({ operationId: hostedLifecycleOperations.operationId })
             .from(hostedLifecycleOperations).where(and(eq(hostedLifecycleOperations.destinationId, input.destinationId), eq(hostedLifecycleOperations.organizationId, input.organizationId), eq(hostedLifecycleOperations.runId, input.runId), eq(hostedLifecycleOperations.attemptId, input.request.attempt.attemptId), inArray(hostedLifecycleOperations.action, ["complete", "reject-start"]))).limit(1).get();
@@ -1235,6 +1115,31 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
         }
         return value;
     }
+    function pruneSupersededAcknowledgedLifecycleSignals(input: {
+        tx: ProjectionTransaction;
+        successor: typeof hostedLifecycleOperations.$inferSelect;
+    }): void {
+        const { tx, successor } = input;
+        const superseded = and(
+            eq(hostedLifecycleOperations.destinationId, successor.destinationId),
+            eq(hostedLifecycleOperations.organizationId, successor.organizationId),
+            eq(hostedLifecycleOperations.runnerId, successor.runnerId),
+            eq(hostedLifecycleOperations.credentialId, successor.credentialId),
+            eq(hostedLifecycleOperations.runId, successor.runId),
+            eq(hostedLifecycleOperations.attemptId, successor.attemptId),
+            eq(hostedLifecycleOperations.attemptNumber, successor.attemptNumber),
+            eq(hostedLifecycleOperations.fencingTokenDigest, successor.fencingTokenDigest),
+            eq(hostedLifecycleOperations.state, "acknowledged"),
+            inArray(hostedLifecycleOperations.action, ["heartbeat", "progress"]),
+            lt(hostedLifecycleOperations.sequence, successor.sequence)
+        );
+        tx.delete(hostedLifecycleOperations).where(superseded).run();
+        const retained = tx.select({
+            operationId: hostedLifecycleOperations.operationId
+        }).from(hostedLifecycleOperations).where(superseded).limit(1).get();
+        if (retained)
+            throw new Error("hosted_lifecycle_operation_retention_failed");
+    }
     function acknowledgeHostedLifecycleOperationTx(input: {
         tx: ProjectionTransaction;
         row: typeof hostedLifecycleOperations.$inferSelect;
@@ -1334,9 +1239,16 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 throw new Error("hosted_reject_start_claim_update_lost");
             }
         }
+        if (acknowledged) {
+            pruneSupersededAcknowledgedLifecycleSignals({
+                tx,
+                successor: row
+            });
+        }
         return acknowledged;
     }
     return {
+        ...createLocalEffectJournalRepository(db),
         async enqueueControlPlaneProjection(input: EnqueueControlPlaneProjectionInput): Promise<EnqueueControlPlaneProjectionResult> {
             return db.transaction((tx) => enqueueControlPlaneProjectionTx(tx, input), { behavior: "immediate" });
         },
@@ -1484,7 +1396,35 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 if (updated.changes !== 1)
                     return { outcome: "stale_lease" as const };
                 const acknowledged = tx.select().from(controlPlaneProjectionOutbox).where(and(eq(controlPlaneProjectionOutbox.destinationId, destinationId), eq(controlPlaneProjectionOutbox.organizationId, organizationId), eq(controlPlaneProjectionOutbox.receiptId, input.receiptId))).limit(1).get();
-                return { outcome: "acknowledged" as const, entry: projectionOutboxEntryFromRow(acknowledged!) };
+                if (!acknowledged)
+                    throw new Error("control_plane_projection_outbox_acknowledgement_lost");
+                const entry = projectionOutboxEntryFromRow(acknowledged);
+                const acknowledgedScope = and(
+                    eq(controlPlaneProjectionOutbox.destinationId, destinationId),
+                    eq(controlPlaneProjectionOutbox.organizationId, organizationId),
+                    eq(controlPlaneProjectionOutbox.runnerId, acknowledged.runnerId),
+                    eq(controlPlaneProjectionOutbox.receiptKind, "runner_readiness"),
+                    eq(controlPlaneProjectionOutbox.state, "acknowledged")
+                );
+                const current = tx.select({
+                    receiptId: controlPlaneProjectionOutbox.receiptId
+                }).from(controlPlaneProjectionOutbox).where(acknowledgedScope).orderBy(
+                    desc(sql<string> `json_extract(${controlPlaneProjectionOutbox.envelopeJson}, '$.payload.observedAt')`),
+                    desc(controlPlaneProjectionOutbox.createdAt),
+                    desc(controlPlaneProjectionOutbox.receiptId)
+                ).limit(1).get();
+                if (!current)
+                    throw new Error("control_plane_projection_outbox_retention_current_missing");
+                tx.delete(controlPlaneProjectionOutbox).where(and(
+                    acknowledgedScope,
+                    ne(controlPlaneProjectionOutbox.receiptId, current.receiptId)
+                )).run();
+                const retained = tx.select({
+                    receiptId: controlPlaneProjectionOutbox.receiptId
+                }).from(controlPlaneProjectionOutbox).where(acknowledgedScope).all();
+                if (retained.length !== 1 || retained[0]?.receiptId !== current.receiptId)
+                    throw new Error("control_plane_projection_outbox_retention_failed");
+                return { outcome: "acknowledged" as const, entry };
             }, { behavior: "immediate" });
         },
         async retryControlPlaneProjection(input: {
@@ -1907,9 +1847,7 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
             attemptId: string;
             fencingToken: string;
             executor: string;
-            executorCapability?: unknown;
             runTimeoutMs?: number;
-            idempotencyKey?: string;
             destinationId: string;
             organizationId: string;
             credentialId: string;
@@ -1968,30 +1906,6 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                         .where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId))).run();
                     tx.update(attempts).set({ status: "running", heartbeatAt: prepared.createdAt, updatedAt: prepared.createdAt })
                         .where(eq(attempts.id, input.attemptId)).run();
-                    tx.insert(runEvents).values(runEventValues({
-                        runId: input.runId,
-                        type: "run.running",
-                        payload: {
-                            runnerId: input.runnerId,
-                            attemptId: input.attemptId,
-                            ...(safeInput.idempotencyKey ? { idempotencyKey: safeInput.idempotencyKey } : {}),
-                            executor: safeInput.executor,
-                            ...(safeInput.runTimeoutMs ? { runTimeoutMs: safeInput.runTimeoutMs } : {})
-                        },
-                        visibility: "audit",
-                        importance: "normal",
-                        createdAt: prepared.createdAt
-                    })).run();
-                    if (safeInput.executorCapability)
-                        tx.insert(runEvents).values(runEventValues({
-                            runId: input.runId,
-                            type: "executor.capability.snapshot",
-                            payload: { executor: safeInput.executor, capability: safeInput.executorCapability },
-                            visibility: "audit",
-                            importance: "normal",
-                            message: `Executor capability snapshot recorded for ${safeInput.executor}.`,
-                            createdAt: prepared.createdAt
-                        })).run();
                 }
                 return { outcome: duplicate ? "duplicate" : "running", operation: journal.operation };
             }, { behavior: "immediate" });
@@ -2001,12 +1915,6 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
             runnerId: string;
             attemptId: string;
             fencingToken: string;
-            message: string;
-            type?: string;
-            at?: string;
-            visibility?: RunEventVisibility;
-            importance?: RunEventImportance;
-            idempotencyKey: string;
             destinationId: string;
             organizationId: string;
             credentialId: string;
@@ -2016,9 +1924,10 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
             operation: HostedLifecycleOperation;
         }> {
             const request = HostedProgressRequestV1Schema.parse(input.request);
-            const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
-            const createdAt = safeInput.at ?? request.occurredAt;
-            const expectedProgressDigest = await computeControlPayloadDigestV1({ type: "status", occurredAt: createdAt });
+            const expectedProgressDigest = await computeControlPayloadDigestV1({
+                type: "status",
+                occurredAt: request.occurredAt
+            });
             if (request.attempt.attemptId !== input.attemptId
                 || request.attempt.fencingTokenDigest !== await computeHostedClaimFencingTokenDigestV1(input.fencingToken)
                 || request.progressDigest !== expectedProgressDigest
@@ -2054,24 +1963,10 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                     throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
                 }
                 const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
-                const digest = progressIdempotencyDigest(input.idempotencyKey);
-                const inserted = tx.insert(runEvents).values({
-                    runId: input.runId,
-                    type: "run.progress",
-                    payloadJson: JSON.stringify({
-                        runnerId: input.runnerId,
-                        attemptId: input.attemptId,
-                        type: safeInput.type ?? "progress",
-                        message: safeInput.message,
-                        at: createdAt
-                    }),
-                    progressIdempotencyDigest: digest,
-                    visibility: safeInput.visibility ?? "audit",
-                    importance: safeInput.importance ?? "normal",
-                    message: safeInput.message,
-                    createdAt
-                }).onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] }).run();
-                return { outcome: inserted.changes === 1 ? "recorded" : "duplicate", operation: journal.operation };
+                return {
+                    outcome: journal.outcome === "created" ? "recorded" : "duplicate",
+                    operation: journal.operation
+                };
             }, { behavior: "immediate" });
         },
         async rejectHostedAttemptStartLocally(input: {
@@ -2080,7 +1975,6 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
             attemptId: string;
             fencingToken: string;
             executorId: string;
-            reason: string;
             destinationId: string;
             organizationId: string;
             credentialId: string;
@@ -2155,18 +2049,6 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                     currentRoutingDecisionId: null, routingRejectionsJson: JSON.stringify(rejections),
                     updatedAt: prepared.createdAt
                 }).where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId))).run();
-                tx.insert(runEvents).values(runEventValues({
-                    runId: input.runId,
-                    type: "routing.preflight_rejected",
-                    payload: {
-                        runnerId: input.runnerId, executorId: safeInput.executorId,
-                        attemptId: input.attemptId, routingDecisionId: attempt.routingDecisionId,
-                        reasonCode: stableReason
-                    },
-                    visibility: "audit", importance: "blocking",
-                    message: "Hosted Attempt start rejected.",
-                    createdAt: prepared.createdAt
-                })).run();
                 return { outcome: "requeued" as const, operation: journal.operation };
             }, { behavior: "immediate" });
             if (["requeued", "duplicate", "journaled"].includes(rejection.outcome)) {
@@ -2318,9 +2200,26 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
             const leaseExpiresAt = new Date(now.getTime() + input.leaseSeconds * 1000).toISOString();
             return db.transaction((tx) => {
                 const predecessor = alias(hostedLifecycleOperations, "hosted_lifecycle_predecessor");
+                // Heartbeats may pass progress already blocked on attention,
+                // but not normal pending/in-flight work or lifecycle transitions.
+                // The blocked progress remains immutable and is not retried.
                 const due = tx.select().from(hostedLifecycleOperations).where(and(eq(hostedLifecycleOperations.destinationId, input.destinationId), eq(hostedLifecycleOperations.organizationId, input.organizationId), notExists(tx.select({ operationId: predecessor.operationId })
                     .from(predecessor)
-                    .where(and(eq(predecessor.destinationId, hostedLifecycleOperations.destinationId), eq(predecessor.organizationId, hostedLifecycleOperations.organizationId), eq(predecessor.runId, hostedLifecycleOperations.runId), eq(predecessor.attemptId, hostedLifecycleOperations.attemptId), lt(predecessor.sequence, hostedLifecycleOperations.sequence), sql `${predecessor.state} <> 'acknowledged'`))), or(and(eq(hostedLifecycleOperations.state, "pending"), lte(hostedLifecycleOperations.nextAttemptAt, at)), and(eq(hostedLifecycleOperations.state, "leased"), lte(hostedLifecycleOperations.leaseExpiresAt, at))))).orderBy(asc(hostedLifecycleOperations.runId), asc(hostedLifecycleOperations.attemptId), asc(hostedLifecycleOperations.sequence), asc(hostedLifecycleOperations.operationId)).limit(limit).all();
+                    .where(and(eq(predecessor.destinationId, hostedLifecycleOperations.destinationId), eq(predecessor.organizationId, hostedLifecycleOperations.organizationId), eq(predecessor.runId, hostedLifecycleOperations.runId), eq(predecessor.attemptId, hostedLifecycleOperations.attemptId), lt(predecessor.sequence, hostedLifecycleOperations.sequence), sql `${predecessor.state} <> 'acknowledged'`, sql `NOT (
+                        ${hostedLifecycleOperations.action} = 'heartbeat'
+                        AND ${predecessor.action} = 'progress'
+                        AND (${predecessor.state} = 'attention' OR (
+                            ${predecessor.state} = 'pending' AND EXISTS (
+                                SELECT 1 FROM hosted_lifecycle_operations attention
+                                WHERE attention.destination_id = ${predecessor.destinationId}
+                                  AND attention.organization_id = ${predecessor.organizationId}
+                                  AND attention.run_id = ${predecessor.runId}
+                                  AND attention.attempt_id = ${predecessor.attemptId}
+                                  AND attention.action = 'progress' AND attention.state = 'attention'
+                                  AND attention.sequence < ${predecessor.sequence}
+                            )
+                        ))
+                    )`))), or(and(eq(hostedLifecycleOperations.state, "pending"), lte(hostedLifecycleOperations.nextAttemptAt, at)), and(eq(hostedLifecycleOperations.state, "leased"), lte(hostedLifecycleOperations.leaseExpiresAt, at))))).orderBy(asc(hostedLifecycleOperations.runId), asc(hostedLifecycleOperations.attemptId), asc(hostedLifecycleOperations.sequence), asc(hostedLifecycleOperations.operationId)).limit(limit).all();
                 const claimed: HostedLifecycleOperation[] = [];
                 for (const row of due) {
                     const leaseToken = randomUUID();
@@ -2615,19 +2514,24 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 const current = tx.select().from(hostedClaimOperations).where(and(eq(hostedClaimOperations.operationId, input.operationId), eq(hostedClaimOperations.requestId, input.requestId))).limit(1).get();
                 if (!current)
                     throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
-                if (current.state === "empty")
-                    return hostedClaimOperationFromRow(current);
                 if (current.state !== "pending") {
                     throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
                 }
-                tx.update(hostedClaimOperations).set({
+                const terminal = hostedClaimOperationFromRow({
+                    ...current,
                     state: "empty",
                     activeKey: null,
                     updatedAt: acknowledgedAt,
                     acknowledgedAt
-                }).where(and(eq(hostedClaimOperations.operationId, input.operationId), eq(hostedClaimOperations.state, "pending"))).run();
-                return hostedClaimOperationFromRow(tx.select().from(hostedClaimOperations)
-                    .where(eq(hostedClaimOperations.operationId, input.operationId)).limit(1).get()!);
+                });
+                const deleted = tx.delete(hostedClaimOperations).where(and(
+                    eq(hostedClaimOperations.operationId, input.operationId),
+                    eq(hostedClaimOperations.requestId, input.requestId),
+                    eq(hostedClaimOperations.state, "pending")
+                )).run();
+                if (deleted.changes !== 1)
+                    throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+                return terminal;
             });
         },
         async abandonHostedClaimOperation(input: {
@@ -2640,21 +2544,25 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 const current = tx.select().from(hostedClaimOperations).where(and(eq(hostedClaimOperations.operationId, input.operationId), eq(hostedClaimOperations.requestId, input.requestId))).limit(1).get();
                 if (!current)
                     throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_CONFLICT");
-                if (current.state === "empty" && current.terminalReasonCode === input.reasonCode) {
-                    return hostedClaimOperationFromRow(current);
-                }
                 if (current.state !== "pending") {
                     throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
                 }
-                tx.update(hostedClaimOperations).set({
+                const terminal = hostedClaimOperationFromRow({
+                    ...current,
                     state: "empty",
                     activeKey: null,
                     terminalReasonCode: input.reasonCode,
                     updatedAt: acknowledgedAt,
                     acknowledgedAt
-                }).where(and(eq(hostedClaimOperations.operationId, input.operationId), eq(hostedClaimOperations.state, "pending"))).run();
-                return hostedClaimOperationFromRow(tx.select().from(hostedClaimOperations)
-                    .where(eq(hostedClaimOperations.operationId, input.operationId)).limit(1).get()!);
+                });
+                const deleted = tx.delete(hostedClaimOperations).where(and(
+                    eq(hostedClaimOperations.operationId, input.operationId),
+                    eq(hostedClaimOperations.requestId, input.requestId),
+                    eq(hostedClaimOperations.state, "pending")
+                )).run();
+                if (deleted.changes !== 1)
+                    throw new HostedImportConflictError("HOSTED_CLAIM_OPERATION_NOT_PENDING");
+                return terminal;
             });
         },
         async getHostedProposalSettlementForRetry(input: {
@@ -2665,7 +2573,13 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
             const candidates = await db.select().from(runs).where(and(
                 eq(runs.status, "succeeded"),
                 isNotNull(runs.resultJson),
-            )).orderBy(runs.updatedAt).all();
+                isNull(runs.proposalSettlementCandidateId),
+                sql `EXISTS (
+                    SELECT 1 FROM json_each(${runs.resultJson}, '$.artifacts') artifact
+                    WHERE json_extract(artifact.value, '$.id')
+                        = ${runs.id} || ':proposal-evidence'
+                )`,
+            )).orderBy(asc(runs.updatedAt), asc(runs.id)).all();
             for (const run of candidates) {
                 if (!run.resultJson)
                     continue;
@@ -2697,6 +2611,7 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 )).limit(1).get() : undefined;
                 if (!attempt || !imported || !claim || !completion
                     || !validAcknowledgedLifecycleDependency(completion)
+                    || !completion.acknowledgedAt
                     || attempt.fencingToken === "" || imported.fencingTokenDigest !== completion.fencingTokenDigest) {
                     continue;
                 }
@@ -2705,6 +2620,7 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 const artifactDigest = proposalArtifact?.metadata?.["artifactDigest"];
                 if (!proposalArtifact || typeof artifactDigest !== "string")
                     continue;
+                const candidateId = `candidate_${artifactDigest.slice("sha256:".length, "sha256:".length + 48)}`;
                 const authority = JSON.parse(imported.authorityJson) as HostedClaimV1["authority"];
                 const evidence = proposalArtifact.metadata?.["proposalEvidence"] as {
                     branch?: unknown;
@@ -2722,11 +2638,89 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                     runnerGeneration: authority.credentialGeneration,
                     projectTargetId: authority.projectTargetId,
                     targetBindingDigest: authority.targetBindingDigest,
-                    candidateId: `candidate_${artifactDigest.slice("sha256:".length, "sha256:".length + 48)}`, branch: evidence.branch,
+                    policySnapshotId: authority.admissionPolicySnapshotId,
+                    policySnapshotDigest: authority.admissionPolicySnapshotDigest,
+                    candidateId, branch: evidence.branch,
                     baseRevision: evidence.baseRevision, finalRevision: evidence.finalRevision,
                     finalTree: evidence.finalTree, proposalArtifact };
             }
             return null;
+        },
+        async markHostedProposalSettlementHandled(input: {
+            destinationId: string;
+            organizationId: string;
+            runnerId: string;
+            runId: string;
+            candidateId: string;
+            now?: Date;
+        }): Promise<"handled" | "replayed"> {
+            const handledAt = (input.now ?? new Date()).toISOString();
+            return db.transaction((tx) => {
+                const run = tx.select().from(runs).where(and(
+                    eq(runs.id, input.runId), eq(runs.status, "succeeded"),
+                    isNotNull(runs.resultJson),
+                )).limit(1).get();
+                const imported = run ? tx.select().from(hostedRunImports)
+                    .where(eq(hostedRunImports.runId, run.id)).limit(1).get() : undefined;
+                const attempt = imported ? tx.select().from(attempts).where(and(
+                    eq(attempts.id, imported.attemptId), eq(attempts.runId, run!.id),
+                    eq(attempts.runnerId, input.runnerId), eq(attempts.status, "succeeded"),
+                )).limit(1).get() : undefined;
+                const claim = imported ? tx.select().from(hostedClaimOperations).where(and(
+                    eq(hostedClaimOperations.operationId, imported.claimOperationId),
+                    eq(hostedClaimOperations.destinationId, input.destinationId),
+                    eq(hostedClaimOperations.organizationId, input.organizationId),
+                    eq(hostedClaimOperations.runnerId, input.runnerId),
+                    eq(hostedClaimOperations.state, "claimed"),
+                )).limit(1).get() : undefined;
+                const completion = attempt ? tx.select().from(hostedLifecycleOperations).where(and(
+                    eq(hostedLifecycleOperations.destinationId, input.destinationId),
+                    eq(hostedLifecycleOperations.organizationId, input.organizationId),
+                    eq(hostedLifecycleOperations.runnerId, input.runnerId),
+                    eq(hostedLifecycleOperations.runId, input.runId),
+                    eq(hostedLifecycleOperations.attemptId, attempt.id),
+                    eq(hostedLifecycleOperations.action, "complete"),
+                    eq(hostedLifecycleOperations.state, "acknowledged"),
+                )).limit(1).get() : undefined;
+                if (!run || !run.resultJson || !imported || !attempt || !claim || !completion
+                    || !completion.acknowledgedAt
+                    || !validAcknowledgedLifecycleDependency(completion)
+                    || attempt.fencingToken === ""
+                    || imported.fencingTokenDigest !== completion.fencingTokenDigest) {
+                    throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+                }
+                const result = validatePersistedProposalEvidence(
+                    OpenTagRunResultSchema.parse(JSON.parse(run.resultJson)),
+                );
+                const proposalArtifact = result.artifacts?.find((artifact) =>
+                    artifact.id === `${run.id}:proposal-evidence`);
+                const artifactDigest = proposalArtifact?.metadata?.["artifactDigest"];
+                const candidateId = typeof artifactDigest === "string"
+                    ? `candidate_${artifactDigest.slice("sha256:".length, "sha256:".length + 48)}`
+                    : null;
+                if (candidateId !== input.candidateId) {
+                    throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+                }
+                if (run.proposalSettlementCandidateId !== null) {
+                    if (run.proposalSettlementCandidateId !== input.candidateId
+                        || run.proposalSettlementHandledAt === null) {
+                        throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+                    }
+                    return "replayed" as const;
+                }
+                const updated = tx.update(runs).set({
+                    proposalSettlementCandidateId: input.candidateId,
+                    proposalSettlementHandledAt: handledAt,
+                    updatedAt: handledAt,
+                }).where(and(
+                    eq(runs.id, input.runId), eq(runs.status, "succeeded"),
+                    isNull(runs.proposalSettlementCandidateId),
+                )).run();
+                if (updated.changes !== 1) {
+                    throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+                }
+                return "handled" as const;
+            }, { behavior: "immediate" });
         },
         async getHostedSucceededPublicationAuthority(input: {
             destinationId: string;
@@ -2860,6 +2854,8 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                         .where(eq(hostedAttemptImports.attemptId, claim.attempt.id)).limit(1).get();
                     if (!importedAttempt) {
                         const exactLineage = existingImport.admissionId === admission.admissionId
+                            && existingImport.sourceProvider === event.source
+                            && existingImport.sourceDeliveryId === admission.deliveryId
                             && existingImport.admissionOperationId === admission.operationId
                             && existingImport.sourceIdentityDigest === admission.sourceIdentityDigest
                             && existingImport.deliveryPayloadDigest === admission.deliveryPayloadDigest
@@ -2953,6 +2949,8 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                         };
                     }
                     const exact = existingImport.admissionId === admission.admissionId
+                        && existingImport.sourceProvider === event.source
+                        && existingImport.sourceDeliveryId === admission.deliveryId
                         && existingImport.admissionOperationId === admission.operationId
                         && importedAttempt.claimOperationId === claim.operationId
                         && importedAttempt.attemptId === claim.attempt.id
@@ -3076,7 +3074,10 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 const sourceCollision = tx.select().from(hostedRunImports).where(eq(hostedRunImports.sourceIdentityDigest, admission.sourceIdentityDigest)).limit(1).get();
                 if (sourceCollision)
                     throw new HostedImportConflictError("HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT");
-                const deliveryCollision = tx.select().from(sourceDeliveries).where(and(eq(sourceDeliveries.source, event.source), eq(sourceDeliveries.deliveryId, admission.deliveryId))).limit(1).get();
+                const deliveryCollision = tx.select().from(hostedRunImports).where(and(
+                    eq(hostedRunImports.sourceProvider, event.source),
+                    eq(hostedRunImports.sourceDeliveryId, admission.deliveryId)
+                )).limit(1).get();
                 if (deliveryCollision)
                     throw new HostedImportConflictError("HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT");
                 if (tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
@@ -3167,15 +3168,10 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                     createdAt: importedAt,
                     updatedAt: importedAt
                 }).run();
-                tx.insert(sourceDeliveries).values({
-                    source: event.source,
-                    deliveryId: admission.deliveryId,
-                    runId: claim.runId,
-                    eventId: event.id,
-                    createdAt: importedAt
-                }).run();
                 tx.insert(hostedRunImports).values({
                     runId: claim.runId,
+                    sourceProvider: event.source,
+                    sourceDeliveryId: admission.deliveryId,
                     admissionId: admission.admissionId,
                     admissionOperationId: admission.operationId,
                     claimOperationId: claim.operationId,
@@ -3223,32 +3219,6 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                     tx.update(hostedClaimOperations).set({ activeKey: null, updatedAt: importedAt })
                         .where(eq(hostedClaimOperations.operationId, claim.operationId)).run();
                 }
-                tx.insert(runEvents).values([
-                    runEventValues({
-                        runId: claim.runId,
-                        type: "run.hosted_imported",
-                        payload: {
-                            admissionId: admission.admissionId,
-                            admissionEnvelopeDigest: admission.envelopeDigest,
-                            claimOperationId: claim.operationId,
-                            authorityDigest,
-                            attemptId: claim.attempt.id,
-                            attemptNumber: claim.attempt.number
-                        },
-                        visibility: "audit",
-                        importance: "high",
-                        createdAt: importedAt
-                    }),
-                    runEventValues({
-                        runId: claim.runId,
-                        type: "context_packet.generated",
-                        payload: { contextPacketDigest, ...(durableThread ? { thread: durableThread } : {}) },
-                        visibility: "audit",
-                        importance: "normal",
-                        message: "Hosted execution context accepted in memory.",
-                        createdAt: importedAt
-                    })
-                ]).run();
                 const runRow = tx.select().from(runs).where(eq(runs.id, claim.runId)).limit(1).get();
                 if (!runRow)
                     throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
@@ -3483,22 +3453,6 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                     resultJson: JSON.stringify(durableResult),
                     updatedAt: completedAt,
                 }).where(eq(attempts.id, input.attemptId)).run();
-                tx.insert(runEvents).values(runEventValues({
-                    runId: input.runId,
-                    type: "run.completed",
-                    payload: {
-                        attemptId: input.attemptId,
-                        conclusion: request.conclusion,
-                        reasonCode: request.reasonCode,
-                        resultDigest: request.resultDigest,
-                        artifactDigests: request.artifactDigests,
-                        evidenceDigests: request.evidenceDigests,
-                    },
-                    visibility: "audit",
-                    importance: "high",
-                    message: durableResult.summary,
-                    createdAt: completedAt,
-                })).run();
                 return "completed" as const;
             }, { behavior: "immediate" });
             if (outcome === "completed" || outcome === "duplicate") {

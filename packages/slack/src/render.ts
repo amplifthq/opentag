@@ -264,7 +264,7 @@ export function createSlackTeamRelayProjectionBlocks(
 ): SlackBlock[] {
   presentation = OpenTagSourceThreadProjectionPresentationSchema.parse(presentation);
   const labels = { status: "Status", cancel: "Cancel", approve: "Allow once", reject: "Deny",
-    publication_approve: "Approve publication" } as const;
+    effect_approve: "Approve draft PR" } as const;
   const blocks: SlackBlock[] = [slackSection(renderSlackTeamRelayProjection(presentation))];
   if (presentation.controls.length > 0) blocks.push({
     type: "actions",
@@ -275,7 +275,7 @@ export function createSlackTeamRelayProjectionBlocks(
       action_id: `opentag:decision:${control.kind === "approve" ? "allow_once"
         : control.kind === "reject" ? "deny" : control.kind}`,
       value: control.actionId,
-      ...(control.kind === "approve" || control.kind === "publication_approve"
+      ...(control.kind === "approve" || control.kind === "effect_approve"
         ? { style: "primary" as const } : {}),
       ...(control.kind === "cancel" || control.kind === "reject"
         ? { style: "danger" as const } : {})

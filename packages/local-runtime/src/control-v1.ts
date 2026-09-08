@@ -26,6 +26,7 @@ import {
   HostedCompleteRequestV1Schema,
   HostedHeartbeatRequestV1Schema,
   HostedProgressRequestV1Schema,
+  LocalWorkspaceWriteObservationV1Schema,
   HostedRejectStartRequestV1Schema,
   HostedRunningRequestV1Schema,
   computeMaterialActionPayloadDigestV1,
@@ -44,21 +45,8 @@ import {
   migratePairedRunnerSchema,
   type PairedRunnerRepository,
 } from "@opentag/store";
+import type { EffectPermitV1 } from "@opentag/control-protocol";
 import {
-  createExactDraftPullRequest,
-  createGitHubCompletionApi,
-  reconcileGitHubCompletionEvidence,
-  type PublicationProviderObservation,
-} from "@opentag/github";
-import type {
-  PublicationCompletionObservationV1,
-  PublicationOperationCapabilityV1,
-  PublicationOperationReceiptV1,
-} from "@opentag/control-protocol";
-import {
-  assertCommandSucceeded,
-  nodeCommandRunner,
-  pushBranch,
   type ExecutorAdapter,
   type RunnerSecurityPolicy,
 } from "@opentag/runner";
@@ -72,7 +60,11 @@ import {
   type ClaimedRun,
   type ClaimedRunExecutionClient,
 } from "./daemon.js";
-import { executePublicationControlV1 } from "./pr.js";
+import {
+  LocalEffectExecutor,
+  buildPublicationEffectRequest,
+  createGitHubDraftPullRequestEffectAdapter,
+} from "./effects/index.js";
 
 const require = createRequire(import.meta.url);
 const LOCAL_RUNTIME_VERSION = (require("../package.json") as { version: string }).version;
@@ -718,6 +710,7 @@ export async function buildRunnerReadinessReceipt(input: {
       return {
         projectTargetId: target.projectTargetId,
         bindingDigest: target.bindingDigest,
+        bindingGeneration: target.bindingGeneration,
         state: "unknown" as const,
         reasonCode: "target_binding_stale" as const,
       };
@@ -742,11 +735,13 @@ export async function buildRunnerReadinessReceipt(input: {
       ? {
           projectTargetId: target.projectTargetId,
           bindingDigest: target.bindingDigest,
+          bindingGeneration: target.bindingGeneration,
           state: "ready" as const,
         }
       : {
           projectTargetId: target.projectTargetId,
           bindingDigest: target.bindingDigest,
+          bindingGeneration: target.bindingGeneration,
           state: "blocked" as const,
           reasonCode: "target_unavailable" as const,
         };
@@ -868,276 +863,6 @@ export type HostedControlLoop = {
   abort(): void;
   close(): Promise<void>;
 };
-
-type PublicationControlClient = Pick<OpenTagClient,
-  "claimNextPublicationOperationControlV1" | "beginPublicationOperationControlV1"
-  | "recordPublicationOperationReceiptControlV1" | "reconcilePublicationOperationControlV1"
-  | "completePublicationControlV1">;
-
-export async function runPublicationControlV1Iteration(input: {
-  organizationId: string;
-  runnerId: string;
-  runnerGeneration: number;
-  now: () => Date;
-  client: PublicationControlClient;
-  getLocalAuthority(capability: PublicationOperationCapabilityV1): Promise<{
-    fencingToken: string;
-    attemptNumber: number;
-  } | null>;
-  pushOwnedBranch(capability: PublicationOperationCapabilityV1): Promise<PublicationProviderObservation>;
-  createDraftPullRequest(capability: PublicationOperationCapabilityV1): Promise<PublicationProviderObservation>;
-  reconcileOperation(capability: PublicationOperationCapabilityV1): Promise<PublicationProviderObservation>;
-  observeCompletion(capability: PublicationOperationCapabilityV1,
-    receipt: PublicationOperationReceiptV1): Promise<PublicationCompletionObservationV1>;
-}): Promise<boolean> {
-  const claimed = await input.client.claimNextPublicationOperationControlV1({
-    schemaVersion: 1,
-    protocolVersion: "1.0",
-    requiredCapabilities: ["relay.publication.v1"],
-    requestId: `request_publication_poll_${randomUUID()}`,
-    organizationId: input.organizationId,
-    runnerId: input.runnerId,
-  });
-  if (!claimed) return false;
-  const capability = claimed.capability;
-  const authority = await input.getLocalAuthority(capability);
-  if (!authority || authority.attemptNumber !== capability.attemptNumber) return false;
-  if ("reconciliationPending" in claimed && claimed.reconciliationPending) {
-    const provider = await input.reconcileOperation(capability);
-    const observation = publicationReconciliationObservation(provider);
-    const reconciliationDigest = await computeControlPayloadDigestV1({
-      capabilityId: capability.capabilityId, operationId: capability.operationId, observation,
-    });
-    await input.client.reconcilePublicationOperationControlV1({
-      schemaVersion: 1, protocolVersion: "1.0", requiredCapabilities: ["relay.publication.v1"],
-      requestId: `request_publication_reconcile_${reconciliationDigest.slice("sha256:".length,
-        "sha256:".length + 48)}`,
-      organizationId: capability.organizationId, runnerId: capability.runnerId, runId: capability.runId,
-      capabilityId: capability.capabilityId, operationId: capability.operationId,
-      observation,
-      observedAt: input.now().toISOString(),
-    });
-    return true;
-  }
-  if ("completionPending" in claimed && claimed.completionPending) {
-    const observation = await input.observeCompletion(capability, claimed.completionReceipt);
-    await input.client.completePublicationControlV1({
-      schemaVersion: 1,
-      protocolVersion: "1.0",
-      requiredCapabilities: ["relay.publication.v1"],
-      requestId: `request_publication_complete_${randomUUID()}`,
-      organizationId: capability.organizationId,
-      runnerId: capability.runnerId,
-      runnerGeneration: capability.runnerGeneration,
-      runId: capability.runId,
-      attemptId: capability.attemptId,
-      attemptNumber: authority.attemptNumber,
-      fencingToken: authority.fencingToken,
-      candidateId: capability.candidateId,
-      candidateDigest: capability.candidateDigest,
-      observation,
-    });
-    return true;
-  }
-  const receipt = await executePublicationControlV1({
-    client: input.client,
-    capability,
-    fencingToken: authority.fencingToken,
-    now: () => input.now().toISOString(),
-    pushOwnedBranch: () => input.pushOwnedBranch(capability),
-    createDraftPullRequest: () => input.createDraftPullRequest(capability),
-  });
-  if (receipt.outcome === "outcome_unknown") {
-    const provider = await input.reconcileOperation(capability);
-    const observation = publicationReconciliationObservation(provider);
-    const reconciliationDigest = await computeControlPayloadDigestV1({
-      capabilityId: capability.capabilityId, operationId: capability.operationId, observation,
-    });
-    await input.client.reconcilePublicationOperationControlV1({
-      schemaVersion: 1,
-      protocolVersion: "1.0",
-      requiredCapabilities: ["relay.publication.v1"],
-      requestId: `request_publication_reconcile_${reconciliationDigest.slice("sha256:".length,
-        "sha256:".length + 48)}`,
-      organizationId: capability.organizationId,
-      runnerId: capability.runnerId,
-      runId: capability.runId,
-      capabilityId: capability.capabilityId,
-      operationId: capability.operationId,
-      observation,
-      observedAt: input.now().toISOString(),
-    });
-  }
-  return true;
-}
-
-function publicationReconciliationObservation(provider: PublicationProviderObservation) {
-  if (provider.kind !== "present") return provider;
-  return { kind: "present" as const, headSha: provider.headSha,
-    ...("pullRequestNumber" in provider ? {
-      externalId: `github_pr_${provider.pullRequestNumber}`,
-      externalUri: provider.pullRequestUrl, draft: provider.draft,
-      ...(provider.provider && provider.repository && provider.baseBranch && provider.state ? {
-        provider: provider.provider, repository: provider.repository,
-        baseBranch: provider.baseBranch, state: provider.state,
-        ...(provider.headBranch && provider.headRepository ? {
-          headBranch: provider.headBranch, headRepository: provider.headRepository,
-        } : {}),
-      } : {}),
-    } : {}),
-  };
-}
-
-function publicationBinding(input: {
-  capability: PublicationOperationCapabilityV1;
-  repositories: RepositoryBindingConfig[];
-}): RepositoryBindingConfig | null {
-  const expected = canonicalRepositoryIdentity(input.capability.repository);
-  return input.repositories.find((candidate) => {
-    const actual = canonicalRepositoryIdentity(candidate);
-    return actual.provider === expected.provider && actual.owner === expected.owner
-      && actual.repo === expected.repo && candidate.pushRemote === input.capability.repository.remote
-      && candidate.baseBranch === input.capability.repository.baseBranch;
-  }) ?? null;
-}
-
-async function localBranchHead(input: {
-  binding: RepositoryBindingConfig;
-  capability: PublicationOperationCapabilityV1;
-}): Promise<string | null> {
-  const result = await nodeCommandRunner.run("git", ["rev-parse", `${input.capability.branch}^{commit}`], {
-    cwd: input.binding.checkoutPath,
-  });
-  if (result.exitCode !== 0) return null;
-  const head = result.stdout.trim();
-  return /^[a-f0-9]{40,64}$/u.test(head) ? head : null;
-}
-
-async function observeRemoteBranch(input: {
-  binding: RepositoryBindingConfig;
-  capability: PublicationOperationCapabilityV1;
-}): Promise<PublicationProviderObservation> {
-  try {
-    const result = await nodeCommandRunner.run("git", ["ls-remote", "--heads",
-      input.capability.repository.remote, `refs/heads/${input.capability.branch}`], {
-      cwd: input.binding.checkoutPath,
-    });
-    await assertCommandSucceeded(result, "observe owned publication branch");
-    if (!result.stdout.trim()) return { kind: "absent" };
-    const headSha = result.stdout.trim().split(/\s+/u)[0];
-    return headSha === input.capability.expectedHeadSha
-      ? { kind: "present", headSha }
-      : { kind: "ambiguous" };
-  } catch {
-    return { kind: "ambiguous" };
-  }
-}
-
-function githubPublicationApi(input: {
-  token: string;
-  fetchImpl?: typeof fetch;
-  apiOrigin?: string;
-}) {
-  return createGitHubCompletionApi({ token: input.token,
-    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-    ...(input.apiOrigin ? { apiBaseUrl: input.apiOrigin } : {}) });
-}
-
-function providerRepository(fullName: string | undefined): { owner: string; repo: string } | null {
-  const parts = fullName?.split("/");
-  return parts?.length === 2 && parts[0] && parts[1]
-    ? { owner: parts[0], repo: parts[1] }
-    : null;
-}
-
-export async function observeDraftPullRequest(input: {
-  capability: PublicationOperationCapabilityV1;
-  token: string;
-  fetchImpl?: typeof fetch;
-  apiOrigin?: string;
-}): Promise<PublicationProviderObservation> {
-  try {
-    const api = githubPublicationApi(input);
-    const candidates = await api.listPullRequestsForCommit({
-      owner: input.capability.repository.owner, repo: input.capability.repository.repo,
-      ref: input.capability.expectedHeadSha,
-    });
-    let sawCandidate = false;
-    for (const candidate of candidates) {
-      sawCandidate = true;
-      const pullRequest = await api.getPullRequest({ owner: input.capability.repository.owner,
-        repo: input.capability.repository.repo, pullRequestNumber: candidate.number });
-      const expectedRepository = `${input.capability.repository.owner}/${input.capability.repository.repo}`.toLowerCase();
-      const observedHeadRepository = pullRequest.head.repo?.full_name?.toLowerCase();
-      const providerHeadRepository = providerRepository(pullRequest.head.repo?.full_name);
-      const exactUrl = `https://github.com/${input.capability.repository.owner}/${input.capability.repository.repo}/pull/${pullRequest.number}`;
-      if (pullRequest.state === "open" && pullRequest.head.sha === input.capability.expectedHeadSha
-        && pullRequest.head.ref === input.capability.branch && observedHeadRepository === expectedRepository
-        && providerHeadRepository
-        && pullRequest.base.ref === input.capability.repository.baseBranch
-        && pullRequest.base.repo?.full_name?.toLowerCase() === expectedRepository
-        && pullRequest.draft === true && pullRequest.htmlUrl === exactUrl) {
-        return { kind: "present", pullRequestNumber: pullRequest.number,
-          pullRequestUrl: pullRequest.htmlUrl, headSha: pullRequest.head.sha, draft: true,
-          provider: "github", repository: { owner: input.capability.repository.owner,
-            repo: input.capability.repository.repo }, baseBranch: pullRequest.base.ref, state: "open",
-          headBranch: pullRequest.head.ref, headRepository: providerHeadRepository };
-      }
-    }
-    return sawCandidate ? { kind: "ambiguous" } : { kind: "absent" };
-  } catch {
-    return { kind: "ambiguous" };
-  }
-}
-
-async function observePublicationCompletion(input: {
-  capability: PublicationOperationCapabilityV1;
-  receipt: PublicationOperationReceiptV1;
-  token: string;
-  now: () => Date;
-  fetchImpl?: typeof fetch;
-  apiOrigin?: string;
-}): Promise<PublicationCompletionObservationV1> {
-  if (input.receipt.observation.kind !== "present"
-    || !input.receipt.observation.externalId || !input.receipt.observation.externalUri
-    || input.receipt.observation.draft !== true) throw new Error("publication_completion_receipt_invalid");
-  const pullRequestNumber = Number(input.receipt.observation.externalId.match(/(\d+)$/u)?.[1]);
-  if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber <= 0) {
-    throw new Error("publication_completion_receipt_invalid");
-  }
-  const api = githubPublicationApi(input);
-  const current = await api.getPullRequest({ owner: input.capability.repository.owner,
-    repo: input.capability.repository.repo, pullRequestNumber });
-  const providerHeadRepository = providerRepository(current.head.repo?.full_name);
-  if (current.number !== pullRequestNumber || current.head.sha !== input.capability.expectedHeadSha
-    || current.base.ref !== input.capability.repository.baseBranch || current.draft !== true
-    || current.htmlUrl !== input.receipt.observation.externalUri
-    || current.head.ref !== input.capability.branch || !providerHeadRepository
-    || current.head.repo?.full_name?.toLowerCase() !== `${input.capability.repository.owner}/${input.capability.repository.repo}`.toLowerCase()) {
-    throw new Error("publication_completion_observation_mismatch");
-  }
-  const snapshots = await reconcileGitHubCompletionEvidence({
-    eventName: "pull_request", deliveryId: `runner:${input.capability.capabilityId}`,
-    payload: { number: pullRequestNumber, repository: { name: input.capability.repository.repo,
-      owner: { login: input.capability.repository.owner } } }, api,
-    now: () => input.now().toISOString(),
-  });
-  const snapshot = snapshots.find((candidate) => candidate.pullRequest.number === pullRequestNumber);
-  if (!snapshot || snapshot.pullRequest.headSha !== input.capability.expectedHeadSha) {
-    throw new Error("publication_completion_observation_mismatch");
-  }
-  return {
-    provider: "github", repository: snapshot.repository,
-    remote: input.capability.repository.remote, branch: input.capability.branch,
-    baseBranch: snapshot.pullRequest.baseBranch, pullRequestNumber,
-    pullRequestResourceRef: snapshot.pullRequest.resourceRef,
-    pullRequestUrl: input.receipt.observation.externalUri, draft: true,
-    state: snapshot.pullRequest.state, headSha: snapshot.pullRequest.headSha,
-    headBranch: current.head.ref, headRepository: providerHeadRepository,
-    baseSha: snapshot.pullRequest.baseSha, checks: snapshot.checks,
-    checksComplete: snapshot.checksComplete, observedAt: snapshot.observedAt,
-  };
-}
 
 type HostedExecutionRepository = PairedRunnerRepository;
 
@@ -1350,6 +1075,39 @@ async function createHostedExecutionClient(input: {
   const buildLifecycleRequest = input.buildHostedLifecycleRequestImpl
     ?? buildHostedLifecycleRequestV1;
   const executionOccurredAt = clock().toISOString();
+  // Sequence time follows serialized dispatch. The progress digest uses that
+  // same protocol timestamp; journal retries keep sealed bytes.
+  let lastSignalAt = Date.parse(authority.runningOccurredAt);
+  const nextSignalTime = (observedAt: string) => {
+    lastSignalAt = Math.max(lastSignalAt + 1, Date.parse(observedAt), clock().getTime());
+    return new Date(lastSignalAt).toISOString();
+  };
+  // Seal new evidence only after earlier renewals/signals have finished pumping.
+  // Retried journal entries retain their original request bytes.
+  let lifecycleTail: Promise<unknown> = Promise.resolve();
+  const serializeLifecycle = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = lifecycleTail.then(operation);
+    lifecycleTail = result.catch(() => undefined);
+    return result;
+  };
+  const currentWorkspaceAttestation = async (runId: string,
+    value: import("@opentag/core").AttemptWorkspaceAttestationV1 | undefined) => {
+    if (!value) return undefined;
+    const current = await repo.getHostedExecutionLease({ destinationId: "cloud",
+      organizationId: authority.organizationId, runnerId: authority.runnerId,
+      credentialId: authority.credentialId, runId, attemptId: authority.attemptId,
+      fencingToken: authority.fencingToken });
+    if (!current || value.attemptId !== authority.attemptId
+      || value.attemptNumber !== authority.attemptNumber
+      || value.credentialId !== authority.credentialId
+      || value.fencingTokenDigest !== authority.fencingTokenDigest
+      || Date.parse(value.leaseExpiresAt) > Date.parse(current.leaseExpiresAt)) {
+      throw new Error("hosted_workspace_attestation_authority_mismatch");
+    }
+    // Only freshness comes from the accepted lease; workspace and fence facts
+    // are never replaced. The Control Plane still verifies the full attestation.
+    return { ...value, leaseExpiresAt: current.leaseExpiresAt };
+  };
   let executionStarted = false;
   const permissionRequests = new Map<string, {
     request: ActionPermissionRequest;
@@ -1410,9 +1168,7 @@ async function createHostedExecutionClient(input: {
         runId,
         executor,
         ...lease,
-        ...(options?.executorCapability ? { executorCapability: options.executorCapability } : {}),
         ...(options?.runTimeoutMs ? { runTimeoutMs: options.runTimeoutMs } : {}),
-        ...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
         request,
       };
       const local = await repo.markHostedRunRunningLocally(localInput);
@@ -1436,7 +1192,7 @@ async function createHostedExecutionClient(input: {
       if (!acquired) throw new Error("hosted_execution_start_not_acquired");
       executionStarted = true;
     },
-    async rejectAttemptStart(runId, executorId, reason, lease) {
+    async rejectAttemptStart(runId, executorId, _reason, lease) {
       assertNotCancelled();
       const request = HostedRejectStartRequestV1Schema.parse(
         await buildLifecycleRequest({
@@ -1458,7 +1214,6 @@ async function createHostedExecutionClient(input: {
         runnerId: authority.runnerId,
         runId,
         executorId,
-        reason,
         ...lease,
         request,
       });
@@ -1470,188 +1225,188 @@ async function createHostedExecutionClient(input: {
       assertNotCancelled();
     },
     async heartbeat(runId, _lease) {
-      assertNotCancelled();
-      const journalAuthority = {
-        destinationId: "cloud",
-        organizationId: authority.organizationId,
-        runnerId: authority.runnerId,
-        credentialId: authority.credentialId,
-        runId,
-        attemptId: authority.attemptId,
-        fencingToken: authority.fencingToken,
-      };
-      let operation = await repo.getHostedHeartbeatOperationForRetry(
-        journalAuthority,
-      );
-      assertNotCancelled();
-      if (!operation) {
-        const currentLease = await repo.getHostedExecutionLease(
+      return serializeLifecycle(async () => {
+        assertNotCancelled();
+        const journalAuthority = {
+          destinationId: "cloud",
+          organizationId: authority.organizationId,
+          runnerId: authority.runnerId,
+          credentialId: authority.credentialId,
+          runId,
+          attemptId: authority.attemptId,
+          fencingToken: authority.fencingToken,
+        };
+        let operation = await repo.getHostedHeartbeatOperationForRetry(
           journalAuthority,
         );
         assertNotCancelled();
-        if (!currentLease) {
-          throw new Error("hosted_execution_authority_expired");
+        if (!operation) {
+          const currentLease = await repo.getHostedExecutionLease(
+            journalAuthority,
+          );
+          assertNotCancelled();
+          if (!currentLease) {
+            throw new Error("hosted_execution_authority_expired");
+          }
+          const request = HostedHeartbeatRequestV1Schema.parse(
+            await buildLifecycleRequest({
+              action: "heartbeat",
+              organizationId: authority.organizationId,
+              runnerId: authority.runnerId,
+              runId,
+              attempt,
+              occurredAt: nextSignalTime(clock().toISOString()),
+              expectedLeaseExpiresAt: currentLease.leaseExpiresAt,
+            }),
+          );
+          assertNotCancelled();
+          operation = (await repo.beginHostedHeartbeatOperation({
+            ...journalAuthority,
+            request,
+          })).operation;
+          assertNotCancelled();
         }
-        const request = HostedHeartbeatRequestV1Schema.parse(
-          await buildLifecycleRequest({
-            action: "heartbeat",
-            organizationId: authority.organizationId,
-            runnerId: authority.runnerId,
-            runId,
-            attempt,
-            occurredAt: clock().toISOString(),
-            expectedLeaseExpiresAt: currentLease.leaseExpiresAt,
-          }),
-        );
+        if (operation.state !== "acknowledged") await pumpLifecycle();
         assertNotCancelled();
-        operation = (await repo.beginHostedHeartbeatOperation({
-          ...journalAuthority,
-          request,
-        })).operation;
+        const acceptedLease = await repo.getHostedExecutionLease(journalAuthority);
         assertNotCancelled();
-      }
-      if (operation.state !== "acknowledged") await pumpLifecycle();
-      assertNotCancelled();
-      const acceptedLease = await repo.getHostedExecutionLease(journalAuthority);
-      assertNotCancelled();
-      if (
-        !acceptedLease
-        || Date.parse(acceptedLease.leaseExpiresAt)
-          <= Date.parse(operation.request.expectedLeaseExpiresAt)
-      ) {
-        throw new Error("hosted_heartbeat_receipt_rejected");
-      }
+        if (
+          !acceptedLease
+          || Date.parse(acceptedLease.leaseExpiresAt)
+            <= Date.parse(operation.request.expectedLeaseExpiresAt)
+        ) {
+          throw new Error("hosted_heartbeat_receipt_rejected");
+        }
+      });
     },
     async progress(runId, lease, progress) {
-      assertNotCancelled();
-      const progressMetadata = await buildHostedProgressMetadataForControlV1(
-        progress,
-      );
-      assertNotCancelled();
-      const request = HostedProgressRequestV1Schema.parse(
-        await buildLifecycleRequest({
-        action: "progress",
-        organizationId: authority.organizationId,
-        runnerId: authority.runnerId,
-        runId,
-        attempt,
-        occurredAt: progress.at,
-        ...progressMetadata,
-        ...(progress.workspaceAttestation
-          ? { workspaceAttestation: progress.workspaceAttestation } : {}),
-        ...(progress.interruptionEvidence
-          ? { interruptionEvidence: progress.interruptionEvidence } : {}),
-        }),
-      );
-      assertNotCancelled();
-      const local = await repo.recordHostedProgressLocally({
-        destinationId: "cloud",
-        organizationId: authority.organizationId,
-        credentialId: authority.credentialId,
-        runnerId: authority.runnerId,
-        runId,
-        ...lease,
-        type: "progress",
-        at: progress.at,
-        visibility: "human",
-        importance: "normal",
-        message: progress.message,
-        idempotencyKey: request.progressId,
-        request,
-      });
-      assertNotCancelled();
-      if (local.operation.state !== "acknowledged") await pumpLifecycle();
-      assertNotCancelled();
-    },
-    async complete(runId, lease, result, evidence) {
-      assertNotCancelled();
-      if (!executionStarted) {
-        const request = HostedRejectStartRequestV1Schema.parse(
+      return serializeLifecycle(async () => {
+        assertNotCancelled();
+        const workspaceAttestation = await currentWorkspaceAttestation(runId, progress.workspaceAttestation);
+        const occurredAt = nextSignalTime(progress.at);
+        const progressMetadata = await buildHostedProgressMetadataForControlV1(
+          { at: occurredAt },
+        );
+        assertNotCancelled();
+        const request = HostedProgressRequestV1Schema.parse(
           await buildLifecycleRequest({
-            action: "reject-start",
-            organizationId: authority.organizationId,
-            runnerId: authority.runnerId,
-            runId,
-            attempt,
-            occurredAt: executionOccurredAt,
-            executorId: authority.executorId,
-            reasonCode: "unknown_safe_failure",
+          action: "progress",
+          organizationId: authority.organizationId,
+          runnerId: authority.runnerId,
+          runId,
+          attempt,
+          occurredAt,
+          ...progressMetadata,
+          ...(workspaceAttestation ? { workspaceAttestation } : {}),
+          ...(progress.interruptionEvidence
+            ? { interruptionEvidence: progress.interruptionEvidence } : {}),
           }),
         );
         assertNotCancelled();
-        const rejected = await repo.rejectHostedAttemptStartLocally({
+        const local = await repo.recordHostedProgressLocally({
           destinationId: "cloud",
           organizationId: authority.organizationId,
           credentialId: authority.credentialId,
           runnerId: authority.runnerId,
           runId,
-          executorId: authority.executorId,
-          reason: result.summary,
           ...lease,
           request,
         });
         assertNotCancelled();
-        if (rejected.outcome !== "requeued" && rejected.outcome !== "duplicate") {
-          throw new Error("hosted_local_reject_start_split_outcome");
-        }
-        if (rejected.operation.state !== "acknowledged") await pumpLifecycle();
+        if (local.operation.state !== "acknowledged") await pumpLifecycle();
         assertNotCancelled();
-        return;
-      }
-      const completionMetadata =
-        await buildHostedCompletionMetadataForControlV1(result);
-      let blockedPermission: { permissionRequestId: string;
-        actionDescriptorDigest: string; policySnapshotDigest: string } | undefined;
-      if (completionMetadata.conclusion === "needs_human") {
-        const waiting: Array<(typeof permissionRequests extends Map<string, infer T> ? T : never)> = [];
-        for (const [actionId, pending] of permissionRequests) {
-          const current = await client.getActionPermissionCurrentControlV1({
-            organizationId: authority.organizationId, runnerId: authority.runnerId,
-            runId, actionId, attempt: { attemptId: attempt.attemptId,
-              attemptNumber: attempt.attemptNumber, epoch: attempt.epoch,
-              fencingTokenDigest: attempt.fencingTokenDigest },
-            permissionRequestId: pending.permissionRequestId,
-            permissionRequestDigest: pending.permissionRequestDigest,
+      });
+    },
+    async complete(runId, lease, result, evidence) {
+      return serializeLifecycle(async () => {
+        assertNotCancelled();
+        if (!executionStarted) {
+          const request = HostedRejectStartRequestV1Schema.parse(
+            await buildLifecycleRequest({
+              action: "reject-start",
+              organizationId: authority.organizationId,
+              runnerId: authority.runnerId,
+              runId,
+              attempt,
+              occurredAt: executionOccurredAt,
+              executorId: authority.executorId,
+              reasonCode: "unknown_safe_failure",
+            }),
+          );
+          assertNotCancelled();
+          const rejected = await repo.rejectHostedAttemptStartLocally({
+            destinationId: "cloud",
+            organizationId: authority.organizationId,
+            credentialId: authority.credentialId,
+            runnerId: authority.runnerId,
+            runId,
+            executorId: authority.executorId,
+            ...lease,
+            request,
           });
-          if (current.receipt.payload.state === "waiting") waiting.push(pending);
+          assertNotCancelled();
+          if (rejected.outcome !== "requeued" && rejected.outcome !== "duplicate") {
+            throw new Error("hosted_local_reject_start_split_outcome");
+          }
+          if (rejected.operation.state !== "acknowledged") await pumpLifecycle();
+          assertNotCancelled();
+          return;
         }
-        if (waiting.length !== 1) throw new Error("hosted_needs_human_permission_link_missing");
-        blockedPermission = { permissionRequestId: waiting[0]!.permissionRequestId,
-          actionDescriptorDigest: waiting[0]!.actionDescriptorDigest,
-          policySnapshotDigest: authority.policySnapshotDigest };
-      }
-      assertNotCancelled();
-      const request = HostedCompleteRequestV1Schema.parse(
-        await buildLifecycleRequest({
-          action: "complete",
+        const completionMetadata =
+          await buildHostedCompletionMetadataForControlV1(result);
+        let blockedPermission: { permissionRequestId: string;
+          actionDescriptorDigest: string; policySnapshotDigest: string } | undefined;
+        if (completionMetadata.conclusion === "needs_human") {
+          const waiting: Array<(typeof permissionRequests extends Map<string, infer T> ? T : never)> = [];
+          for (const [actionId, pending] of permissionRequests) {
+            const current = await client.getActionPermissionCurrentControlV1({
+              organizationId: authority.organizationId, runnerId: authority.runnerId,
+              runId, actionId, attempt: { attemptId: attempt.attemptId,
+                attemptNumber: attempt.attemptNumber, epoch: attempt.epoch,
+                fencingTokenDigest: attempt.fencingTokenDigest },
+              permissionRequestId: pending.permissionRequestId,
+              permissionRequestDigest: pending.permissionRequestDigest,
+            });
+            if (current.receipt.payload.state === "waiting") waiting.push(pending);
+          }
+          if (waiting.length !== 1) throw new Error("hosted_needs_human_permission_link_missing");
+          blockedPermission = { permissionRequestId: waiting[0]!.permissionRequestId,
+            actionDescriptorDigest: waiting[0]!.actionDescriptorDigest,
+            policySnapshotDigest: authority.policySnapshotDigest };
+        }
+        assertNotCancelled();
+        const workspaceAttestation = await currentWorkspaceAttestation(runId, evidence?.workspaceAttestation);
+        const request = HostedCompleteRequestV1Schema.parse(
+          await buildLifecycleRequest({
+            action: "complete",
+            organizationId: authority.organizationId,
+            runnerId: authority.runnerId,
+            runId,
+            attempt,
+            occurredAt: executionOccurredAt,
+            ...completionMetadata,
+            ...(blockedPermission ? { blockedPermission } : {}),
+            ...(workspaceAttestation ? { workspaceAttestation } : {}),
+            ...(evidence?.interruptionEvidence
+              ? { interruptionEvidence: evidence.interruptionEvidence } : {}),
+          }),
+        );
+        assertNotCancelled();
+        const outcome = await repo.completeHostedRunLocally({
+          destinationId: "cloud",
           organizationId: authority.organizationId,
+          credentialId: authority.credentialId,
           runnerId: authority.runnerId,
           runId,
-          attempt,
-          occurredAt: executionOccurredAt,
-          ...completionMetadata,
-          ...(blockedPermission ? { blockedPermission } : {}),
-          ...(evidence?.workspaceAttestation
-            ? { workspaceAttestation: evidence.workspaceAttestation } : {}),
-          ...(evidence?.interruptionEvidence
-            ? { interruptionEvidence: evidence.interruptionEvidence } : {}),
-        }),
-      );
-      assertNotCancelled();
-      const outcome = await repo.completeHostedRunLocally({
-        destinationId: "cloud",
-        organizationId: authority.organizationId,
-        credentialId: authority.credentialId,
-        runnerId: authority.runnerId,
-        runId,
-        ...lease,
-        result,
-        request,
+          ...lease,
+          result,
+          request,
+        });
+        assertNotCancelled();
+        if (outcome !== "completed" && outcome !== "duplicate") {
+          throw new Error("hosted_local_complete_split_outcome");
+        }
       });
-      assertNotCancelled();
-      if (outcome !== "completed" && outcome !== "duplicate") {
-        throw new Error("hosted_local_complete_split_outcome");
-      }
     },
     async requestActionPermission(runId, lease, request) {
       assertNotCancelled();
@@ -1817,6 +1572,13 @@ async function createHostedExecutionClient(input: {
       }
       const observedAt = receipt.observedAt;
       const operationId = `material_${receipt.id}`;
+      const localWriteObservation = receipt.metadata?.localWriteObservation === undefined ? undefined
+        : LocalWorkspaceWriteObservationV1Schema.parse(receipt.metadata.localWriteObservation);
+      if (localWriteObservation && (pending.actionDescriptor !== "workspace.write"
+        || receipt.provider !== "local_workspace" || receipt.outcome !== "succeeded"
+        || localWriteObservation.targetFingerprint !== pending.targetFingerprint)) {
+        throw new Error("hosted_local_write_observation_scope_mismatch");
+      }
       const payload = {
         actionId,
         actionDescriptor: pending.actionDescriptor,
@@ -1827,12 +1589,13 @@ async function createHostedExecutionClient(input: {
         targetFingerprint: pending.targetFingerprint,
         operationId,
         requestDigest: pending.permissionRequestDigest,
-        actionPayloadDigest: await computeControlPayloadDigestV1(receipt.metadata ?? {}),
+        actionPayloadDigest: await computeControlPayloadDigestV1(localWriteObservation ?? receipt.metadata ?? {}),
+        ...(localWriteObservation ? { localWriteObservation } : {}),
         outcome: receipt.outcome === "unknown" ? "outcome_unknown" as const : receipt.outcome,
         ...(receipt.externalId ? { externalId: receipt.externalId } : {}),
         ...(receipt.externalUri ? { externalUri: receipt.externalUri } : {}),
         observedAt,
-        reasonCode: receipt.outcome === "succeeded"
+        reasonCode: localWriteObservation ? "local_write_observed" as const : receipt.outcome === "succeeded"
           ? "provider_accepted" as const
           : receipt.outcome === "failed"
             ? "provider_error" as const
@@ -1936,7 +1699,58 @@ export function createHostedControlLoop(input: {
   }>();
   let inFlight: Promise<unknown> | undefined;
   let closed = false;
-  const settledProposalCandidates = new Set<string>();
+  const effectAdapter = createGitHubDraftPullRequestEffectAdapter({
+    repositories: input.config.repositories,
+    ...(input.config.githubToken ? { githubToken: input.config.githubToken } : {}),
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    now: clock,
+  });
+  let effectExecutor: LocalEffectExecutor | undefined;
+  let effectExecutorGeneration: number | undefined;
+  const currentEffectExecutor = () => {
+    if (!context) throw new Error("runner_control_context_missing");
+    if (!effectExecutor || effectExecutorGeneration !== context.credentialGeneration) {
+      effectExecutorGeneration = context.credentialGeneration;
+      effectExecutor = new LocalEffectExecutor({
+        organizationId: context.organizationId,
+        runnerId: context.runnerId,
+        runnerGeneration: context.credentialGeneration,
+        repository: repo,
+        client,
+        adapter: effectAdapter,
+        leaseOwner: `runner_effect_${context.runnerId}_${context.credentialGeneration}`,
+        now: clock,
+        signal: abortController.signal,
+        isWorkAuthorityCurrent: async (permit: EffectPermitV1) => {
+          if (!context
+            || context.organizationId !== permit.organizationId
+            || context.runnerId !== permit.runnerId
+            || context.credentialGeneration !== permit.runnerGeneration) {
+            return false;
+          }
+          const target = context.targets.find((candidate) =>
+            candidate.projectTargetId === permit.target.projectTargetId
+            && candidate.bindingDigest === permit.target.targetBindingDigest
+            && candidate.bindingGeneration === permit.target.targetBindingGeneration
+            && candidate.provider === permit.target.provider
+            && candidate.owner.toLowerCase() === permit.target.owner.toLowerCase()
+            && candidate.repo.toLowerCase() === permit.target.repo.toLowerCase()
+            && candidate.defaultBranch === permit.target.baseBranch);
+          if (!target) return false;
+          const authority = await repo.getHostedSucceededPublicationAuthority({
+            destinationId: "cloud",
+            organizationId: permit.organizationId,
+            runnerId: permit.runnerId,
+            runId: permit.runId,
+            attemptId: permit.runAttemptId,
+            fencingTokenDigest: permit.fencingTokenDigest,
+          });
+          return authority?.attemptNumber === permit.runAttemptNumber;
+        },
+      });
+    }
+    return effectExecutor;
+  };
   const pump = async () => {
     if (!context) return;
     await pumpHostedLifecycleOperations({
@@ -1982,13 +1796,18 @@ export function createHostedControlLoop(input: {
           throw new Error("runner_control_context_stale");
         }
         context = nextContext;
+        if (context.capabilities.includes("relay.effect-authority.v1")) {
+          const recoveredEffect = await currentEffectExecutor().recoverOnce();
+          if (closed || recoveredEffect.outcome !== "idle") {
+            return recoveredEffect.outcome !== "idle";
+          }
+        }
         const proposalSettlement = await repo.getHostedProposalSettlementForRetry({
           destinationId: "cloud", organizationId: context.organizationId,
           runnerId: context.runnerId,
         });
         if (closed) return false;
-        if (proposalSettlement
-          && !settledProposalCandidates.has(proposalSettlement.candidateId)) {
+        if (proposalSettlement) {
           const settled = await client.settleProposalCandidateControlV1({
             schemaVersion: 1, protocolVersion: "1.0",
             requiredCapabilities: ["relay.lifecycle.v1"],
@@ -2007,6 +1826,9 @@ export function createHostedControlLoop(input: {
             throw new Error("proposal_settlement_identity_mismatch");
           }
           if (settled.status === "publication_pending") {
+            if (!context.capabilities.includes("relay.effect-authority.v1")) {
+              throw new Error("effect_authority_capability_missing");
+            }
             const target = context.targets.find((candidate) =>
               candidate.projectTargetId === proposalSettlement.projectTargetId
                 && candidate.bindingDigest === proposalSettlement.targetBindingDigest);
@@ -2016,96 +1838,45 @@ export function createHostedControlLoop(input: {
                 && actual.provider === target.provider && actual.owner === target.owner
                 && actual.repo === target.repo;
             }) : null;
-            if (!target || !binding || proposalSettlement.branch !== `opentag/${proposalSettlement.runId}`
-              || proposalSettlement.baseRevision.length < 40
-              || proposalSettlement.finalRevision.length < 40
-              || proposalSettlement.finalTree.length < 40) {
-              throw new Error("proposal_ownership_local_authority_missing");
+            if (!target || !binding) {
+              throw new Error("publication_effect_local_authority_missing");
             }
-            await client.attestPublicationBranchOwnershipControlV1({
-              schemaVersion: 1, protocolVersion: "1.0",
-              requiredCapabilities: ["relay.publication.v1"],
-              requestId: `request_ownership_${proposalSettlement.candidateId}`,
-              organizationId: context.organizationId, runnerId: context.runnerId,
-              runnerGeneration: proposalSettlement.runnerGeneration,
-              runId: proposalSettlement.runId, attemptId: proposalSettlement.attemptId,
-              attemptNumber: proposalSettlement.attemptNumber,
-              fencingToken: proposalSettlement.fencingToken,
-              candidateId: proposalSettlement.candidateId,
-              candidateDigest: settled.candidateDigest,
-              projectTargetId: proposalSettlement.projectTargetId,
-              targetBindingDigest: proposalSettlement.targetBindingDigest,
-              remote: binding.pushRemote, baseBranch: binding.baseBranch,
-              frozenBaseRevision: proposalSettlement.baseRevision,
-              workspaceTreeDigest: proposalSettlement.finalTree,
-              branch: proposalSettlement.branch,
-              expectedHeadSha: proposalSettlement.finalRevision,
-              attestedAt: clock().toISOString(),
+            const proposalCreatedAt = proposalSettlement.proposalArtifact.createdAt;
+            if (typeof proposalCreatedAt !== "string") {
+              throw new Error("publication_effect_requested_at_missing");
+            }
+            const effectRequest = await buildPublicationEffectRequest({
+              organizationId: context.organizationId,
+              runnerId: context.runnerId,
+              runnerGeneration: context.credentialGeneration,
+              settlement: {
+                ...proposalSettlement,
+                candidateDigest: settled.candidateDigest,
+                proposalCreatedAt,
+              },
+              target,
+              binding,
+              now: clock(),
             });
+            const effect = await client.requestEffectControlV1(effectRequest);
+            if (effect.effectId !== effectRequest.effectId) {
+              throw new Error("publication_effect_identity_mismatch");
+            }
           }
-          settledProposalCandidates.add(proposalSettlement.candidateId);
+          await repo.markHostedProposalSettlementHandled({
+            destinationId: "cloud",
+            organizationId: context.organizationId,
+            runnerId: context.runnerId,
+            runId: proposalSettlement.runId,
+            candidateId: proposalSettlement.candidateId,
+            now: clock(),
+          });
           return true;
         }
-        const publicationDidWork = await runPublicationControlV1Iteration({
-          organizationId: context.organizationId,
-          runnerId: context.runnerId,
-          runnerGeneration: context.credentialGeneration,
-          now: clock,
-          client,
-          getLocalAuthority: async (capability) => {
-            const binding = publicationBinding({ capability,
-              repositories: input.config.repositories });
-            if (!binding || (capability.step === "create_draft_pull_request"
-              && !input.config.githubToken)) return null;
-            return repo.getHostedSucceededPublicationAuthority({
-              destinationId: "cloud", organizationId: capability.organizationId,
-              runnerId: capability.runnerId, runId: capability.runId,
-              attemptId: capability.attemptId,
-              fencingTokenDigest: capability.fencingTokenDigest,
-            });
-          },
-          pushOwnedBranch: async (capability) => {
-            const binding = publicationBinding({ capability,
-              repositories: input.config.repositories });
-            if (!binding || await localBranchHead({ binding, capability })
-              !== capability.expectedHeadSha) return { kind: "absent" };
-            try {
-              await pushBranch({ runner: nodeCommandRunner, workspacePath: binding.checkoutPath,
-                remote: capability.repository.remote, branchName: capability.branch });
-            } catch {
-              return { kind: "ambiguous" };
-            }
-            return observeRemoteBranch({ binding, capability });
-          },
-          createDraftPullRequest: async (capability) => {
-            if (!input.config.githubToken) return { kind: "ambiguous" };
-            return createExactDraftPullRequest({ token: input.config.githubToken,
-              owner: capability.repository.owner, repo: capability.repository.repo,
-              title: `OpenTag run ${capability.runId}`,
-              body: `Approved OpenTag publication candidate ${capability.candidateId}.`,
-              head: capability.branch, base: capability.repository.baseBranch,
-              expectedHeadSha: capability.expectedHeadSha,
-              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
-          },
-          reconcileOperation: async (capability) => {
-            const binding = publicationBinding({ capability,
-              repositories: input.config.repositories });
-            if (!binding) return { kind: "ambiguous" };
-            if (capability.step === "push_owned_branch") {
-              return observeRemoteBranch({ binding, capability });
-            }
-            if (!input.config.githubToken) return { kind: "ambiguous" };
-            return observeDraftPullRequest({ capability, token: input.config.githubToken,
-              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
-          },
-          observeCompletion: (capability, receipt) => {
-            if (!input.config.githubToken) throw new Error("publication_github_credential_unavailable");
-            return observePublicationCompletion({ capability, receipt,
-              token: input.config.githubToken, now: clock,
-              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
-          },
-          });
-        if (closed || publicationDidWork) return publicationDidWork;
+        if (context.capabilities.includes("relay.effect-authority.v1")) {
+          const effect = await currentEffectExecutor().runOnce();
+          if (closed || effect.outcome !== "idle") return effect.outcome !== "idle";
+        }
         const preImportRecovery =
           await repo.getHostedPreImportAuthorityRecovery({
             destinationId: "cloud",
@@ -2451,9 +2222,6 @@ export function createHostedControlLoop(input: {
               attemptId: claim.attempt.id,
               fencingToken: claim.attempt.fencingToken,
               executorId: claim.executorId,
-              reason: error instanceof Error
-                ? error.message
-                : "hosted_admission_failed",
               request,
             });
             if (closed) return false;

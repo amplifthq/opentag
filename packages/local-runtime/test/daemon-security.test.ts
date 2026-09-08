@@ -18,7 +18,7 @@ function event(metadata: Record<string, unknown>, permissions: OpenTagEvent["per
     sourceEventId: "EvSecurity",
     receivedAt: "2026-06-30T00:00:00.000Z",
     actor: { provider: "slack", providerUserId: "U123", handle: "alice", organizationId: "T123" },
-    target: { mention: "@opentag", agentId: "opentag", executorHint: "capture" },
+    target: { mention: "@opentag", executorHint: "capture" },
     command: { rawText: "fix this", intent: "fix", args: {} },
     context: [],
     permissions,

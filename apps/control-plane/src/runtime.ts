@@ -22,7 +22,7 @@ import {
 import { createHostedRunCoordinator } from "./modules/hosted-runs/index.js";
 import { createPermissionCoordinator } from "./modules/hosted-runs/permissions.js";
 import { createMaterialActionCoordinator } from "./modules/hosted-runs/material-actions.js";
-import { createPublicationPublisher } from "./modules/publication-candidates/publisher.js";
+import { createEffectAuthority } from "./modules/effects/index.js";
 import { createConsoleReadModel } from "./modules/console-reads/index.js";
 import {
   createIdentityModule,
@@ -39,10 +39,11 @@ import {
 } from "./modules/source-content/index.js";
 import { loadRelayContentKey } from "./modules/source-content/crypto.js";
 import { createSourceContentJobHandlers } from "./modules/source-content/worker.js";
-import { createSourceIngressService } from "./modules/source-ingress/index.js";
+import { createSourceIngressService, SOURCE_INGRESS_WAIT_LIMIT_MS } from "./modules/source-ingress/index.js";
 import { createPostgresSlackIngress, type SlackSecretResolver } from "./modules/slack-ingress/index.js";
 import { createPostgresDeliveryRepository } from "./modules/provider-delivery/repository.js";
 import { createProviderDeliveryWorker } from "./modules/provider-delivery/worker.js";
+import { createSlackDeliveryReconciler } from "./modules/provider-delivery/reconciliation.js";
 import { createTeamRelayProjectionJobHandler,
   createTeamRelayProjectionService } from "./modules/provider-delivery/team-relay-projection.js";
 import { createControlPlaneSourceThreadAuthority } from "./modules/slack-ingress/authority.js";
@@ -71,11 +72,11 @@ import { createSlackTeamRelayProjectionBlocks,
 
 const BASE_CAPABILITIES = [
   "relay.claim-fence.v1",
+  "relay.effect-authority.v1",
   "relay.hosted-admission.v1",
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.material-receipt.v1",
-  "relay.publication.v1",
   "relay.permission.v1",
   "relay.readiness.v1",
   "relay.registration.v1",
@@ -191,12 +192,13 @@ export function createControlPlaneRuntime(input: {
     pool: postgres.pool,
     clock,
   });
-  const publisher = createPublicationPublisher({
+  const effects = createEffectAuthority({
     pool: postgres.pool,
     clock,
-    idFactory: (kind) => `publication_${kind}_${randomBytes(16).toString("hex")}`,
-    issuePublicationAuthorityInTransaction: async (client, command) => {
-      await slack?.issuePublicationActionInTransaction(client, command);
+    idFactory: () => `effect_permit_${randomBytes(16).toString("hex")}`,
+    issueApprovalInTransaction: async (client, command) => {
+      if (!slack) throw new Error("effect_approval_channel_unavailable");
+      await slack.issueEffectApprovalActionInTransaction(client, command);
     },
   });
   const reads = createConsoleReadModel({ pool: postgres.pool });
@@ -258,34 +260,26 @@ export function createControlPlaneRuntime(input: {
         installation_id: string; binding_id: string; project_target_id: string | null;
         publication_mode: "proposal_only" | "pull_request"; team_id: string; app_id: string;
         channel_id: string; bot_user_id: string; member_user_ids: string[];
-        app_instance_id: string; source_binding_digest: string;
+        source_binding_digest: string;
         credential_generation: number; credential_generation_digest: string;
         runner_id: string | null; target_binding_digest: string | null;
         repository_provider: string | null; owner: string | null; repo: string | null;
         default_executor: string | null; default_branch: string | null;
+        binding_generation: number | null;
       }>(`SELECT slack.installation_id,slack.binding_id,slack.project_target_id,
           slack.publication_mode,slack.team_id,slack.app_id,slack.channel_id,
-          slack.bot_user_id,slack.member_user_ids,installation.app_instance_id,
-          installation.binding_digest AS source_binding_digest,
-          installation.credential_generation,installation.credential_generation_digest,
+          slack.bot_user_id,slack.member_user_ids,
+          slack.binding_digest AS source_binding_digest,
+          slack.credential_generation,slack.credential_generation_digest,
           target.runner_id,target.binding_digest AS target_binding_digest,
           target.provider AS repository_provider,target.owner,target.repo,
-          target.default_executor,target.default_branch
-        FROM cp_slack_installation slack
-        JOIN cp_source_app_installation installation
-          ON installation.organization_id=slack.organization_id
-         AND installation.installation_id=slack.installation_id
-        JOIN cp_source_binding binding
-          ON binding.organization_id=slack.organization_id
-         AND binding.binding_id=slack.binding_id
-         AND binding.installation_id=slack.installation_id
+          target.default_executor,target.default_branch,target.binding_generation
+        FROM cp_slack_binding slack
         LEFT JOIN cp_project_target target
           ON target.organization_id=slack.organization_id
          AND target.project_target_id=slack.project_target_id
         WHERE slack.organization_id=$1 AND slack.installation_id=$2
-          AND slack.binding_id=$3 AND installation.source_app_id='slack'
-          AND installation.state='active' AND binding.state='active'
-          AND binding.binding_digest=installation.binding_digest`,
+          AND slack.binding_id=$3 AND slack.state='active'`,
       [command.reservation.organizationId, command.reservation.installationId,
         command.reservation.bindingId]);
       const installation = installationResult.rows[0];
@@ -343,6 +337,7 @@ export function createControlPlaneRuntime(input: {
       const readyTarget = readiness?.success ? readiness.data.payload.targets.find((candidate) =>
         candidate.projectTargetId === installation.project_target_id
           && candidate.bindingDigest === installation.target_binding_digest
+          && candidate.bindingGeneration === installation.binding_generation
           && candidate.state === "ready") : null;
       const readyExecutor = readiness?.success ? readiness.data.payload.executors.find((candidate) =>
         candidate.executorId === installation.default_executor && candidate.state === "ready") : null;
@@ -350,7 +345,7 @@ export function createControlPlaneRuntime(input: {
         || readiness.data.organizationId !== command.reservation.organizationId
         || readiness.data.producer.id !== installation.runner_id
         || !readyTarget || !readyExecutor) {
-        return { kind: "temporarily_unavailable", code: "runner_not_ready" } as const;
+        return { kind: "waiting_for_readiness", code: "runner_not_ready" } as const;
       }
       const repository = { provider: "github" as const,
         providerRepositoryId: installation.project_target_id,
@@ -370,7 +365,8 @@ export function createControlPlaneRuntime(input: {
       const operationId = `operation_admit_${identitySuffix}`;
       const snapshotId = `policy_${identitySuffix}`;
       const receivedAt = event.receivedAt;
-      const queueClaimDeadline = new Date(Date.parse(receivedAt) + 8 * 60 * 60 * 1_000).toISOString();
+      const queueClaimDeadline = new Date(Date.parse(command.reservation.createdAt)
+        + SOURCE_INGRESS_WAIT_LIMIT_MS).toISOString();
       const authorizationRef = `slack_${installation.binding_id}_${actor.providerUserId}`;
       const policyPayload = {
         snapshotId, capturedAt: receivedAt,
@@ -391,7 +387,7 @@ export function createControlPlaneRuntime(input: {
         admissionRules: { profile: "slack-app-mention/v1",
           requiredCheckNames: [] as string[], mergeRequired: false,
           humanApprovalRequiredFor: installation.publication_mode === "pull_request"
-            ? ["publication"] : [] },
+            ? ["github.create_draft_pull_request"] : [] },
       };
       const policySeed = {
         schemaVersion: 1 as const, protocolVersion: "1.0" as const,
@@ -451,18 +447,22 @@ export function createControlPlaneRuntime(input: {
         idempotencyKey: command.idempotencyKey, runId,
         admissionDigest: admission.envelopeDigest, policyDigest: policy.receiptDigest,
       });
-      await postgres.pool.query(
-        `INSERT INTO cp_source_resolution_admission(idempotency_key, organization_id,
-           request_digest, run_id, state, resolution, created_at)
-         VALUES($1,$2,$3,$4,'pending',NULL,$5) ON CONFLICT (idempotency_key) DO NOTHING`,
-        [command.idempotencyKey, admission.organizationId,
-          requestDigest, runId, clock.now()],
-      );
+      if (command.idempotencyKey !== `source-ingress:${command.reservation.reservationId}`) {
+        return { kind: "invalid_request", code: "source_resolution_idempotency_conflict" } as const;
+      }
       const durable = await postgres.pool.query<{ request_digest: string;
-        run_id: string; state: "pending" | "decided"; resolution: {
-          kind: "accepted" | "waiting_for_runner"; runId: string } | null }>(
-        `SELECT request_digest, run_id, state, resolution FROM cp_source_resolution_admission
-         WHERE idempotency_key = $1`, [command.idempotencyKey],
+        run_id: string }>(
+        `UPDATE cp_ingress_reservation
+         SET resolution_request_digest = COALESCE(resolution_request_digest, $3),
+             resolution_run_id = COALESCE(resolution_run_id, $4)
+         WHERE organization_id = $1 AND reservation_id = $2 AND state = 'pending'
+           AND (
+             (resolution_request_digest IS NULL AND resolution_run_id IS NULL)
+             OR (resolution_request_digest = $3 AND resolution_run_id = $4)
+           )
+         RETURNING resolution_request_digest AS request_digest,
+                   resolution_run_id AS run_id`,
+        [admission.organizationId, command.reservation.reservationId, requestDigest, runId],
       );
       const stored = durable.rows[0];
       if (!stored || stored.request_digest !== requestDigest || stored.run_id !== runId) {
@@ -488,7 +488,7 @@ export function createControlPlaneRuntime(input: {
       const text = renderSlackTeamRelayProjection(presentation);
       const blocks = createSlackTeamRelayProjectionBlocks(presentation);
       const providerBinding = { bindingKind: "established" as const,
-        providerId: "slack", providerInstanceId: installation.app_instance_id,
+        providerId: "slack", providerInstanceId: installation.installation_id,
         providerPrincipalDigest: `sha256:${createHash("sha256")
           .update(installation.bot_user_id).digest("hex")}`,
         principalAssurance: "provider_verified" as const,
@@ -532,11 +532,6 @@ export function createControlPlaneRuntime(input: {
       const resolution = admitted.view.status === "waiting_for_runner"
         ? { kind: "waiting_for_runner", runId: admitted.runId } as const
         : { kind: "accepted", runId: admitted.runId } as const;
-      await postgres.pool.query(
-        `UPDATE cp_source_resolution_admission SET state = 'decided', resolution = $2::jsonb
-         WHERE idempotency_key = $1 AND request_digest = $3 AND run_id = $4`,
-        [command.idempotencyKey, JSON.stringify(resolution), requestDigest, runId],
-      );
       return resolution;
     },
   } satisfies SourceResolutionPort;
@@ -558,12 +553,13 @@ export function createControlPlaneRuntime(input: {
   slack = sourceContent && input.slackSecrets
     ? createPostgresSlackIngress({ pool: postgres.pool, clock, custody: sourceContent,
         jobs, secrets: input.slackSecrets, sourceApps, commandAuthority: slackCommandAuthority,
-        publicationAuthority: { approve: (command) => publisher.approve(command) },
+        effectAuthority: { approve: (command) => effects.approve(command) },
         ...(input.slackFetchImpl ? { fetchImpl: input.slackFetchImpl } : {}) })
     : null;
+  const providerAdapters = new ProviderAdapterRegistry<object>(sourceApps);
   const providerDeliveryKernel = new ProviderSideEffectKernel<object>({
     repository: providerDeliveryRepository,
-    registry: new ProviderAdapterRegistry<object>(sourceApps),
+    registry: providerAdapters,
     prepareRequest(intent, stored) {
       const payload = stored as DeliveryPayloadEnvelope<object>;
       return { request: payload.providerRequest, operation: intent.operation,
@@ -596,6 +592,14 @@ export function createControlPlaneRuntime(input: {
       return { registered: sourceApps.deliveryAuthorities().length,
         healthy: sourceApps.deliveryAuthorities(), failures: preload?.failures ?? [] };
     }, clock });
+  const slackDeliveryReconciler = createSlackDeliveryReconciler({ pool: postgres.pool, jobs,
+    owner: deliveryRuntimeOwner, clock, async observe(intent, request) {
+      await slack?.preloadSourceApps();
+      const adapter = providerAdapters.resolve({ organizationId: intent.organizationId,
+        binding: intent.providerBinding });
+      if (!adapter) throw new Error("slack_observation_binding_unavailable");
+      return adapter.reconcile({ intent, request });
+    } });
   const jobHandlers = {
     "hosted-attempt-reconciliation": async (job: { organizationId: string | null }) => {
       const queued = await hosted.expireQueued(job.organizationId);
@@ -604,6 +608,16 @@ export function createControlPlaneRuntime(input: {
     },
     "runner-readiness-retention": async (job: { organizationId: string | null }) =>
       runners.pruneExpiredReadiness(job.organizationId),
+    "provider-delivery-observation": async (job: { payload: unknown }) => {
+      const window = z.object({ windowStart: z.iso.datetime({ offset: true }) }).parse(job.payload);
+      // After downtime, old minute ticks must not burst Slack reads. Durable
+      // per-intent obligations are picked up by the next current window instead.
+      if (Date.parse(window.windowStart) !== Math.floor(clock.now().getTime() / 60_000) * 60_000) {
+        return { kind: "stale_window" } as const;
+      }
+      await slackDeliveryReconciler.schedule();
+      return slackDeliveryReconciler.processNext();
+    },
     "provider-delivery": async () => {
       let delivered = 0;
       for (; delivered < 100; delivered += 1) {
@@ -612,6 +626,7 @@ export function createControlPlaneRuntime(input: {
       }
       return { kind: "bounded", delivered };
     },
+    "job-retention": async () => jobs.pruneTerminalMaintenance(),
     "team-relay.project.v2": createTeamRelayProjectionJobHandler(teamRelayProjection),
     ...(sourceContent ? createSourceContentJobHandlers(sourceContent) : {}),
   };
@@ -657,7 +672,7 @@ export function createControlPlaneRuntime(input: {
             const slackSchema = await checkSlackIngressSchemaReadiness(postgres.pool);
             if (!slackSchema.ready) return slackSchema;
             const configured = await postgres.pool.query<{ count: number }>(
-              "SELECT count(*)::int AS count FROM cp_slack_installation");
+              "SELECT count(*)::int AS count FROM cp_slack_binding WHERE state='active'");
             if ((configured.rows[0]?.count ?? 0) > 0 && !slack) {
               return { ready: false, reason: "configuration_invalid" };
             }
@@ -700,7 +715,7 @@ export function createControlPlaneRuntime(input: {
       runners,
       hosted,
       materials,
-      publisher,
+      effects,
       permissions,
       ...(sourceContent ? { sourceContent } : {}),
       ...(sourceIngress ? { sourceIngress } : {}),
@@ -723,11 +738,12 @@ export function createControlPlaneRuntime(input: {
     scheduleJobs,
     materials,
     permissions,
-    publisher,
+    effects,
     providerDeliveryKernel,
     providerDeliveryProducer,
     providerDeliveryRepository,
     providerDeliveryWorker,
+    slackDeliveryReconciler,
     teamRelayProjection,
     reads,
     runners,

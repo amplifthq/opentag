@@ -15,18 +15,15 @@ describe("console API client", () => {
     );
   });
 
-  it("loads the derived Agent Presence projection with same-origin credentials", async () => {
-    const presence = {
-      state: "available",
-      reason: "Slack, Project Target, Runner, and fresh readiness are available.",
-      agents: [],
-    };
-    const fetchImplementation = vi.fn(async () => Response.json({ presence }));
+  it("loads Teammates with same-origin credentials", async () => {
+    const teammates = [{ teammateId: "binding_1", displayName: "Release teammate",
+      workState: "ready" }];
+    const fetchImplementation = vi.fn(async () => Response.json(teammates));
     const api = createConsoleApi(fetchImplementation);
 
-    await expect(api.presence()).resolves.toEqual(presence);
+    await expect(api.teammates()).resolves.toEqual(teammates);
     expect(fetchImplementation).toHaveBeenCalledWith(
-      "/api/console/presence",
+      "/api/console/teammates",
       expect.objectContaining({ credentials: "same-origin" }),
     );
   });

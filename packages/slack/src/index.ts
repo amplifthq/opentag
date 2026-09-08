@@ -4,3 +4,4 @@ export * from "./render.js";
 export * from "./signature.js";
 export * from "./context.js";
 export * from "./source-app.js";
+export { SlackObservationRateLimit } from "./observation.js";

@@ -37,7 +37,7 @@ import { withPostgresTransaction, type PostgresTransactionClient } from "../../d
 import type { RuntimePrincipal } from "../runners/index.js";
 import { cancellationMaterialEvidence,
   classifyAttemptMaterialActionCancellationTruth,
-  classifyAttemptMaterialActionTruth } from "./material-actions.js";
+  classifyAttemptMaterialActionTruth, areAttemptLocalWritesResolved } from "./material-actions.js";
 
 type Clock = { now(): Date };
 type IdFactory = (kind: "attempt") => string;
@@ -583,9 +583,9 @@ export function createHostedRunCoordinator(input: {
           ],
         );
         const existingClaim = await client.query(
-          `SELECT request_digest, run_id, claim
-           FROM cp_hosted_claim
-           WHERE organization_id = $1 AND operation_id = $2`,
+          `SELECT claim_request_digest AS request_digest, run_id, claim
+           FROM cp_hosted_attempt
+           WHERE organization_id = $1 AND claim_operation_id = $2`,
           [principal.organizationId, request.operationId],
         ) as { rows: Array<{ request_digest: string; run_id: string; claim: unknown }> };
         const replay = existingClaim.rows[0];
@@ -743,9 +743,11 @@ export function createHostedRunCoordinator(input: {
         await client.query(
           `INSERT INTO cp_hosted_attempt(
              organization_id, run_id, attempt_number, attempt_id, runner_id,
-             credential_id, fencing_token_digest, lease_expires_at, state,
+             credential_id, fencing_token_digest, claim_operation_id,
+             claim_request_digest, claim, lease_expires_at, state,
              claimed_at, updated_at
-           ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, 'claimed', $9, $9)`,
+           ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb,
+             $11, 'claimed', $12, $12)`,
           [
             principal.organizationId,
             run.run_id,
@@ -754,6 +756,9 @@ export function createHostedRunCoordinator(input: {
             principal.runnerId,
             principal.credentialId,
             fencingTokenDigest,
+            request.operationId,
+            requestDigest,
+            JSON.stringify(claimForStorage(claim)),
             leaseExpiresAt,
             now.toISOString(),
           ],
@@ -763,20 +768,6 @@ export function createHostedRunCoordinator(input: {
            SET state = 'assigned', current_attempt_number = $3, updated_at = $4
            WHERE organization_id = $1 AND run_id = $2`,
           [principal.organizationId, run.run_id, attemptNumber, now.toISOString()],
-        );
-        await client.query(
-          `INSERT INTO cp_hosted_claim(
-             organization_id, operation_id, request_digest, run_id, claim,
-             created_at
-           ) VALUES($1, $2, $3, $4, $5::jsonb, $6)`,
-          [
-            principal.organizationId,
-            request.operationId,
-            requestDigest,
-            run.run_id,
-            JSON.stringify(claimForStorage(claim)),
-            now.toISOString(),
-          ],
         );
         await client.query(
           `INSERT INTO cp_hosted_audit_event(
@@ -1267,7 +1258,7 @@ export function createHostedRunCoordinator(input: {
           ? HostedLifecycleReceiptEnvelopeV1Schema.parse(executorResult.rows[0].receipt) : null;
         if (!executorReceipt || executorReceipt.payload.operation !== "executor_result"
           || executorReceipt.payload.conclusion !== "success"
-          || !executorReceipt.payload.artifactDigests.includes(artifact.metadata.artifactDigest)
+          || !executorReceipt.payload.artifactDigests.includes(await computeControlPayloadDigestV1(artifact))
           || canonicalJsonStringify(executorReceipt.payload.evidenceDigests)
             !== canonicalJsonStringify(evidence.verificationEvidenceDigests)) {
           return { kind: "conflict", reason: "invalid_evidence" } as const;
@@ -1280,6 +1271,9 @@ export function createHostedRunCoordinator(input: {
           organizationId: command.principal.organizationId, runId: command.runId,
           attemptId: attempt.attempt_id,
         });
+        const localWritesResolved = materialTruth.kind === "started_or_ambiguous"
+          && await areAttemptLocalWritesResolved(client, { organizationId: command.principal.organizationId,
+            runId: command.runId, attemptId: attempt.attempt_id });
         const evaluatedAt = existing?.assessment.assessedAt ?? input.clock.now().toISOString();
         const candidateResult = PublicationCandidateSchema.safeParse({
           candidateId: command.candidateId, runId: command.runId,
@@ -1304,7 +1298,7 @@ export function createHostedRunCoordinator(input: {
           publicationPolicyDigest: run.publication_policy_digest,
           candidate,
           unresolvedMaterialOutcomes: [
-            ...(materialTruth.kind === "proven_not_started"
+            ...(materialTruth.kind === "proven_not_started" || localWritesResolved
               ? [] : [materialTruth.reconciliationIdentity]),
             ...(run.outcome_state === "outcome_unknown" ? [`${run.run_id}:outcome_unknown`] : []),
           ],

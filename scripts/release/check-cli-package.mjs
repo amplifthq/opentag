@@ -236,11 +236,46 @@ function checkInstalledSqliteRuntime(installDir) {
       const expected = [
         "attempts", "control_plane_projection_outbox", "hosted_attempt_imports",
         "hosted_claim_operations", "hosted_lifecycle_operations", "hosted_run_imports",
-        "opentag_paired_runner_schema", "opentag_schema_migrations", "run_events",
-        "runs", "source_deliveries", "work_threads"
+        "local_effect_attempts",
+        "opentag_paired_runner_schema",
+        "runs", "work_threads"
       ];
       if (JSON.stringify(tables) !== JSON.stringify(expected)) {
         throw new Error("Packed SQLite runtime created an unexpected paired schema: " + JSON.stringify(tables));
+      }
+      const hostedImportColumns = sqlite.prepare(
+        "PRAGMA table_info(hosted_run_imports)"
+      ).all().map(({ name }) => name);
+      if (
+        !hostedImportColumns.includes("source_provider")
+        || !hostedImportColumns.includes("source_delivery_id")
+      ) {
+        throw new Error("Packed SQLite runtime did not fold source delivery identity into hosted_run_imports.");
+      }
+      const sourceDeliveryIndex = sqlite.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'hosted_run_imports_source_delivery_idx'"
+      ).get();
+      if (!sourceDeliveryIndex?.sql?.includes("source_provider, source_delivery_id")) {
+        throw new Error("Packed SQLite runtime is missing hosted source-delivery uniqueness.");
+      }
+      const readinessRetentionGuard = sqlite.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'control_plane_projection_outbox_delete_guard'"
+      ).get();
+      if (
+        !readinessRetentionGuard?.sql?.includes("OLD.state = 'acknowledged'")
+        || !readinessRetentionGuard.sql.includes("newer.state = 'acknowledged'")
+      ) {
+        throw new Error("Packed SQLite runtime is missing the bounded readiness-retention guard.");
+      }
+      const lifecycleRetentionGuard = sqlite.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'hosted_lifecycle_operations_delete_guard'"
+      ).get();
+      if (
+        !lifecycleRetentionGuard?.sql?.includes("OLD.action IN ('heartbeat', 'progress')")
+        || !lifecycleRetentionGuard.sql.includes("successor.state = 'acknowledged'")
+        || !lifecycleRetentionGuard.sql.includes("successor.sequence > OLD.sequence")
+      ) {
+        throw new Error("Packed SQLite runtime is missing the bounded lifecycle-retention guard.");
       }
     } finally {
       sqlite.close();

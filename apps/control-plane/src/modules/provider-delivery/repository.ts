@@ -197,19 +197,18 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
           }
         }
         const inserted = await client.query(`INSERT INTO cp_provider_delivery_intent(
-            intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,
+            intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,
             presentation_phase,current_truth_key,state,revision,sequence,
             scope_kind,scope_id,idempotency_key,provider_id,provider_instance_id,provider_binding_digest,
             provider_config_generation,provider_config_generation_digest,runtime_owner_id,runtime_generation,
             schema_generation,authority_snapshot_digest,status_message_id,run_id,projection_revision,
             projection_event_sequence,projection_purpose,
             deadline_at,created_at,updated_at)
-            VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,'pending',1,$10,$11,$12,$13,$14,$15,
-              $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$29)
+            VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,'pending',1,$9,$10,$11,$12,$13,$14,
+              $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$28)
             ON CONFLICT DO NOTHING RETURNING intent_id`,
           [intent.sideEffectIntentId, intent.organizationId, digest, JSON.stringify(intent), JSON.stringify(payload),
-            providerPayloadDigest, `postgres-jsonb:${intent.sideEffectIntentId}:${providerPayloadDigest}`,
-            payload.phase, truthKey, intent.initialAttemptSequence,
+            providerPayloadDigest, payload.phase, truthKey, intent.initialAttemptSequence,
             intent.scope.kind, intent.scope.id, intent.idempotencyKey, binding.providerId,
             binding.providerInstanceId, binding.bindingDigest, binding.providerConfigGeneration,
             binding.providerConfigGenerationDigest, options.owner.runtimeOwnerId,

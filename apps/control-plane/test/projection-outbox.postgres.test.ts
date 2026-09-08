@@ -39,9 +39,11 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       new Date(now.getTime() + 300_000), digest("ceiling"), digest("policy"),
       digest("completion"), now]);
     await fixture.pool.query(`INSERT INTO cp_hosted_attempt(organization_id,run_id,attempt_number,
-      attempt_id,runner_id,credential_id,fencing_token_digest,lease_expires_at,material_start_state,
+      attempt_id,runner_id,credential_id,fencing_token_digest,claim_operation_id,
+      claim_request_digest,claim,lease_expires_at,material_start_state,
       state,claimed_at,updated_at) VALUES('org_projection','run_projection',1,'attempt_projection',
-      'runner_projection','credential_projection',$1,$2,'open','claimed',$3,$3)`,
+      'runner_projection','credential_projection',$1,'operation_projection_claim',
+      'request_digest_projection_claim','{}'::jsonb,$2,'open','claimed',$3,$3)`,
     [digest("fence"), new Date(now.getTime() + 60_000), now]);
   }
 
@@ -58,120 +60,6 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     expect(jobs.rows).toEqual([{ revision: "1" }, { revision: "2" }, { revision: "3" }]);
   });
 
-  it("upgrades pre-0019 delivery jobs, seeds the cursor, and projects the exact legacy event once", async () => {
-    await fixture.close();
-    fixture = await createIsolatedPostgres();
-    const firstNewMigration = fixture.migrations.findIndex((migration) =>
-      migration.name === "0019_projection_event_sequence.sql");
-    expect(firstNewMigration).toBeGreaterThan(0);
-    await runMigrations(fixture.pool, fixture.migrations.slice(0, firstNewMigration));
-    await fixture.pool.query("INSERT INTO cp_organization(organization_id,display_name) VALUES('org_projection','Projection')");
-    await fixture.pool.query(`INSERT INTO cp_runner(organization_id,runner_id,registration_generation,
-      credential_generation,current_credential_id,capabilities,created_at,updated_at)
-      VALUES('org_projection','runner_projection',1,1,'credential_projection','[]',$1,$1)`, [now]);
-    await insertRun();
-    const legacyIntent = DeliveryIntentV2Schema.parse({ contractVersion: 2,
-      organizationId: "org_projection", sideEffectIntentId: "intent_legacy_event",
-      causalId: "legacy-event", intentKind: "delivery", operation: "update", deliveryKind: "message",
-      presentationDigest: digest("legacy-event"), provenance: { kind: "business",
-        repositoryIdentityDigest: digest("repo"), runId: "run_projection",
-        authorityLineageDigest: digest("authority") }, providerBinding: { bindingKind: "established",
-        providerId: "slack", providerInstanceId: "A1", providerPrincipalDigest: digest("principal"),
-        principalAssurance: "provider_verified", providerConfigGeneration: 1,
-        providerConfigGenerationDigest: digest("generation"), lifecycle: "active",
-        bindingDigest: digest("binding") }, targetDigest: digest("target"),
-      authorityKind: "run_authority", authoritySnapshotDigest: digest("snapshot"),
-      evidencePolicy: "local_audit", idempotencyKey: "legacy-event", statusMessageId: "external:status",
-      scope: { kind: "local_repository", id: "repo" }, createdAt: now.toISOString(),
-      initialAttemptSequence: 1 });
-    await fixture.pool.query(`INSERT INTO cp_provider_delivery_intent(intent_id,organization_id,
-      journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,presentation_phase,
-      current_truth_key,state,revision,sequence,scope_kind,scope_id,idempotency_key,provider_id,
-      provider_instance_id,provider_binding_digest,provider_config_generation,
-      provider_config_generation_digest,runtime_owner_id,runtime_generation,schema_generation,
-      authority_snapshot_digest,status_message_id,run_id,projection_revision,projection_purpose,
-      deadline_at,created_at,updated_at)
-      VALUES($1,'org_projection',$2,$3,$4,$5,'legacy-custody','running',$6,'pending',1,1,
-      'local_repository','repo','legacy-event','slack','A1',$7,1,$8,'control-plane',1,1,$9,
-      'external:status','run_projection',1,'external',$10,$11,$11)`,
-    [legacyIntent.sideEffectIntentId,digest("legacy-journal"),legacyIntent,
-      {providerRequest:{operation:{kind:"update_message",channelId:"C1",messageTs:"170.1"}}},
-      digest("legacy-payload"),digest("legacy-truth"),digest("binding"),digest("generation"),
-      digest("snapshot"),new Date(now.getTime()+300_000),now]);
-    await fixture.pool.query(`UPDATE cp_provider_delivery_intent SET state='leased',revision=2,
-      lease_owner='legacy-worker',lease_expires_at=$2,lease_fence='legacy-fence',lease_fence_digest=$3,
-      updated_at=$4 WHERE intent_id=$1`,[legacyIntent.sideEffectIntentId,
-      new Date(now.getTime()+60_000),digest("legacy-fence"),new Date(now.getTime()+1)]);
-    await fixture.pool.query(`UPDATE cp_provider_delivery_intent SET state='provider_io_begun',revision=3,
-      installation_begin_marker_id='legacy-install',installation_begin_marker_digest=$2,
-      scope_begin_marker_id='legacy-scope',scope_begin_marker_digest=$2,begun_at=$3,updated_at=$3
-      WHERE intent_id=$1`,[legacyIntent.sideEffectIntentId,digest("legacy-marker"),new Date(now.getTime()+2)]);
-    await fixture.pool.query(`UPDATE cp_provider_delivery_intent SET state='rejected',revision=4,
-      evidence_digest=$2,error_code='slack_rejected',outcome_recorded_at=$3,updated_at=$3
-      WHERE intent_id=$1`,[legacyIntent.sideEffectIntentId,digest("legacy-evidence"),new Date(now.getTime()+3)]);
-    const legacyJob = await fixture.pool.query<{job_id:string}>(`SELECT job_id FROM cp_job
-      WHERE job_kind='team-relay.project' AND payload->>'deliveryIntentId'=$1
-        AND (payload->>'deliveryRevision')::integer=4`,[legacyIntent.sideEffectIntentId]);
-    expect(legacyJob.rows).toHaveLength(1);
-    await runMigrations(fixture.pool,fixture.migrations);
-    const cursor = await fixture.pool.query<{current_sequence:number}>(`SELECT current_sequence
-      FROM cp_projection_event_cursor WHERE organization_id='org_projection' AND run_id='run_projection'`);
-    const historicalMax = await fixture.pool.query<{maximum:number}>(`SELECT max(event_sequence)::int maximum
-      FROM cp_projection_delivery_watermark WHERE organization_id='org_projection' AND run_id='run_projection'`);
-    expect(cursor.rows[0]?.current_sequence).toBe(historicalMax.rows[0]?.maximum);
-    const migrated = await fixture.pool.query<{payload:any}>("SELECT payload FROM cp_job WHERE job_id=$1",
-      [legacyJob.rows[0]!.job_id]);
-    expect(migrated.rows[0]?.payload).toMatchObject({ deliveryIntentId: legacyIntent.sideEffectIntentId,
-      deliveryRevision: 4, eventSequence: expect.any(Number) });
-    await fixture.pool.query(`UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'
-      AND job_id<>$1`,[legacyJob.rows[0]!.job_id]);
-    const projected: any[]=[];
-    const projectionRepository=createPostgresDeliveryRepository({pool:fixture.pool,owner,
-      leaseOwner:"legacy-projection",leaseSeconds:30,now:()=>new Date(now.getTime()+10)});
-    const service=createTeamRelayProjectionService({pool:fixture.pool,hosted:{inspect:async()=>({
-      state:"queued",canonicalStatus:"queued",status:"waiting_for_runner",
-      queueClaimDeadline:new Date(now.getTime()+300_000).toISOString(),outcome:null,
-      terminalKind:null,terminalReason:null})} as any,clock:{now:()=>new Date(now.getTime()+10)},
-      producer:{async enqueue(value){projected.push(value);await projectionRepository.recordIntent(value.intent,{
-        envelopeVersion:1,providerRequest:value.providerRequest,phase:value.phase,
-        frozenDeadline:new Date(now.getTime()+300_000).toISOString(),currentTruth:deliveryCurrentTruthDescriptor({
-          intent:value.intent,owner:{organizationId:"org_projection",providerId:"slack",providerInstanceId:"A1",
-            providerBindingDigest:digest("binding"),providerConfigGeneration:1,
-            providerConfigGenerationDigest:digest("generation"),...owner}})});}}});
-    const queueNow=new Date(Date.now()+1_000);
-    const queue=createDurableJobQueue({pool:fixture.pool,clock:{now:()=>queueNow},
-      leaseDurationMs:30_000,tokenFactory:()=>"legacy-job-lease"});
-    await expect(runOneJob({queue,workerId:"legacy-worker",handlers:{
-      "team-relay.project.v2":createTeamRelayProjectionJobHandler(service)},retryDelayMs:1000,
-      clock:{now:()=>queueNow}})).resolves.toEqual({kind:"settled",jobId:legacyJob.rows[0]!.job_id});
-    expect(projected).toHaveLength(1);
-    expect(projected[0]?.intent.projectionEventSequence).toBe(migrated.rows[0]?.payload.eventSequence);
-    const nextIntent=DeliveryIntentV2Schema.parse({...legacyIntent,sideEffectIntentId:"intent_after_upgrade",
-      idempotencyKey:"after-upgrade",scope:{kind:"local_repository",id:"repo-after-upgrade"},
-      presentationDigest:digest("after-upgrade"),createdAt:new Date(now.getTime()+5).toISOString()});
-    const nextRepository=createPostgresDeliveryRepository({pool:fixture.pool,owner,
-      leaseOwner:"after-upgrade-worker",leaseSeconds:30,now:()=>new Date(now.getTime()+20)});
-    await nextRepository.recordIntent(nextIntent,{envelopeVersion:1,providerRequest:{},phase:"running",
-      frozenDeadline:new Date(now.getTime()+300_000).toISOString(),currentTruth:deliveryCurrentTruthDescriptor({
-        intent:nextIntent,owner:{organizationId:"org_projection",providerId:"slack",providerInstanceId:"A1",
-          providerBindingDigest:digest("binding"),providerConfigGeneration:1,
-          providerConfigGenerationDigest:digest("generation"),...owner}})});
-    const nextClaim=(await nextRepository.claimNext())!;
-    const nextRenewed=(await nextRepository.renewLease(nextClaim))!;
-    const nextBegun=(await nextRepository.markBegin({...nextRenewed,
-      installationBeginMarkerId:"after-upgrade-install",installationBeginMarkerDigest:digest("after-upgrade-marker"),
-      scopeBeginMarkerId:"after-upgrade-scope",scopeBeginMarkerDigest:digest("after-upgrade-marker")}))!;
-    await nextRepository.settleOrReadTerminal({...nextBegun,outcome:"accepted",
-      evidenceDigest:digest("after-upgrade-evidence")});
-    const newEvent=await fixture.pool.query<{event_sequence:number}>(`SELECT event_sequence
-      FROM cp_projection_delivery_watermark WHERE intent_id=$1 AND delivery_state='accepted'`,
-    [nextIntent.sideEffectIntentId]);
-    expect(newEvent.rows).toEqual([{event_sequence:historicalMax.rows[0]!.maximum+1}]);
-    const newJobs=await fixture.pool.query<{count:number}>(`SELECT count(*)::int count FROM cp_job
-      WHERE job_kind='team-relay.project.v2' AND payload->>'deliveryIntentId'=$1
-        AND (payload->>'eventSequence')::integer=$2`,[nextIntent.sideEffectIntentId,newEvent.rows[0]!.event_sequence]);
-    expect(newJobs.rows).toEqual([{count:1}]);
-  });
 
   it("rejects a delayed older running projection after terminal revision commits", async () => {
     await insertRun();
@@ -275,7 +163,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     expect(requests).toEqual([]);
   });
 
-  it("creates one Slack anchor and uses update_message for later projections", async () => {
+  it("updates one Slack anchor without issuing action controls for terminal projections", async () => {
     await insertRun();
     const requests: any[] = [];
     const baseline = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_projection",
@@ -311,16 +199,35 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await repository.settleOrReadTerminal({ ...begun, outcome: "accepted",
       evidenceDigest: digest("evidence"), externalResourceId: "171.001",
       externalResourceDigest: digest("resource") });
+    let projectionStatus = "waiting_for_runner";
+    let controlIssueCount = 0;
     const service = createTeamRelayProjectionService({ pool: fixture.pool,
       hosted: { inspect: async () => ({ state: "queued", canonicalStatus: "queued",
-        status: "waiting_for_runner", queueClaimDeadline: new Date(now.getTime()+300_000).toISOString(),
+        status: projectionStatus, queueClaimDeadline: new Date(now.getTime()+300_000).toISOString(),
         outcome: null, terminalKind: null, terminalReason: null }) } as any,
+      controls: { async issueProjectionControls() {
+        controlIssueCount += 1;
+        return [{ kind: "approve", actionId: "opaque-approval", generation: 1 }];
+      } },
       producer: { async enqueue(value) { requests.push(value); } }, clock: { now: () => now } });
     await service.projectRun({ organizationId: "org_projection", runId: "run_projection" });
     expect(requests).toHaveLength(1);
     expect(requests[0].intent.operation).toBe("update");
     expect(requests[0].providerRequest.operation).toEqual({ kind: "update_message",
-      channelId: "C1", messageTs: "171.001" });
+      channelId: "C1", messageTs: "171.001", threadTs: "1700000000.1" });
+    expect(controlIssueCount).toBe(1);
+    for (const status of ["proposal_ready", "ready_for_review", "failed", "cancelled",
+      "interrupted", "timed_out"]) {
+      projectionStatus = status;
+      const projected = await service.projectRun({ organizationId: "org_projection", runId: "run_projection" });
+      expect(projected.kind).toBe("queued");
+      expect(controlIssueCount).toBe(1);
+      expect(requests.at(-1).phase).toBe("terminal");
+      expect(requests.at(-1).providerRequest.presentation.blocks
+        .some((block: { type: string }) => block.type === "actions")).toBe(false);
+    }
+    projectionStatus = "waiting_for_runner";
+    requests.splice(1);
     const external=DeliveryIntentV2Schema.parse({...baseline,sideEffectIntentId:"external_rejected",
       idempotencyKey:"external_rejected",projectionPurpose:"external",
       presentationDigest:digest("external-rejected"),createdAt:new Date(now.getTime()+1).toISOString()});
@@ -328,7 +235,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       organizationId:external.organizationId,providerId:"slack",providerInstanceId:"A1",
       providerBindingDigest:digest("binding"),providerConfigGeneration:1,
       providerConfigGenerationDigest:digest("generation"),...owner}})};
-    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'");
+    await fixture.pool.query("DELETE FROM cp_job WHERE job_kind='team-relay.project.v2'");
     await repository.recordIntent(external,externalPayload);
     const externalClaim=(await repository.claimNext())!;
     const externalRenewed=(await repository.renewLease(externalClaim))!;
@@ -363,7 +270,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       FROM cp_provider_delivery_intent WHERE intent_id=$1`,[requests[1]!.intent.sideEffectIntentId])).rows[0])
       .toEqual({projection_revision:2,projection_event_sequence:event.rows[0]!.event_sequence,state:"pending"});
     await fixture.pool.query(`INSERT INTO cp_provider_delivery_intent(
-      intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,
+      intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,
       presentation_phase,current_truth_key,state,revision,sequence,scope_kind,scope_id,idempotency_key,
       provider_id,provider_instance_id,provider_binding_digest,provider_config_generation,
       provider_config_generation_digest,runtime_owner_id,runtime_generation,schema_generation,
@@ -373,7 +280,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       external_resource_id,outcome_recorded_at,deadline_at,created_at,updated_at)
       SELECT 'intent_duplicate_anchor',organization_id,$1,
         jsonb_set(jsonb_set(intent,'{sideEffectIntentId}','"intent_duplicate_anchor"'),
-          '{idempotencyKey}','"duplicate_anchor"'),payload,$2,'duplicate-custody',presentation_phase,
+          '{idempotencyKey}','"duplicate_anchor"'),payload,$2,presentation_phase,
         current_truth_key,state,revision,sequence,scope_kind,scope_id,'duplicate_anchor',provider_id,
         provider_instance_id,provider_binding_digest,provider_config_generation,
         provider_config_generation_digest,runtime_owner_id,runtime_generation,schema_generation,
@@ -508,7 +415,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await fixture.pool.query(`INSERT INTO cp_projection_deferred_revision(organization_id,run_id,
       projection_revision,anchor_intent_id,state,created_at)
       VALUES('org_projection','run_projection',2,'unrelated_anchor','pending',$1)`,[now]);
-    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'");
+    await fixture.pool.query("DELETE FROM cp_job WHERE job_kind='team-relay.project.v2'");
     await repository.settleOrReadTerminal({ ...begun,outcome:"accepted",
       evidenceDigest:digest("accepted"),externalResourceId:"171.002",
       externalResourceDigest:digest("resource") });
@@ -527,7 +434,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       clock:{now:()=>wakeClock}})).resolves.toMatchObject({kind:"settled"});
     expect(requests).toHaveLength(1);
     expect(requests[0]?.intent.operation).toBe("update");
-    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'");
+    await fixture.pool.query("DELETE FROM cp_job WHERE job_kind='team-relay.project.v2'");
     const selfIntent=DeliveryIntentV2Schema.parse({...baseline,
       sideEffectIntentId:"intent_projection_self",idempotencyKey:"projection_self",
       operation:"update",projectionPurpose:"anchor_update",presentationDigest:digest("self"),
@@ -572,12 +479,12 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await expect(fixture.pool.query("UPDATE cp_hosted_run SET projection_revision=0 WHERE run_id='run_projection'"))
       .rejects.toThrow();
     await fixture.pool.query(`INSERT INTO cp_provider_delivery_intent(intent_id,organization_id,
-      journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,presentation_phase,
+      journal_intent_digest,intent,payload,payload_digest,presentation_phase,
       current_truth_key,state,revision,sequence,scope_kind,scope_id,idempotency_key,provider_id,
       provider_instance_id,provider_binding_digest,provider_config_generation,
       provider_config_generation_digest,runtime_owner_id,runtime_generation,schema_generation,
       authority_snapshot_digest,projection_revision,projection_purpose,deadline_at,created_at,updated_at)
-      VALUES('constraint_delivery','org_projection',$1,'{}','{}',$2,'constraint','received',$3,
+      VALUES('constraint_delivery','org_projection',$1,'{}','{}',$2,'received',$3,
       'pending',1,1,'local_repository','repo','constraint','slack','A1',$4,1,$5,'control-plane',1,1,$6,
       1,'external',$7,$8,$8)`,[digest("journal"),digest("payload"),digest("truth"),digest("binding"),
       digest("generation"),digest("snapshot"),new Date(now.getTime()+60_000),now]);
@@ -605,13 +512,6 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await fixture.pool.query("DROP TRIGGER cp_delivery_projection_trigger ON cp_provider_delivery_intent");
     await expect(checkProjectionSchemaReadiness(fixture.pool)).resolves.toEqual({
       ready:false,reason:"migrations_pending"});
-  });
-
-  it("keeps the v2 activation authority immutable",async()=>{
-    await expect(fixture.pool.query(`UPDATE cp_projection_job_v2_authority SET activated_at=$1
-      WHERE authority_version=2`,[new Date(now.getTime()+1)])).rejects.toThrow("projection_v2_authority_immutable");
-    await expect(fixture.pool.query(`DELETE FROM cp_projection_job_v2_authority WHERE authority_version=2`))
-      .rejects.toThrow("projection_v2_authority_immutable");
   });
 
   it("ignores same-named projection tables and triggers in an unrelated schema",async()=>{
@@ -696,6 +596,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
   });
 
   it.each([
+    ["missing Effect projection trigger", "DROP TRIGGER cp_effect_projection ON cp_effect"],
     ["same-name trigger on wrong table", `DROP TRIGGER cp_delivery_projection_trigger ON cp_provider_delivery_intent;
       CREATE TRIGGER cp_delivery_projection_trigger AFTER UPDATE ON cp_job FOR EACH ROW
       EXECUTE FUNCTION cp_delivery_projection_after()`],
@@ -743,9 +644,6 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       ALTER COLUMN projection_event_sequence SET DEFAULT 99`],
     ["extra enabled projection trigger", `CREATE TRIGGER cp_projection_extra_trigger
       AFTER UPDATE ON cp_hosted_run FOR EACH ROW EXECUTE FUNCTION cp_hosted_run_projection_after()`],
-    ["deleted v2 activation row", `ALTER TABLE cp_projection_job_v2_authority
-      DISABLE TRIGGER cp_projection_job_v2_authority_immutable;
-      DELETE FROM cp_projection_job_v2_authority WHERE authority_version=2`],
     ["security definer projection function", `ALTER FUNCTION cp_hosted_run_projection_before() SECURITY DEFINER`],
     ["cursor organization default drift", `ALTER TABLE cp_projection_event_cursor
       ALTER COLUMN organization_id SET DEFAULT 'wrong'`],

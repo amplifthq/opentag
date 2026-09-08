@@ -53,6 +53,7 @@ export type ExecutorPermissionResolution = {
 };
 
 export type ExecutorMaterialActionReport = {
+  localWriteObservation?: import("@opentag/core").LocalWorkspaceWriteObservationV1;
   actionId: string;
   toolCallId: string;
   provider: string;
@@ -72,6 +73,8 @@ export type ExecutorRunInput = {
   };
   workspaceAttestation?: import("./git.js").AttemptWorkspaceAttestation;
   workspace: ExecutorWorkspace;
+  /** Recheck the current local Attempt/fence/lease before Runner-owned SCM writes. */
+  assertExecutionCurrent?: () => Promise<boolean>;
   command: OpenTagCommand;
   source?: OpenTagRunSourceRef;
   targets?: OpenTagRunTargets;

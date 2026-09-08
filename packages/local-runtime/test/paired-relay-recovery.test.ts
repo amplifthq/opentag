@@ -17,7 +17,8 @@ describe("paired relay recovery certification", () => {
       credentialId: "credential_1", registrationGeneration: 1, credentialGeneration: 1,
       capabilities: ["relay.claim-fence.v1", "relay.hosted-admission.v1", "relay.hosted-claim.v1",
         "relay.lifecycle.v1", "relay.readiness.v1", "relay.source-content-redeem.v1"] as const,
-      targets: [{ projectTargetId: "target_1", bindingDigest: sha("a"), provider: "github" as const,
+      targets: [{ projectTargetId: "target_1", bindingDigest: sha("a"), bindingGeneration: 1,
+        provider: "github" as const,
         owner: "acme", repo: "widget", defaultExecutor: "reviewer", defaultBranch: "main" }],
       observedAt: now.toISOString() };
     const readiness = await buildRunnerReadinessReceipt({ context, executors: { reviewer: executor },
@@ -53,7 +54,6 @@ describe("paired relay recovery certification", () => {
       getHostedExecutionLease: vi.fn(async () => null),
     } as never;
     const controlClient = {
-      claimNextPublicationOperationControlV1: vi.fn(async () => null),
       getRunnerControlContextV1: vi.fn(async () => context),
     } as never;
     const config = { runnerId: "runner_1", relayUrl: "https://control.example",

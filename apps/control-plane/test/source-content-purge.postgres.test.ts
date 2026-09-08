@@ -10,6 +10,10 @@ describe.skipIf(!TEST_DATABASE_URL)("source content lifecycle purge", () => {
     fixture = await createIsolatedPostgres(); await fixture.migrate();
     await fixture.pool.query("INSERT INTO cp_organization VALUES($1,$2,$3)", ["org_a", "A", now]); });
   afterEach(async () => fixture.close());
+  const markContentTerminal = (contentId: string) => fixture.pool.query(
+    "UPDATE cp_source_content SET terminal_at=$3 WHERE organization_id=$1 AND content_id=$2",
+    ["org_a", contentId, now],
+  );
 
   it("catches retaining terminal ciphertext past seven days or reconstructable tombstones", async () => {
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
@@ -18,7 +22,7 @@ describe.skipIf(!TEST_DATABASE_URL)("source content lifecycle purge", () => {
       sourceDeliveryId: "delivery", sourceMessageId: "message", sourceVersionRef: "s:v1",
       purpose: "source_context", contentId: "content_1", payload: { text: "purge me" },
       expiresAt: new Date("2026-09-01T00:00:00Z") });
-    await custody.markTerminal({ organizationId: "org_a", contentId: "content_1" });
+    await markContentTerminal("content_1");
     now = new Date("2026-09-04T00:00:01Z");
     expect(await custody.purge()).toEqual({ purged: 1, tombstonesExpired: 0 });
     expect((await fixture.pool.query("SELECT count(*)::int AS count FROM cp_source_content")).rows[0]?.count).toBe(0);
@@ -31,32 +35,17 @@ describe.skipIf(!TEST_DATABASE_URL)("source content lifecycle purge", () => {
       expiresAt: new Date("2026-09-05T00:00:00Z") })).rejects.toThrow("source_content_replayed");
   });
 
-  it("catches purging while any dependency is nonterminal or before seven days from the last transition", async () => {
+  it("retains nonterminal content and waits seven days after its terminal transition", async () => {
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
       key: { key: randomBytes(32), keyVersion: "v1" } });
     await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
       sourceDeliveryId: "delivery_deps", sourceMessageId: "message_deps",
       sourceVersionRef: "s:deps:v1", purpose: "source_context", contentId: "content_deps",
       payload: { text: "needed" }, expiresAt: new Date("2026-08-28T00:01:00Z") });
-    await custody.addDependency({ organizationId: "org_a", contentId: "content_deps",
-      sourceVersionRef: "s:deps:v1", dependencyId: "run_1", terminal: false });
-    await custody.addDependency({ organizationId: "org_a", contentId: "content_deps",
-      sourceVersionRef: "s:deps:v1", dependencyId: "run_2", terminal: false });
     now = new Date("2026-09-10T00:00:00Z");
     expect(await custody.purge()).toEqual({ purged: 0, tombstonesExpired: 0 });
 
-    await custody.markDependencyTerminal({ organizationId: "org_a", contentId: "content_deps",
-      dependencyId: "run_1" });
-    await custody.markDependencyTerminal({ organizationId: "org_a", contentId: "content_deps",
-      dependencyId: "run_1" });
-    expect((await fixture.pool.query(
-      "SELECT terminal_at FROM cp_source_content WHERE organization_id = $1 AND content_id = $2",
-      ["org_a", "content_deps"],
-    )).rows[0]?.terminal_at).toBeNull();
-    expect(await custody.purge()).toEqual({ purged: 0, tombstonesExpired: 0 });
-
-    await custody.markDependencyTerminal({ organizationId: "org_a", contentId: "content_deps",
-      dependencyId: "run_2" });
+    await markContentTerminal("content_deps");
     expect((await fixture.pool.query(
       "SELECT terminal_at FROM cp_source_content WHERE organization_id = $1 AND content_id = $2",
       ["org_a", "content_deps"],
