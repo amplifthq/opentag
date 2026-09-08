@@ -15,6 +15,8 @@ describe("Control Plane deployment contract", () => {
     expect(workflow).toContain("--password-stdin");
     expect(workflow).toContain('docker --config "$OPENTAG_GHCR_DOCKER_CONFIG" push');
     expect(workflow).toContain('docker --config "$OPENTAG_GHCR_DOCKER_CONFIG" logout ghcr.io');
+    expect(workflow).toContain('rm -rf -- "$OPENTAG_GHCR_DOCKER_CONFIG"');
+    expect(workflow).toContain("trap 'exit 143' TERM");
     expect(workflow).not.toMatch(/--password(?:=|\s)/u);
   });
 

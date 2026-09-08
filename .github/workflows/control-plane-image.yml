@@ -87,5 +87,27 @@ jobs:
         if: always()
         run: |
           if test -n "${OPENTAG_GHCR_DOCKER_CONFIG:-}"; then
-            docker --config "$OPENTAG_GHCR_DOCKER_CONFIG" logout ghcr.io
+            ghcr_cleanup_root="$(cd -- "${RUNNER_TEMP:?}" && pwd -P)"
+            ghcr_cleanup_parent="$(cd -- "$(dirname -- "$OPENTAG_GHCR_DOCKER_CONFIG")" && pwd -P)"
+            ghcr_cleanup_name="${OPENTAG_GHCR_DOCKER_CONFIG##*/}"
+            if [[ "$ghcr_cleanup_parent" != "$ghcr_cleanup_root" ||
+                  ! "$ghcr_cleanup_name" =~ ^opentag-ghcr\.[a-zA-Z0-9]{6}$ ||
+                  -L "$OPENTAG_GHCR_DOCKER_CONFIG" ]]; then
+              printf '%s\n' '::error::Refusing unsafe registry cleanup target.' >&2
+              exit 1
+            fi
+            if test ! -e "$OPENTAG_GHCR_DOCKER_CONFIG"; then
+              exit 0
+            fi
+            if [[ ! -d "$OPENTAG_GHCR_DOCKER_CONFIG" || ! -O "$OPENTAG_GHCR_DOCKER_CONFIG" ]]; then
+              printf '%s\n' '::error::Registry cleanup target is not an owned directory.' >&2
+              exit 1
+            fi
+            # EXIT also covers logout failure; INT/TERM request a normal exit.
+            # SIGKILL and runner loss cannot execute a shell cleanup handler.
+            trap 'rm -rf -- "$OPENTAG_GHCR_DOCKER_CONFIG"' EXIT
+            trap 'exit 130' INT
+            trap 'exit 143' TERM
+            docker --config "$OPENTAG_GHCR_DOCKER_CONFIG" logout ghcr.io ||
+              printf '%s\n' '::warning::Registry logout failed; removing its temporary configuration.' >&2
           fi
