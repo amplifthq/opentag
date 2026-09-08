@@ -7,6 +7,17 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../.
 const read = (path: string) => readFile(resolve(repositoryRoot, path), "utf8");
 
 describe("Control Plane deployment contract", () => {
+  it("keeps publication actions within the repository's selected-actions policy", async () => {
+    const workflow = await read(".github/workflows/control-plane-image.yml");
+    for (const match of workflow.matchAll(/uses: ([^\s]+)/gu)) {
+      expect(match[1]).toMatch(/^(?:(?:actions|github|amplifthq)\/[^@]+|pnpm\/action-setup)@[a-f0-9]{40}$/u);
+    }
+    expect(workflow).toContain("--password-stdin");
+    expect(workflow).toContain('docker --config "$OPENTAG_GHCR_DOCKER_CONFIG" push');
+    expect(workflow).toContain('docker --config "$OPENTAG_GHCR_DOCKER_CONFIG" logout ghcr.io');
+    expect(workflow).not.toMatch(/--password(?:=|\s)/u);
+  });
+
   it("publishes only the tested image from a successful main push", async () => {
     const [ci, publish] = await Promise.all([
       read(".github/workflows/ci.yml"), read(".github/workflows/control-plane-image.yml"),

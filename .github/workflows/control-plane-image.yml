@@ -46,15 +46,16 @@ jobs:
           test "$(docker image inspect opentag-control-plane:verified --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$SOURCE_SHA"
           test "$(docker image inspect opentag-control-plane:verified --format '{{.Config.User}}')" = opentag
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ghcr_config="$(mktemp -d "$RUNNER_TEMP/opentag-ghcr.XXXXXX")"
+          printf 'OPENTAG_GHCR_DOCKER_CONFIG=%s\n' "$ghcr_config" >> "$GITHUB_ENV"
+          printf '%s' "$GHCR_TOKEN" | docker --config "$ghcr_config" login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Publish without rebuilding or overwriting a release tag
         run: |
           docker tag opentag-control-plane:verified "$IMAGE:$IMAGE_TAG"
-          docker push "$IMAGE:$IMAGE_TAG"
+          docker --config "$OPENTAG_GHCR_DOCKER_CONFIG" push "$IMAGE:$IMAGE_TAG"
           docker image inspect "$IMAGE:$IMAGE_TAG" > image-inspect.json
           node --input-type=module <<'NODE'
           import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
@@ -82,3 +83,9 @@ jobs:
           reference="$(node -p "const r=require('./control-plane-image.json'); r.image+'@'+r.digest")"
           anonymous_config="$(mktemp -d)"
           docker --config "$anonymous_config" pull "$reference"
+      - name: Remove registry credentials
+        if: always()
+        run: |
+          if test -n "${OPENTAG_GHCR_DOCKER_CONFIG:-}"; then
+            docker --config "$OPENTAG_GHCR_DOCKER_CONFIG" logout ghcr.io
+          fi
