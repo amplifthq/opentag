@@ -124,7 +124,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       fetchImpl: async () => { throw new Error("provider_call_forbidden"); } }) };
   }
 
-  it("preserves both approval decisions across repeated projection refreshes", async () => {
+  it("does not project orphan approval authority without a current permission request", async () => {
     await insertSlackInstallation();
     let tick = 0;
     const { ingress } = productionComponents({ clock: { now: () => new Date(now.getTime() + tick++ * 1000) } });
@@ -140,7 +140,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       expiresAt: new Date(now.getTime() + 60_000) });
     for (let refresh = 0; refresh < 4; refresh += 1) {
       const controls = await ingress.issueProjectionControls({ organizationId: "org_a", runId: "run_refresh", generation: 1 });
-      expect(controls.map(control => control.kind).sort()).toEqual(["approve", "reject"]);
+      expect(controls).toEqual([]);
     }
     const nestedCopies = await fixture.pool.query(`SELECT action_id FROM cp_slack_action_authority
       WHERE run_id='run_refresh' AND action_id LIKE '%:projection:%:projection:%'`);
@@ -622,6 +622,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       policy: { snapshotId: effectApproval.policySnapshotId,
         snapshotDigest: effectApproval.policySnapshotDigest } };
     let effectNow = now; let failEffectFinalize = true; const effectApprovals: any[] = [];
+    let effectTokenSequence = 0;
     const effectRuntime = productionComponents({ commandAuthority: authority,
       clock: { now: () => effectNow },
       effectAuthority: { async approve(command: any) { effectApprovals.push(command);
@@ -635,7 +636,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
         return { kind: effectApprovals.length === 1 ? "approved" as const : "replayed" as const }; } },
       testHooks: { async afterServiceBeforeFinalize() {
         if (failEffectFinalize) { failEffectFinalize = false; throw new Error("effect_finalize_crash"); }
-      } }, tokenFactory: () => "opaque_effect_action_token_abcdefghijklmnopqrstuvwxyz" });
+      } }, tokenFactory: () => `opaque_effect_action_token_${++effectTokenSequence}_abcdefghijklmnopqrstuvwxyz` });
     const effectToken = await effectRuntime.ingress.issueAction({ organizationId: "org_a",
       actionId: "action_effect", installationId: "install_1", bindingId: "binding_1",
       teamId: "T1", appId: "A1", channelId: "C1",
@@ -655,6 +656,10 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       action(effectToken,"effect_approve","U_MEMBER"))).resolves.toMatchObject({status:403});
     await expect(effectRuntime.ingress.receiveInteractivity("route_1",
       action(effectToken,"effect_approve","U_APPROVER"))).resolves.toMatchObject({status:503});
+    // The approval committed even though finalization failed. No Runner has
+    // acquired a permit; this must already remove the approval control.
+    expect((await effectRuntime.ingress.issueProjectionControls({organizationId:"org_a",
+      runId:effectApproval.runId,generation:1})).filter(control => control.kind === "effect_approve")).toEqual([]);
     effectNow = new Date(now.getTime()+1_000);
     await expect(effectRuntime.ingress.receiveInteractivity("route_1",
       action(effectToken,"effect_approve","U_APPROVER"))).resolves.toMatchObject({status:200});

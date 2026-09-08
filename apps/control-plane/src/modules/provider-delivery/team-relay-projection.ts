@@ -8,6 +8,9 @@ import type { Pool } from "pg";
 import type { HostedRunCoordinator } from "../hosted-runs/index.js";
 import { readExactDeliveryAnchor } from "./repository.js";
 import { z } from "zod";
+import { readRunThreadFeedback } from "../hosted-runs/thread-feedback.js";
+import type { DurableJobQueue } from "../jobs/index.js";
+import { feedbackElapsedMs, logFeedbackTiming } from "./feedback-timing.js";
 
 const hash = (value: unknown) => `sha256:${createHash("sha256")
   .update(canonicalJsonStringify(value)).digest("hex")}`;
@@ -15,6 +18,7 @@ type Enqueue = { enqueue(input: { intent: DeliveryIntentV2; providerRequest: obj
   phase: "received" | "running" | "terminal"; frozenDeadline: string }): Promise<unknown> };
 
 export function createTeamRelayProjectionService(input: { pool: Pool; hosted: HostedRunCoordinator;
+  jobs: Pick<DurableJobQueue, "enqueue">;
   producer: Enqueue; clock: { now(): Date };
   deliveryOwner?: Pick<ExpectedDeliveryOwner,"runtimeOwnerId"|"runtimeGeneration"|"schemaGeneration">;
   controls?: { issueProjectionControls(input: { organizationId: string; runId: string;
@@ -23,6 +27,7 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     projectionRevision?: number; includeControls?: boolean;
     deliveryEvent?: { intentId:string; revision:number; eventSequence:number;
       state:"accepted"|"rejected"|"outcome_unknown"|"attention" } }) {
+    const started=performance.now();
     const run = await input.hosted.inspect(command); if (!run) return { kind: "missing" as const };
     const current = await input.pool.query<{ current_attempt_number: number; projection_revision: string }>(
       "SELECT current_attempt_number,projection_revision::text FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2",
@@ -87,8 +92,12 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     const controls = issuedControls.filter((control) => state === "publication_pending"
       ? control.kind === "status" || control.kind === "cancel" || control.kind === "effect_approve"
       : control.kind !== "effect_approve").slice(0, 4);
+    const {approval,publication,approvalRef} = await readRunThreadFeedback(input.pool, {
+      organizationId: command.organizationId, runId: command.runId, attemptNumber: generation });
     const presentation = composeTeamRelayThreadProjection({ runId: command.runId, generation,
       state: state as Parameters<typeof composeTeamRelayThreadProjection>[0]["state"], controls,
+      ...(approval ? { approval } : {}),
+      ...(publication ? { publication } : {}),
       providerDelivery: { state: deliveryState,
         ...(deliveryErrorCode ? { reasonCode: deliveryErrorCode as any } : {}) } });
     const text = renderSlackTeamRelayProjection(presentation);
@@ -138,6 +147,17 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     await input.producer.enqueue({ intent, providerRequest,
       phase: terminal ? "terminal" : state === "running" ? "running" : "received",
       frozenDeadline: row.deadline_at.toISOString() });
+    // The durable projection job is not complete until delivery is woken. A
+    // crash between these enqueues retries this job, never the human decision.
+    const wake = await input.jobs.enqueue({ jobId: `provider-delivery:${intent.sideEffectIntentId}`,
+      organizationId: null, kind: "provider-delivery", payload: {}, maxAttempts: 1 });
+    if (wake.kind === "conflict") throw new Error("projection_delivery_job_conflict");
+    const reference=publication
+      ? publication.state!=="requested"?publication.effectId:undefined
+      : approval&&approval.state!=="waiting"?approvalRef:undefined;
+    if(reference) logFeedbackTiming({stage:"projection_enqueued",runId:command.runId,
+      operationId:intent.sideEffectIntentId,approvalRef:reference,at:input.clock.now().toISOString(),
+      durationMs:feedbackElapsedMs(started,performance.now()),result:"queued"});
     return { kind: "queued" as const, presentation, intentId: intent.sideEffectIntentId };
   }, async projectDeliveryIntent(intentId: string) {
     const result = await input.pool.query<{ organization_id: string; run_id: string | null }>(

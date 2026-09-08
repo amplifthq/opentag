@@ -675,13 +675,26 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       [inlineRequest.permissionRequestId])).rows[0].state).toBe("waiting");
     await fixture.pool.query("UPDATE cp_hosted_attempt SET workspace_attestation=$3::jsonb WHERE organization_id=$1 AND run_id=$2",
       [principal.organizationId, claim.runId, JSON.stringify(workspaceAttestation)]);
-    await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
+    for (let refresh = 0; refresh < 4; refresh += 1) {
+      const controls = await ingress.issueProjectionControls({ organizationId: principal.organizationId,
+        runId: claim.runId, generation: claim.attempt.number });
+      expect(controls.filter(control => control.kind === "approve" || control.kind === "reject")
+        .map(control => control.kind).sort()).toEqual(["approve", "reject"]);
+    }
+    const projected = await ingress.issueProjectionControls({ organizationId: principal.organizationId,
+      runId: claim.runId, generation: claim.attempt.number });
+    const projectedApproval = projected.find(control => control.kind === "approve")!;
+    expect(projectedApproval).toBeDefined();
+    await expect(ingress.receiveInteractivity("route_permission", signedAction(projectedApproval.actionId, "allow_once", "U_APPROVER")))
       .resolves.toEqual({ status: 200, body: { ok: true } });
     const inlineReceipt = PermissionResolutionReceiptEnvelopeV1Schema.parse((await fixture.pool.query(
       "SELECT current_receipt FROM cp_permission_request WHERE organization_id=$1 AND permission_request_id=$2",
       [principal.organizationId, inlineRequest.permissionRequestId])).rows[0].current_receipt);
     expect(inlineReceipt.payload).toMatchObject({ state: "authorized", decisionActorRef: "U_APPROVER",
       workspaceAttestationDigest, permissionRequestDigest: inlineRequest.permissionRequestDigest });
+    expect((await ingress.issueProjectionControls({ organizationId: principal.organizationId,
+      runId: claim.runId, generation: claim.attempt.number }))
+      .filter(control => control.kind === "approve" || control.kind === "reject")).toEqual([]);
     await expect(ingress.receiveInteractivity("route_permission", signedAction(inlineToken, "allow_once", "U_APPROVER")))
       .resolves.toMatchObject({ status: 403 });
     await expect(hosted.inspect({ organizationId: principal.organizationId, runId: claim.runId }))

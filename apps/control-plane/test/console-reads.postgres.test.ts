@@ -41,6 +41,20 @@ function teammateRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe("derived Teammate read model", () => {
+  it.each([true,false])("uses the shared publication phase after execution ends (runner online: %s)", async online => {
+    const row=teammateRow({active_run_id:"run_publication",active_run_state:"running",
+      active_run_updated_at:new Date(),active_run_count:1,active_attempt_valid:false,
+      active_run_attempt_number:1,active_publication_mode:"pull_request",active_has_candidate:true,
+      readiness_expires_at:online?new Date():null});
+    const reads=createConsoleReadModel({pool:{query:async(sql:string)=>({rows:
+      sql.includes("WITH active_slack")?[row]:sql.includes("SELECT * FROM cp_effect")?[{
+        effect_id:"effect_publication",effect_kind:"github.create_draft_pull_request",
+        state:"authorized",updated_at:new Date(),current_attempt_number:0}]:[]})} as never});
+    const [view]=await reads.listTeammates(consolePrincipal);
+    expect(view.workState).toBe(online?"working":"runner_offline");
+    expect(view.reason).toBe("Publication approved. Waiting for the paired Runner to publish the exact candidate.");
+    expect(view.reason).not.toContain("lease");
+  });
   it("returns an empty list when no active Slack binding exists", async () => {
     const query = vi.fn(async () => ({ rows: [] }));
     const reads = createConsoleReadModel({ pool: { query } as never });
@@ -104,9 +118,16 @@ describe("derived Teammate read model", () => {
     {
       name: "expired readiness",
       row: teammateRow({ readiness_expires_at: null, active_run_id: "run_stale",
-        active_run_state: "running",
+        active_run_state: "running", active_attempt_valid: false,
         active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"), active_run_count: 1 }),
       workState: "runner_offline",
+    },
+    {
+      name: "busy Runner with a current leased Attempt",
+      row: teammateRow({ readiness_expires_at: null, active_run_id: "run_busy",
+        active_run_state: "running", active_attempt_valid: true,
+        active_run_updated_at: new Date("2026-09-04T05:10:00.000Z"), active_run_count: 1 }),
+      workState: "working",
     },
     {
       name: "invalid current Attempt",

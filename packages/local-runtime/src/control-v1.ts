@@ -466,7 +466,9 @@ export function isRunnerControlContextFreshV1(
   maxAgeMs = READINESS_TTL_MS,
 ): boolean {
   const ageMs = now.getTime() - Date.parse(observedAt);
-  return ageMs >= 0 && ageMs <= maxAgeMs;
+  // Context observation only: tolerate up to one second of server-ahead skew.
+  // Never add this allowance to maximum age, permits, approvals, or lease expiry.
+  return ageMs >= -1_000 && ageMs <= maxAgeMs;
 }
 
 function canonicalReadinessAuthority(

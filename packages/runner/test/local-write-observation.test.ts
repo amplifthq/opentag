@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { linkSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -41,6 +41,15 @@ it("refuses unsupported edits, extra instructions and oversized content", async 
     expect(await prepareLocalWriteObservation({ ...f.input, rawInput })).toBeUndefined();
   }
   expect(await prepareLocalWriteObservation({ ...f.input, operation: "execute" })).toBeUndefined();
+});
+
+it("resolves relative writes from the exact session cwd while retaining the Attempt root", async () => {
+  const f = fixture(); const cwd = join(f.root, "src"); mkdirSync(cwd);
+  const observe = await prepareLocalWriteObservation({ ...f.input, sessionCwd: cwd,
+    rawInput: { path: "result.txt", content: "expected\n" } });
+  writeFileSync(f.path, "expected\n"); expect(await observe!()).toBeUndefined();
+  writeFileSync(join(cwd, "result.txt"), "expected\n");
+  expect(await observe!()).toMatchObject({ filePathDigest: hash(join(cwd, "result.txt")) });
 });
 
 it("refuses outside targets, symlink replacement and hard links", async () => {

@@ -1,6 +1,8 @@
 import type { Pool } from "pg";
-import type { TeammateView, TeammateWorkState } from "@opentag/core";
+import { composeTeamRelayThreadProjection, type TeammateView, type TeammateWorkState } from "@opentag/core";
 import type { ConsolePrincipal } from "../identity/index.js";
+import { projectRunPhase, type CanonicalRunStatus } from "../hosted-runs/index.js";
+import { readRunThreadFeedback } from "../hosted-runs/thread-feedback.js";
 
 function boundedLimit(value: number | undefined): number {
   if (value === undefined) return 50;
@@ -41,9 +43,13 @@ type TeammateRow = {
   active_run_updated_at: Date | null;
   active_run_count: number;
   active_attempt_valid: boolean;
+  active_run_attempt_number: number | null;
+  active_publication_mode: string | null;
+  active_has_candidate: boolean;
 };
 
-function teammateFromRow(row: TeammateRow): TeammateView {
+function teammateFromRow(row: TeammateRow,
+  feedback?: Awaited<ReturnType<typeof readRunThreadFeedback>>): TeammateView {
   const activeWork = row.active_run_id && row.active_run_state && row.active_run_updated_at
     ? {
         runId: row.active_run_id,
@@ -66,6 +72,15 @@ function teammateFromRow(row: TeammateRow): TeammateView {
 
   let workState: TeammateWorkState;
   let reason: string;
+  const phase = activeWork ? projectRunPhase({state:activeWork.state as CanonicalRunStatus,
+    ...(row.active_publication_mode?{publication_mode:row.active_publication_mode}:{}),has_candidate:row.active_has_candidate}) : undefined;
+  const publicationPending = phase === "publication_pending";
+  const waitingForApproval = feedback?.approval?.state === "waiting" || activeWork?.state === "needs_approval";
+  const presentation = activeWork && (publicationPending || waitingForApproval || feedback?.approval)
+    ? composeTeamRelayThreadProjection({runId:activeWork.runId,generation:row.active_run_attempt_number??1,
+        state:publicationPending?"publication_pending":waitingForApproval?"waiting_for_approval":"running",controls:[],
+        ...(feedback?.approval?{approval:feedback.approval}:{}),
+        ...(feedback?.publication?{publication:feedback.publication}:{})}) : undefined;
   if (!row.configured_project_target_id) {
     workState = "setup_required";
     reason = "This teammate has no GitHub Project Target.";
@@ -78,13 +93,18 @@ function teammateFromRow(row: TeammateRow): TeammateView {
   } else if (row.active_run_count > 1) {
     workState = "needs_attention";
     reason = "More than one active Run is bound to this teammate.";
-  } else if (activeWork?.outcomeState === "outcome_unknown"
-    || activeWork?.state === "needs_approval") {
+  } else if (activeWork?.outcomeState === "outcome_unknown") {
     workState = "needs_attention";
-    reason = activeWork.outcomeState === "outcome_unknown"
-      ? `Run ${activeWork.runId} has an outcome that requires reconciliation.`
-      : `Run ${activeWork.runId} is waiting for a human decision.`;
-  } else if (!row.readiness_expires_at) {
+    reason = `Run ${activeWork.runId} has an outcome that requires reconciliation.`;
+  } else if (publicationPending) {
+    const publicationState=feedback?.publication?.state;
+    workState = !publicationState || ["requested","attention","outcome_unknown","cancelled_before_permit"].includes(publicationState)
+      ? "needs_attention" : !row.readiness_expires_at ? "runner_offline" : "working";
+    reason = presentation!.summary;
+  } else if (waitingForApproval) {
+    workState = "needs_attention";
+    reason = presentation!.summary;
+  } else if (!row.readiness_expires_at && !(activeWork && row.active_attempt_valid)) {
     workState = "runner_offline";
     reason = activeWork
       ? `Runner readiness expired while Run ${activeWork.runId} remains ${activeWork.state}.`
@@ -98,7 +118,7 @@ function teammateFromRow(row: TeammateRow): TeammateView {
     reason = `Run ${activeWork.runId} has no current valid Attempt lease.`;
   } else if (activeWork?.state === "assigned" || activeWork?.state === "running") {
     workState = "working";
-    reason = `Run ${activeWork.runId} is ${activeWork.state} on the paired Runner.`;
+    reason = presentation?.summary ?? `Run ${activeWork.runId} is ${activeWork.state} on the paired Runner.`;
   } else if (activeWork) {
     workState = "needs_attention";
     reason = `Run ${activeWork.runId} has an unexpected active state: ${activeWork.state}.`;
@@ -150,6 +170,9 @@ export function createConsoleReadModel(input: { pool: Pool }) {
                 active_run.state AS active_run_state,
                 active_run.outcome_state AS active_run_outcome_state,
                 active_run.updated_at AS active_run_updated_at,
+                active_run.current_attempt_number AS active_run_attempt_number,
+                active_run.publication_mode AS active_publication_mode,
+                COALESCE(active_run.has_candidate,false) AS active_has_candidate,
                 COALESCE(active_run.active_run_count, 0)::int AS active_run_count,
                 COALESCE(active_run.active_attempt_valid, false) AS active_attempt_valid
          FROM active_slack slack
@@ -208,6 +231,10 @@ export function createConsoleReadModel(input: { pool: Pool }) {
          ) readiness ON true
          LEFT JOIN LATERAL (
            SELECT run.run_id, run.state, run.outcome_state, run.updated_at,
+                  run.current_attempt_number,run.publication_mode,
+                  EXISTS (SELECT 1 FROM cp_publication_candidate candidate
+                    WHERE candidate.organization_id=run.organization_id AND candidate.run_id=run.run_id
+                      AND candidate.attempt_number=run.current_attempt_number) AS has_candidate,
                   count(*) OVER()::int AS active_run_count,
                   EXISTS (
                     SELECT 1
@@ -217,6 +244,12 @@ export function createConsoleReadModel(input: { pool: Pool }) {
                       AND attempt.attempt_number = run.current_attempt_number
                       AND attempt.runner_id = run.runner_id
                       AND attempt.credential_id = runner.current_credential_id
+                      AND EXISTS (SELECT 1 FROM cp_runner_credential current_credential
+                        WHERE current_credential.organization_id=runner.organization_id
+                          AND current_credential.runner_id=runner.runner_id
+                          AND current_credential.credential_id=runner.current_credential_id
+                          AND current_credential.credential_generation=runner.credential_generation
+                          AND current_credential.revoked_at IS NULL)
                       AND attempt.lease_expires_at > clock_timestamp()
                       AND (
                         (run.state = 'assigned' AND attempt.state = 'claimed')
@@ -239,7 +272,12 @@ export function createConsoleReadModel(input: { pool: Pool }) {
          ORDER BY slack.team_id, slack.channel_id, slack.binding_id`,
         [principal.organizationId],
       );
-      return result.rows.map(teammateFromRow);
+      return Promise.all(result.rows.map(async row => {
+        const feedback=row.active_run_id && row.active_run_attempt_number
+          ? await readRunThreadFeedback(input.pool,{organizationId:principal.organizationId,
+              runId:row.active_run_id,attemptNumber:row.active_run_attempt_number}) : undefined;
+        return teammateFromRow(row,feedback);
+      }));
     },
 
     async overview(principal: ConsolePrincipal) {

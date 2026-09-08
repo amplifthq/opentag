@@ -7,9 +7,11 @@ import { DELIVERY_ERROR_CODES, DeliveryIntentV2Schema, deliveryCurrentTruthDescr
   type ExpectedDeliveryOwner, type StoredDeliveryIntent } from "@opentag/delivery-contract";
 import type { DeliveryKernelRepository } from "@opentag/delivery-runtime";
 import type { Pool, PoolClient } from "pg";
+import { feedbackElapsedMs, logFeedbackTiming } from "./feedback-timing.js";
 
 type RelayOwner = Pick<ExpectedDeliveryOwner, "runtimeOwnerId" | "runtimeGeneration" | "schemaGeneration">;
 type Row = { intent_id: string; journal_intent_digest: string; intent: unknown; payload: unknown;
+  run_id:string|null;created_at:Date;begun_at:Date|null;
   organization_id: string;
   payload_digest: string; presentation_phase: string; current_truth_key: string;
   projection_revision: number | null;
@@ -327,7 +329,9 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
       return result.rowCount === 1;
     },
     async markBegin(input) {
-      const at = now(); return withTx(async (client) => {
+      const at = now(); const started=performance.now();
+      let timing:Parameters<typeof logFeedbackTiming>[0]|undefined;
+      const accepted=await withTx(async (client) => {
         const selected = await client.query<Row & { deadline_at: Date }>(
           "SELECT * FROM cp_provider_delivery_intent WHERE intent_id=$1 FOR UPDATE", [input.intentId]);
         const row = selected.rows[0];
@@ -346,8 +350,15 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
           begun_at=$5,updated_at=$5 WHERE intent_id=$6 AND revision=$7 RETURNING *`,
         [input.installationBeginMarkerId, input.installationBeginMarkerDigest,
           input.scopeBeginMarkerId, input.scopeBeginMarkerDigest, at, input.intentId, input.revision]);
+        if(result.rows[0]&&row.run_id&&row.provider_id==="slack"&&row.projection_purpose==="anchor_update"){
+          timing={stage:"delivery_started",runId:row.run_id,operationId:row.intent_id,
+            at:at.toISOString(),durationMs:feedbackElapsedMs(started,performance.now()),
+            queueMs:feedbackElapsedMs(new Date(row.created_at).getTime(),at.getTime()),result:"begun"};
+        }
         return result.rows[0] ? begun(result.rows[0], input.leaseFence) : null;
       });
+      if(timing)logFeedbackTiming(timing);
+      return accepted;
     },
     async settleOrReadTerminal(input: DeliverySettlementInput) {
       if (!SHA256.test(input.evidenceDigest)) throw new Error("evidenceDigest must be a sha256 digest");
@@ -360,7 +371,8 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
           || input.externalResourceId.length > 512 || !SHA256.test(input.externalResourceDigest!))))
         throw new Error("external resource identity contract invalid");
       const recordedAt = input.outcomeRecordedAt ? new Date(input.outcomeRecordedAt) : now();
-      return withTx(async (client) => {
+      let timing:Parameters<typeof logFeedbackTiming>[0]|undefined;
+      const accepted=await withTx(async (client) => {
         const selected = await client.query<Row>(
           "SELECT * FROM cp_provider_delivery_intent WHERE intent_id=$1 FOR UPDATE", [input.intentId]);
         const row = selected.rows[0];
@@ -386,8 +398,16 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
           input.externalResourceDigest ?? null, input.externalResourceId ?? null,
           recordedAt, input.intentId, input.revision]);
         if (!result.rows[0]) throw new Error(`delivery settlement tuple conflict for attempt ${input.attemptId}`);
+        if(row.run_id&&row.provider_id==="slack"&&row.projection_purpose==="anchor_update"){
+          timing={stage:"delivery_settled",runId:row.run_id,operationId:row.intent_id,
+            at:recordedAt.toISOString(),durationMs:row.begun_at
+              ?feedbackElapsedMs(new Date(row.begun_at).getTime(),recordedAt.getTime()):null,
+            result:input.outcome};
+        }
         return settlement(result.rows[0], input.leaseFence);
       });
+      if(timing)logFeedbackTiming(timing);
+      return accepted;
     },
     async finalizeStrandedBegun(input) {
       const result = await options.pool.query(`UPDATE cp_provider_delivery_intent SET state='outcome_unknown',

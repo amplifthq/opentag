@@ -15,6 +15,7 @@ import type { RelayContentCustody } from "../source-content/index.js";
 import { createSourceIngressService, type SourceIngressService } from "../source-ingress/index.js";
 import type { EffectApproval, EffectApprovalIssue } from "../effects/index.js";
 import { z } from "zod";
+import { feedbackElapsedMs, logFeedbackTiming } from "../provider-delivery/feedback-timing.js";
 
 type HttpResult = { status: number; body: unknown };
 type RawRequest = { rawBody: Uint8Array; headers: Headers; receivedAt: string };
@@ -401,9 +402,29 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
       // Projection families hold single-decision copies, never source authority.
       // Re-projecting one of those copies would discard its sibling decisions.
       const source = await client.query<ActionRow>(`SELECT DISTINCT ON (action_kind) *
-        FROM cp_slack_action_authority WHERE organization_id=$1 AND run_id=$2
+        FROM cp_slack_action_authority authority WHERE organization_id=$1 AND run_id=$2
           AND attempt_number=$3 AND projection_generation=$3 AND consumed_at IS NULL
           AND authority_family_id NOT LIKE 'projection:%'
+          AND (action_kind <> 'approval' OR EXISTS (
+            SELECT 1 FROM cp_permission_request permission
+            WHERE permission.organization_id=authority.organization_id
+              AND permission.run_id=authority.run_id
+              AND permission.permission_request_id=authority.pending_request_id
+              AND permission.action_id=authority.pending_action_id
+              AND permission.attempt_id=authority.attempt_id
+              AND permission.permission_request_digest=authority.permission_request_digest
+              AND permission.state='waiting'))
+          AND (action_kind <> 'effect' OR EXISTS (
+            SELECT 1 FROM cp_effect effect
+            WHERE effect.organization_id=authority.organization_id
+              AND effect.run_id=authority.run_id
+              AND effect.effect_id=authority.pending_action_id
+              AND effect.run_attempt_id=authority.attempt_id
+              AND effect.run_attempt_number=authority.attempt_number
+              AND effect.approval_request_id=authority.pending_request_id
+              AND effect.approval_request_digest=authority.permission_request_digest
+              AND effect.state='requested' AND effect.approval_id IS NULL
+              AND effect.approval_expires_at>$4))
           AND expires_at>$4 ORDER BY action_kind,created_at DESC`,
       [command.organizationId, command.runId, command.generation, input.clock.now()]);
       const controls: Array<{ kind: "status" | "cancel" | "approve" | "reject"
@@ -722,6 +743,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
     },
 
     async receiveInteractivity(routeIdentity: string, request: RawRequest): Promise<HttpResult> {
+      const feedbackStarted=performance.now();
       const commandAuthority = input.commandAuthority;
       if (!commandAuthority) return { status: 503, body: { error: "slack_command_authority_unavailable" } };
       try {
@@ -995,6 +1017,13 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
           completed = result.outcome === "completed";
         }
         if (!completed) return { status: 403, body: { error: "source_thread_control_rejected" } };
+        if(claimed.row.action_kind==="approval"||claimed.row.action_kind==="effect"){
+          logFeedbackTiming({stage:"approval_committed",runId:claimed.row.run_id,
+            operationId:claimed.row.action_id,
+            approvalRef:claimed.row.action_kind==="effect"?claimed.row.pending_action_id:claimed.row.pending_request_id,
+            at:input.clock.now().toISOString(),durationMs:feedbackElapsedMs(feedbackStarted,performance.now()),
+            result:!("effectApproval" in claimed)&&claimed.command.type==="reject"?"denied":"authorized"});
+        }
         await input.testHooks?.afterServiceBeforeFinalize?.();
         const terminalDecision = "effectApproval" in claimed
           || (!("effectApproval" in claimed) && claimed.command.type !== "status");

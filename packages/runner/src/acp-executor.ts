@@ -354,7 +354,7 @@ function assertExplicitWorkspace(input: ExecutorRunInput): ExecutorWorkspace {
   return input.workspace;
 }
 
-function promptForRun(input: ExecutorRunInput): string {
+function promptForRun(input: ExecutorRunInput, sessionCwd: string): string {
   const lines = [
     `OpenTag run: ${input.runId}`,
     "",
@@ -378,6 +378,8 @@ function promptForRun(input: ExecutorRunInput): string {
   else lines.push(...input.permissions.map((permission) => `- ${permission.scope}`));
   lines.push(
     "",
+    `Authoritative Attempt workspace (session cwd): ${sessionCwd}`,
+    "Use paths relative to this directory. Never infer a workspace path from the Run ID, previous runs, or repository files. Do not create another workspace directory.",
     "OpenTag owns source-control publication and external material actions. Work only inside the supplied session cwd and request permission through ACP when required.",
     "Do not run, request, or recommend git add, git commit, git push, or gh pr create.",
     "After editing and verification, finish your response. The Runner stages and commits locally after you stop; do not wait for or request shell permission to do that yourself.",
@@ -1013,7 +1015,17 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 const observeWrite = workspace.kind === "repository" && permissionWorkspaceAttestation
                   ? await prepareLocalWriteObservation({ rawInput: ctx.params.toolCall.rawInput,
                     operation: target.operation, targetFingerprint: target.targetFingerprint,
-                    workspacePath: executionPath, attestation: permissionWorkspaceAttestation }) : undefined;
+                    workspacePath: executionPath, sessionCwd: childCwd,
+                    attestation: permissionWorkspaceAttestation }) : undefined;
+                // Human approval cannot expand an Attempt's filesystem boundary.
+                // Do not authorize a write that cannot produce exact local evidence.
+                if (workspace.kind === "repository" && permissionWorkspaceAttestation
+                  && ["write", "edit"].includes(target.operation) && !observeWrite) {
+                  await sink.emit({ type: "executor.progress",
+                    message: "Write rejected: use a bounded full-file write inside the supplied Attempt workspace.",
+                    at: new Date().toISOString() });
+                  return permissionResponseForDecision({ decision: "deny" }, requestOptions);
+                }
                 const resolution = await governedResolver({
                   toolCallId: request.toolCall.toolCallId,
                   title: request.toolCall.title,
@@ -1093,7 +1105,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   }
                   return "cancelled";
                 }
-                void session.prompt(promptForRun(input));
+                void session.prompt(promptForRun(input, childCwd));
                 for (;;) {
                   const message = await session.nextUpdate();
                   if (message.kind === "stop") return message.stopReason;

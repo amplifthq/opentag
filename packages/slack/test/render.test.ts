@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createActionReceiptPresentation, createDoctorSummaryPresentation, createFinalSummaryPresentation, createSourceThreadStatusPresentation, OpenTagApprovalPromptPresentationSchema } from "@opentag/core";
+import { composeTeamRelayThreadProjection, createActionReceiptPresentation, createDoctorSummaryPresentation, createFinalSummaryPresentation, createSourceThreadStatusPresentation, OpenTagApprovalPromptPresentationSchema } from "@opentag/core";
 import {
   createSlackActionReceiptBlocks,
   createSlackApprovalPromptBlocks,
@@ -14,12 +14,21 @@ import {
   markdownToSlackMrkdwn,
   renderSlackActionReceiptPresentation,
   renderSlackAcknowledgement,
+  renderSlackTeamRelayProjection,
   renderSlackFinalSummaryPresentation,
   renderSlackFinalResult,
   slackSourceReceiptReactionName
 } from "../src/render.js";
 
 describe("Slack callback rendering", () => {
+  it.each(["pending", "accepted"] as const)("hides routine %s delivery bookkeeping from the user card", state => {
+    const view = composeTeamRelayThreadProjection({ runId: "run_approval", generation: 1,
+      state: "running", controls: [], providerDelivery: { state },
+      approval: { state: "authorized", actionDescriptor: "workspace.write" } });
+    const text = renderSlackTeamRelayProjection(view);
+    expect(text).toContain("Approved once: workspace.write");
+    expect(text).not.toContain("Slack status delivery");
+  });
   it("renders immutable governed permission choices as native buttons", () => {
     const prompt = OpenTagApprovalPromptPresentationSchema.parse({
       kind: "approval_prompt",
