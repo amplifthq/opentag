@@ -86,7 +86,17 @@ export async function commitIsolatedRunChanges(input: {
       part === ".." || [".git", ".omx", ".codex", ".claude"].includes(part.toLowerCase()))) {
       throw new Error("local_commit_path_invalid");
     }
-    const parent = relative(target.workspace, await realpath(dirname(resolve(target.workspace, path))));
+    // A deleted directory has no realpath; validate its nearest existing ancestor.
+    let ancestor = dirname(resolve(target.workspace, path));
+    let existing: string | undefined;
+    while (!existing) {
+      existing = await realpath(ancestor).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return undefined;
+        throw error;
+      });
+      if (!existing) ancestor = dirname(ancestor);
+    }
+    const parent = relative(target.workspace, existing);
     if (isAbsolute(parent) || parent === ".." || parent.startsWith(`..${sep}`)) {
       throw new Error("local_commit_path_escape");
     }

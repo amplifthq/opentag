@@ -13,7 +13,9 @@ function fixture() {
   const repo = join(root, "repo"); const workspace = join(root, "attempt"); mkdirSync(repo);
   const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
   git(repo, "init", "-b", "main"); git(repo, "config", "user.name", "Test"); git(repo, "config", "user.email", "test@example.test");
-  writeFileSync(join(repo, "base.txt"), "base\n"); git(repo, "add", "."); git(repo, "commit", "-m", "base");
+  writeFileSync(join(repo, "base.txt"), "base\n");
+  mkdirSync(join(repo, "nested")); writeFileSync(join(repo, "nested", "delete.txt"), "tracked\n");
+  git(repo, "add", "."); git(repo, "commit", "-m", "base");
   const head = git(repo, "rev-parse", "HEAD");
   git(repo, "worktree", "add", "-b", "opentag/run_test", workspace);
   return { root, repo, workspace, git, head,
@@ -49,6 +51,15 @@ describe("Runner-owned isolated local commit", () => {
     await expect(commitIsolatedRunChanges({ runner: nodeCommandRunner, target, message: "no", assertCurrent: async () => true }))
       .rejects.toThrow("local_commit_workspace_not_isolated");
     expect(f.git(f.workspace, "rev-parse", "HEAD")).toBe(f.head);
+  });
+
+  it("commits tracked deletions after their containing directory is removed", async () => {
+    const f = fixture(); const target = await f.capture();
+    rmSync(join(f.workspace, "nested"), { recursive: true });
+    expect(await commitIsolatedRunChanges({ runner: nodeCommandRunner, target,
+      message: "delete tracked directory", assertCurrent: async () => true })).toBe(true);
+    expect(f.git(f.workspace, "diff", "HEAD^", "HEAD", "--name-status")).toBe("D\tnested/delete.txt");
+    expect(f.git(f.repo, "rev-parse", "HEAD")).toBe(f.head);
   });
 
   it("stops before commit when authority expires after staging, retaining local evidence", async () => {
