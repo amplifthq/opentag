@@ -163,7 +163,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     expect(requests).toEqual([]);
   });
 
-  it("creates one Slack anchor and uses update_message for later projections", async () => {
+  it("updates one Slack anchor without issuing action controls for terminal projections", async () => {
     await insertRun();
     const requests: any[] = [];
     const baseline = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_projection",
@@ -199,16 +199,35 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await repository.settleOrReadTerminal({ ...begun, outcome: "accepted",
       evidenceDigest: digest("evidence"), externalResourceId: "171.001",
       externalResourceDigest: digest("resource") });
+    let projectionStatus = "waiting_for_runner";
+    let controlIssueCount = 0;
     const service = createTeamRelayProjectionService({ pool: fixture.pool,
       hosted: { inspect: async () => ({ state: "queued", canonicalStatus: "queued",
-        status: "waiting_for_runner", queueClaimDeadline: new Date(now.getTime()+300_000).toISOString(),
+        status: projectionStatus, queueClaimDeadline: new Date(now.getTime()+300_000).toISOString(),
         outcome: null, terminalKind: null, terminalReason: null }) } as any,
+      controls: { async issueProjectionControls() {
+        controlIssueCount += 1;
+        return [{ kind: "approve", actionId: "opaque-approval", generation: 1 }];
+      } },
       producer: { async enqueue(value) { requests.push(value); } }, clock: { now: () => now } });
     await service.projectRun({ organizationId: "org_projection", runId: "run_projection" });
     expect(requests).toHaveLength(1);
     expect(requests[0].intent.operation).toBe("update");
     expect(requests[0].providerRequest.operation).toEqual({ kind: "update_message",
       channelId: "C1", messageTs: "171.001", threadTs: "1700000000.1" });
+    expect(controlIssueCount).toBe(1);
+    for (const status of ["proposal_ready", "ready_for_review", "failed", "cancelled",
+      "interrupted", "timed_out"]) {
+      projectionStatus = status;
+      const projected = await service.projectRun({ organizationId: "org_projection", runId: "run_projection" });
+      expect(projected.kind).toBe("queued");
+      expect(controlIssueCount).toBe(1);
+      expect(requests.at(-1).phase).toBe("terminal");
+      expect(requests.at(-1).providerRequest.presentation.blocks
+        .some((block: { type: string }) => block.type === "actions")).toBe(false);
+    }
+    projectionStatus = "waiting_for_runner";
+    requests.splice(1);
     const external=DeliveryIntentV2Schema.parse({...baseline,sideEffectIntentId:"external_rejected",
       idempotencyKey:"external_rejected",projectionPurpose:"external",
       presentationDigest:digest("external-rejected"),createdAt:new Date(now.getTime()+1).toISOString()});
