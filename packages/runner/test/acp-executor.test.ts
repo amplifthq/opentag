@@ -411,6 +411,23 @@ describe("ACP executor", () => {
     expect(existsSync(join(root, "outside-write.txt"))).toBe(false);
   });
 
+  it.each([false, true])("rejects outside repository writes with only the options resolver (attested: %s)", async attested => {
+    const repo = initRepo(); const root = tempDir("options-outside-write");
+    const permissionResolver = vi.fn(async () => ({ decision: "allow_once" as const }));
+    const executor = createAcpExecutor({ manifest: manifest("local-write-outside"), permissionResolver });
+    await executor.run({ ...input({ kind: "repository", path: repo }, "run_options_write"),
+      worktreeRoot: root,
+      ...(attested ? { attemptId: "attempt_options_write", attemptAuthority: {
+        attemptNumber: 1, fencingTokenDigest: `sha256:${"a".repeat(64)}`,
+        credentialId: "credential_options_write", leaseExpiresAt: "2099-01-01T00:00:00.000Z",
+      } } : {}),
+    }, { emit: async () => undefined });
+    expect(permissionResolver).not.toHaveBeenCalled();
+    expect(existsSync(join(root, "outside-write.txt"))).toBe(false);
+    expect(JSON.parse(git(repo, ["show", "opentag/run_options_write:acp-permission.json"])))
+      .toEqual({ outcome: { outcome: "selected", optionId: "reject-once" } });
+  });
+
   it.each(["local-write", "local-write-mismatch"])("uses native file readback, not tool success, for %s", async mode => {
     const repo = initRepo(); const reports: Array<{ outcome: string; provider: string; localWriteObservation?: unknown }> = [];
     const executor = createAcpExecutor({ manifest: manifest(mode) });

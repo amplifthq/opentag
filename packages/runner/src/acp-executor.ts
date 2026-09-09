@@ -970,7 +970,6 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 name: option.name,
                 kind: option.kind
               }));
-              const governedResolver = input.permissionResolver;
               const target = structuredPermissionTarget(ctx.params.toolCall.rawInput, ctx.params.toolCall.kind);
               const request = {
                 runId: input.runId,
@@ -984,48 +983,49 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 options: requestOptions,
                 permissionScopes: input.permissions?.map((permission) => permission.scope) ?? []
               };
+              if (workspace.kind === "repository" && workspaceAttestation
+                && input.attemptId && input.attemptAuthority) {
+                const refreshed = await attestAttemptWorkspace({ runner,
+                  workspacePath: executionPath, repositoryPath: workspace.path,
+                  workspaceId: workspaceAttestation.workspaceId,
+                  baseRevision: workspaceAttestation.baseRevision,
+                  attemptId: input.attemptId,
+                  attemptNumber: input.attemptAuthority.attemptNumber,
+                  fencingTokenDigest: input.attemptAuthority.fencingTokenDigest,
+                  credentialId: input.attemptAuthority.credentialId,
+                  leaseExpiresAt: workspaceAttestation.leaseExpiresAt });
+                if (refreshed.workspacePathDigest !== workspaceAttestation.workspacePathDigest
+                  || refreshed.repositoryPathDigest !== workspaceAttestation.repositoryPathDigest
+                  || refreshed.worktreeIdentityDigest !== workspaceAttestation.worktreeIdentityDigest
+                  || refreshed.baseRevision !== workspaceAttestation.baseRevision
+                  || refreshed.attemptId !== workspaceAttestation.attemptId
+                  || refreshed.attemptNumber !== workspaceAttestation.attemptNumber
+                  || refreshed.fencingTokenDigest !== workspaceAttestation.fencingTokenDigest
+                  || refreshed.credentialId !== workspaceAttestation.credentialId) {
+                  throw new Error("attempt_workspace_identity_changed_before_material_action");
+                }
+                workspaceAttestation = refreshed;
+                await sink.emit({ type: "executor.progress",
+                  message: "Attempt workspace re-attested before material authorization.",
+                  at: new Date().toISOString(), workspaceAttestation });
+              }
+              const permissionWorkspaceAttestation = workspaceAttestation;
+              const observeWrite = workspace.kind === "repository" && permissionWorkspaceAttestation
+                ? await prepareLocalWriteObservation({ rawInput: ctx.params.toolCall.rawInput,
+                  operation: target.operation, targetFingerprint: target.targetFingerprint,
+                  workspacePath: executionPath, sessionCwd: childCwd,
+                  attestation: permissionWorkspaceAttestation }) : undefined;
+              // Human approval cannot expand an Attempt's filesystem boundary.
+              // Apply the same write-evidence gate before choosing either resolver.
+              if (workspace.kind === "repository" && ["write", "edit"].includes(target.operation)
+                && (!permissionWorkspaceAttestation || observeWrite === undefined)) {
+                await sink.emit({ type: "executor.progress",
+                  message: "Write rejected: use a bounded full-file write inside the supplied Attempt workspace.",
+                  at: new Date().toISOString() });
+                return permissionResponseForDecision({ decision: "deny" }, requestOptions);
+              }
+              const governedResolver = input.permissionResolver;
               if (governedResolver) {
-                if (workspace.kind === "repository" && workspaceAttestation
-                  && input.attemptId && input.attemptAuthority) {
-                  const refreshed = await attestAttemptWorkspace({ runner,
-                    workspacePath: executionPath, repositoryPath: workspace.path,
-                    workspaceId: workspaceAttestation.workspaceId,
-                    baseRevision: workspaceAttestation.baseRevision,
-                    attemptId: input.attemptId,
-                    attemptNumber: input.attemptAuthority.attemptNumber,
-                    fencingTokenDigest: input.attemptAuthority.fencingTokenDigest,
-                    credentialId: input.attemptAuthority.credentialId,
-                    leaseExpiresAt: workspaceAttestation.leaseExpiresAt });
-                  if (refreshed.workspacePathDigest !== workspaceAttestation.workspacePathDigest
-                    || refreshed.repositoryPathDigest !== workspaceAttestation.repositoryPathDigest
-                    || refreshed.worktreeIdentityDigest !== workspaceAttestation.worktreeIdentityDigest
-                    || refreshed.baseRevision !== workspaceAttestation.baseRevision
-                    || refreshed.attemptId !== workspaceAttestation.attemptId
-                    || refreshed.attemptNumber !== workspaceAttestation.attemptNumber
-                    || refreshed.fencingTokenDigest !== workspaceAttestation.fencingTokenDigest
-                    || refreshed.credentialId !== workspaceAttestation.credentialId) {
-                    throw new Error("attempt_workspace_identity_changed_before_material_action");
-                  }
-                  workspaceAttestation = refreshed;
-                  await sink.emit({ type: "executor.progress",
-                    message: "Attempt workspace re-attested before material authorization.",
-                    at: new Date().toISOString(), workspaceAttestation });
-                }
-                const permissionWorkspaceAttestation = workspaceAttestation;
-                const observeWrite = workspace.kind === "repository" && permissionWorkspaceAttestation
-                  ? await prepareLocalWriteObservation({ rawInput: ctx.params.toolCall.rawInput,
-                    operation: target.operation, targetFingerprint: target.targetFingerprint,
-                    workspacePath: executionPath, sessionCwd: childCwd,
-                    attestation: permissionWorkspaceAttestation }) : undefined;
-                // Human approval cannot expand an Attempt's filesystem boundary.
-                // Do not authorize a write that cannot produce exact local evidence.
-                if (workspace.kind === "repository" && ["write", "edit"].includes(target.operation)
-                  && (!permissionWorkspaceAttestation || observeWrite === undefined)) {
-                  await sink.emit({ type: "executor.progress",
-                    message: "Write rejected: use a bounded full-file write inside the supplied Attempt workspace.",
-                    at: new Date().toISOString() });
-                  return permissionResponseForDecision({ decision: "deny" }, requestOptions);
-                }
                 const resolution = await governedResolver({
                   toolCallId: request.toolCall.toolCallId,
                   title: request.toolCall.title,
