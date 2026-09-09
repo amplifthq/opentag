@@ -400,6 +400,63 @@ describe("ACP executor", () => {
     expect(prompt).toContain(realpathSync(root) + "/run_outside-attempt_outside");
   });
 
+  it("rejects a repository write without an Attempt attestation before resolving permission", async () => {
+    const repo = initRepo(); const root = tempDir("unattested-write");
+    const permissionResolver = vi.fn(async () => ({ actionId: "outside", decision: "allow_once" as const, material: true }));
+    const executor = createAcpExecutor({ manifest: manifest("local-write-outside") });
+    await executor.run({ ...input({ kind: "repository", path: repo }, "run_unattested"),
+      worktreeRoot: root, permissionResolver,
+    }, { emit: async () => undefined });
+    expect(permissionResolver).not.toHaveBeenCalled();
+    expect(existsSync(join(root, "outside-write.txt"))).toBe(false);
+  });
+
+  it.each([false, true])("rejects outside repository writes with only the options resolver (attested: %s)", async attested => {
+    const repo = initRepo(); const root = tempDir("options-outside-write");
+    const permissionResolver = vi.fn(async () => ({ decision: "allow_once" as const }));
+    const executor = createAcpExecutor({ manifest: manifest("local-write-outside"), permissionResolver });
+    await executor.run({ ...input({ kind: "repository", path: repo }, "run_options_write"),
+      worktreeRoot: root,
+      ...(attested ? { attemptId: "attempt_options_write", attemptAuthority: {
+        attemptNumber: 1, fencingTokenDigest: `sha256:${"a".repeat(64)}`,
+        credentialId: "credential_options_write", leaseExpiresAt: "2099-01-01T00:00:00.000Z",
+      } } : {}),
+    }, { emit: async () => undefined });
+    expect(permissionResolver).not.toHaveBeenCalled();
+    expect(existsSync(join(root, "outside-write.txt"))).toBe(false);
+    expect(JSON.parse(git(repo, ["show", "opentag/run_options_write:acp-permission.json"])))
+      .toEqual({ outcome: { outcome: "selected", optionId: "reject-once" } });
+  });
+
+  it.each([
+    ["read", "input"], ["write", "input"], ["read", "options"], ["write", "options"],
+  ] as const)("rejects conflicting edit/%s operations before the %s resolver", async (operation, resolverSource) => {
+    const repo = initRepo(); const root = tempDir("conflicting-write");
+    const config = permissionWorkspace("conflicting-operation", {
+      OPENTAG_ACP_TEST_OPERATION: operation,
+    });
+    const configured = manifest("local-write-outside");
+    configured.bindings.agent.args.push(join(config, ".acp-test-config.json"));
+    const permissionResolver = vi.fn(async () => ({ actionId: "outside", decision: "allow_once" as const, material: true }));
+    const executor = createAcpExecutor({ manifest: configured,
+      ...(resolverSource === "options" ? { permissionResolver } : {}),
+    });
+    const emit = vi.fn(async () => undefined);
+    await executor.run({ ...input({ kind: "repository", path: repo }, "run_conflicting_write"),
+      worktreeRoot: root, attemptId: "attempt_conflicting_write",
+      attemptAuthority: { attemptNumber: 1, fencingTokenDigest: `sha256:${"a".repeat(64)}`,
+        credentialId: "credential_conflicting_write", leaseExpiresAt: "2099-01-01T00:00:00.000Z" },
+      ...(resolverSource === "input" ? { permissionResolver } : {}),
+    }, { emit });
+    expect(permissionResolver).not.toHaveBeenCalled();
+    expect(existsSync(join(root, "outside-write.txt"))).toBe(false);
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+      type: "executor.progress", message: "Write rejected: tool kind conflicts with the requested operation.",
+    }));
+    expect(JSON.parse(git(repo, ["show", "opentag/run_conflicting_write:acp-permission.json"])))
+      .toEqual({ outcome: { outcome: "selected", optionId: "reject-once" } });
+  });
+
   it.each(["local-write", "local-write-mismatch"])("uses native file readback, not tool success, for %s", async mode => {
     const repo = initRepo(); const reports: Array<{ outcome: string; provider: string; localWriteObservation?: unknown }> = [];
     const executor = createAcpExecutor({ manifest: manifest(mode) });

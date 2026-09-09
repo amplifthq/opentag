@@ -133,6 +133,8 @@ const app = acp
           status: "pending",
           rawInput: mode.startsWith("local-write") ? {
             file_path: writePath, content: "verified native bytes\n",
+            ...(fixtureConfig.OPENTAG_ACP_TEST_OPERATION !== undefined
+              ? { operation: fixtureConfig.OPENTAG_ACP_TEST_OPERATION } : {}),
           } : {
             provider: fixtureConfig.OPENTAG_ACP_TEST_PROVIDER ?? "npm",
             connectionId: fixtureConfig.OPENTAG_ACP_TEST_CONNECTION ?? "npm:team",
