@@ -20,8 +20,8 @@ function fixture() {
     operation: "edit", targetFingerprint: hash("exact-request"), workspacePath: root, attestation } };
 }
 
-it("observes bounded exact file contents without trusting a reported result", async () => {
-  const f = fixture(); const observe = await prepareLocalWriteObservation(f.input);
+it.each(["write", "edit"])("observes bounded exact %s contents without trusting a reported result", async operation => {
+  const f = fixture(); const observe = await prepareLocalWriteObservation({ ...f.input, operation });
   expect(observe).toBeTypeOf("function");
   expect(await observe!()).toBeUndefined();
   writeFileSync(f.path, "wrong\n"); expect(await observe!()).toBeUndefined();

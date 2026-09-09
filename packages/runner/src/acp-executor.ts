@@ -222,10 +222,15 @@ function structuredPermissionTarget(rawInput: unknown, kind: string | null | und
   resourceVersion?: string;
   targetConstraints?: Record<string, unknown>;
   targetFingerprint?: string;
-} {
+} | undefined {
   const rawRecord = rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
     ? rawInput as Record<string, unknown>
     : {};
+  const toolKind = kind?.trim().toLowerCase();
+  // A raw operation must not relabel a tool-declared write before authorization.
+  if (["write", "edit"].includes(toolKind ?? "") && Object.hasOwn(rawRecord, "operation")
+    && (typeof rawRecord["operation"] !== "string"
+      || rawRecord["operation"].trim().toLowerCase() !== toolKind)) return undefined;
   const safeTarget = credentialSafeTarget(rawRecord);
   const record = safeTarget && typeof safeTarget === "object" && !Array.isArray(safeTarget)
     ? safeTarget as Record<string, unknown>
@@ -971,6 +976,12 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 kind: option.kind
               }));
               const target = structuredPermissionTarget(ctx.params.toolCall.rawInput, ctx.params.toolCall.kind);
+              if (!target) {
+                await sink.emit({ type: "executor.progress",
+                  message: "Write rejected: tool kind conflicts with the requested operation.",
+                  at: new Date().toISOString() });
+                return permissionResponseForDecision({ decision: "deny" }, requestOptions);
+              }
               const request = {
                 runId: input.runId,
                 toolCall: {
