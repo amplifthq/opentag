@@ -400,6 +400,17 @@ describe("ACP executor", () => {
     expect(prompt).toContain(realpathSync(root) + "/run_outside-attempt_outside");
   });
 
+  it("rejects a repository write without an Attempt attestation before resolving permission", async () => {
+    const repo = initRepo(); const root = tempDir("unattested-write");
+    const permissionResolver = vi.fn(async () => ({ actionId: "outside", decision: "allow_once" as const, material: true }));
+    const executor = createAcpExecutor({ manifest: manifest("local-write-outside") });
+    await executor.run({ ...input({ kind: "repository", path: repo }, "run_unattested"),
+      worktreeRoot: root, permissionResolver,
+    }, { emit: async () => undefined });
+    expect(permissionResolver).not.toHaveBeenCalled();
+    expect(existsSync(join(root, "outside-write.txt"))).toBe(false);
+  });
+
   it.each(["local-write", "local-write-mismatch"])("uses native file readback, not tool success, for %s", async mode => {
     const repo = initRepo(); const reports: Array<{ outcome: string; provider: string; localWriteObservation?: unknown }> = [];
     const executor = createAcpExecutor({ manifest: manifest(mode) });

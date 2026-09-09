@@ -1019,8 +1019,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                     attestation: permissionWorkspaceAttestation }) : undefined;
                 // Human approval cannot expand an Attempt's filesystem boundary.
                 // Do not authorize a write that cannot produce exact local evidence.
-                if (workspace.kind === "repository" && permissionWorkspaceAttestation
-                  && ["write", "edit"].includes(target.operation) && !observeWrite) {
+                if (workspace.kind === "repository" && ["write", "edit"].includes(target.operation)
+                  && (!permissionWorkspaceAttestation || observeWrite === undefined)) {
                   await sink.emit({ type: "executor.progress",
                     message: "Write rejected: use a bounded full-file write inside the supplied Attempt workspace.",
                     at: new Date().toISOString() });
