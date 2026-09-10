@@ -38,7 +38,7 @@ importers:
     dependencies:
       '@hono/node-server':
         specifier: ^2.0.11
-        version: 2.0.12(hono@4.12.34)
+        version: 2.0.12(hono@4.13.5)
       '@opentag/control-protocol':
         specifier: workspace:*
         version: link:../../packages/control-protocol
@@ -71,7 +71,7 @@ importers:
         version: 1.170.29(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       hono:
         specifier: ^4.12.34
-        version: 4.12.34
+        version: 4.13.5
       pg:
         specifier: ^8.16.3
         version: 8.23.0
@@ -1090,8 +1090,8 @@ packages:
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
-  hono@4.12.34:
-    resolution: {integrity: sha512-GqXJqY/xJkJmuloTrnV1ZEXG3fqte+VjkUqoRNZXcrUidiUOP4fMSIHHY4tsqZBK++kVyWmt/AAfSUuy57/eSA==}
+  hono@4.13.5:
+    resolution: {integrity: sha512-O6+/eCYRkzzzy0rPWwKLiGBR1nFuUPZynnwjxN1MBA62NNqbT0wQEzQyK2gSO5yDIDB336sXQleAhOHrzlYyKw==}
     engines: {node: '>=16.9.0'}
 
   isbot@5.2.1:
@@ -1702,9 +1702,9 @@ snapshots:
   '@esbuild/win32-x64@0.28.1':
     optional: true
 
-  '@hono/node-server@2.0.12(hono@4.12.34)':
+  '@hono/node-server@2.0.12(hono@4.13.5)':
     dependencies:
-      hono: 4.12.34
+      hono: 4.13.5
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -2080,7 +2080,7 @@ snapshots:
   fsevents@2.3.3:
     optional: true
 
-  hono@4.12.34: {}
+  hono@4.13.5: {}
 
   isbot@5.2.1: {}
 
